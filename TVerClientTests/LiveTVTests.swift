@@ -61,17 +61,15 @@ final class LiveTVTests: XCTestCase {
         XCTAssertEqual(channel.currentProgram?.title, "配信休止")
     }
 
-    func testLiveResolverReturnsOfficialClearHLS() async throws {
+    func testLiveResolverUsesProjectKeyAndOmitsEmptyATI() async throws {
         LiveStubURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
             if path.hasSuffix("streaks_info_v2.json") {
-                return Self.response(#"{"tver-ntv":{"api_key":{"key01":"secret"}}}"#)
+                return Self.response(#"{"tver-simul-ntv":{"api_key":{"key01":"old-key","key02":"current-key"},"ad_template_id":{"ios":"","pc":""}}}"#)
             }
-            if path.hasSuffix("ad_template.json") {
-                return Self.response(#"{"tver-ntv":{"ios":"template"}}"#)
-            }
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"), "secret")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"), "current-key")
             XCTAssertEqual(request.url?.host, "playback.api.streaks.jp")
+            XCTAssertNil(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
             return Self.response(#"{"sources":[{"src":"https://official.example/live/master.m3u8","type":"application/x-mpegURL"}]}"#)
         }
         let channel = TVerLiveChannel(
@@ -79,8 +77,31 @@ final class LiveTVTests: XCTestCase {
             projectID: "tver-simul-ntv", mediaID: "ref:simul-ntv", apiKey: "ntv",
             currentProgram: nil, state: .onAir
         )
-        let url = try await LiveStreamResolver(session: session).resolveLiveStream(for: channel)
+        let august2026 = Date(timeIntervalSince1970: 1_788_001_620)
+        let resolver = LiveStreamResolver(session: session, dateProvider: { august2026 })
+        let url = try await resolver.resolveLiveStream(for: channel)
         XCTAssertEqual(url.absoluteString, "https://official.example/live/master.m3u8")
+    }
+
+    func testLiveResolverIncludesProjectATIWhenPublished() async throws {
+        LiveStubURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("streaks_info_v2.json") {
+                return Self.response(#"{"tver-splive-cx":{"api_key":{"key02":"current-key"},"ad_template_id":{"ios":"ios-template","pc":"pc-template"}}}"#)
+            }
+            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            XCTAssertEqual(components?.queryItems?.first(where: { $0.name == "ati" })?.value, "ios-template")
+            return Self.response(#"{"sources":[{"src":"https://official.example/special/master.m3u8","type":"application/vnd.apple.mpegurl"}]}"#)
+        }
+        let channel = TVerLiveChannel(
+            id: "special", name: "Special Live", iconURL: nil,
+            projectID: "tver-splive-cx", mediaID: "ref:special", apiKey: "special",
+            currentProgram: nil, state: .onAir
+        )
+        let august2026 = Date(timeIntervalSince1970: 1_788_001_620)
+        let resolver = LiveStreamResolver(session: session, dateProvider: { august2026 })
+        let url = try await resolver.resolveLiveStream(for: channel)
+        XCTAssertEqual(url.absoluteString, "https://official.example/special/master.m3u8")
     }
 
     private static func response(_ json: String) -> (HTTPURLResponse, Data) {

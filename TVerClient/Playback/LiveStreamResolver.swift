@@ -5,23 +5,25 @@ import Foundation
 /// channel's official TVer page instead.
 final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
     private static let playerInfoURL = URL(string: "https://player.tver.jp/player/streaks_info_v2.json")!
-    private static let adTemplateURL = URL(string: "https://player.tver.jp/player/ad_template.json")!
     private let session: URLSession
+    private let dateProvider: () -> Date
 
-    init(session: URLSession = .shared) { self.session = session }
+    init(session: URLSession = .shared, dateProvider: @escaping () -> Date = Date.init) {
+        self.session = session
+        self.dateProvider = dateProvider
+    }
 
     func resolveLiveStream(for channel: TVerLiveChannel) async throws -> URL {
         let info = try await json(from: Self.playerInfoURL)
-        let templates = try await json(from: Self.adTemplateURL)
-        let configurationKey = "tver-\(channel.apiKey)"
-        guard let projectInfo = (info[configurationKey] ?? info[channel.apiKey]) as? [String: Any],
-              let keyObject = projectInfo["api_key"] as? [String: Any],
-              let template = (templates[configurationKey] ?? templates[channel.apiKey]) as? [String: Any],
-              let ati = Self.string(template["ios"]) ?? Self.string(template["pc"]) else {
+        // Current simulcast metadata is keyed by projectID (for example
+        // `tver-simul-ntv`). The legacy station keys remain as a fallback only.
+        let legacyKey = "tver-\(channel.apiKey)"
+        guard let projectInfo = (info[channel.projectID] ?? info[legacyKey] ?? info[channel.apiKey]) as? [String: Any],
+              let keyObject = projectInfo["api_key"] as? [String: Any] else {
             throw TVerClientError.noPlayableStream
         }
 
-        let apiKeys = keyObject.keys.sorted().compactMap { Self.string(keyObject[$0]) }
+        let apiKeys = Self.orderedAPIKeys(keyObject, at: dateProvider())
         guard !apiKeys.isEmpty else { throw TVerClientError.noPlayableStream }
         let referenceID = channel.mediaID.replacingOccurrences(of: "ref:", with: "", options: [.anchored, .caseInsensitive])
         guard let project = Self.pathSegment(channel.projectID),
@@ -29,7 +31,14 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
               var components = URLComponents(string: "https://playback.api.streaks.jp/v1/projects/\(project)/medias/ref:\(reference)") else {
             throw TVerClientError.invalidResponse
         }
-        components.queryItems = [URLQueryItem(name: "ati", value: ati)]
+
+        // Live projects publish their ad template alongside the rotating keys.
+        // Simulcast projects commonly use an empty template, in which case the
+        // official web player omits `ati` entirely.
+        if let templates = projectInfo["ad_template_id"] as? [String: Any],
+           let ati = Self.string(templates["ios"]) ?? Self.string(templates["pc"]) {
+            components.queryItems = [URLQueryItem(name: "ati", value: ati)]
+        }
         guard let url = components.url else { throw TVerClientError.invalidResponse }
 
         for apiKey in apiKeys {
@@ -67,6 +76,20 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
             throw TVerClientError.noPlayableStream
         }
         return data
+    }
+
+    private static func orderedAPIKeys(_ keyObject: [String: Any], at date: Date) -> [String] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        let month = calendar.component(.month, from: date)
+        let slot = month % 6 == 0 ? 6 : month % 6
+        let preferredName = String(format: "key%02d", slot)
+
+        var names = keyObject.keys.sorted()
+        if let index = names.firstIndex(of: preferredName) {
+            names.insert(names.remove(at: index), at: 0)
+        }
+        return names.compactMap { string(keyObject[$0]) }
     }
 
     private static func addOfficialHeaders(to request: inout URLRequest) {
