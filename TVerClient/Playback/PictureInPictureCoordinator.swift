@@ -89,7 +89,10 @@ final class AVPictureInPictureControllerDriver: PictureInPictureControllerDrivin
     }
 
     init(playerLayer: AVPlayerLayer) {
-        controller = AVPictureInPictureController(playerLayer: playerLayer)
+        guard let controller = AVPictureInPictureController(playerLayer: playerLayer) else {
+            preconditionFailure("Picture in Picture controller could not be created")
+        }
+        self.controller = controller
         possibilityObservation = controller.observe(
             \.isPictureInPicturePossible,
             options: [.new]
