@@ -566,6 +566,7 @@ private struct LiveChannelCard: View {
 private struct LivePlaybackView: View {
     let channel: TVerLiveChannel
     @ObservedObject var playbackController: PlaybackController
+    @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -576,11 +577,11 @@ private struct LivePlaybackView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    VideoPlayer(player: playbackController.player)
-                        .frame(maxWidth: .infinity).aspectRatio(16 / 9, contentMode: .fit)
-                        .background(Color.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .accessibilityLabel("\(channel.name)のライブ動画プレイヤー")
+                    PlaybackVideoSurface(
+                        player: playbackController.player,
+                        pictureInPicture: pictureInPicture,
+                        accessibilityLabel: "\(channel.name)のライブ動画プレイヤー"
+                    )
 
                     VStack(alignment: .leading, spacing: 7) {
                         Label("配信中", systemImage: "dot.radiowaves.left.and.right")
@@ -593,6 +594,8 @@ private struct LivePlaybackView: View {
                     }
 
                     playbackStatus
+
+                    PictureInPictureControl(coordinator: pictureInPicture)
 
                     ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
                         Label("このライブ配信を共有", systemImage: "square.and.arrow.up")
@@ -755,28 +758,12 @@ private struct ProgramThumbnail: View {
     let url: URL?
 
     var body: some View {
-        AsyncImage(url: url, transaction: Transaction(animation: .easeInOut)) { phase in
-            switch phase {
-            case .empty:
-                ZStack {
-                    thumbnailBackground
-                    ProgressView()
-                        .tint(.secondary)
-                }
-            case let .success(image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            case .failure:
-                ZStack {
-                    thumbnailBackground
-                    Image(systemName: "photo.badge.exclamationmark")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("サムネイルを表示できません")
-                }
-            @unknown default:
+        CachedProgramImage(url: url, contentMode: .fill) {
+            ZStack {
                 thumbnailBackground
+                Image(systemName: "photo")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
             }
         }
         .background(Color(uiColor: .tertiarySystemFill))
@@ -807,6 +794,7 @@ private struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
     @ObservedObject var libraryStore: ProgramLibraryStore
+    @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -818,12 +806,11 @@ private struct PlaybackView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    VideoPlayer(player: playbackController.player)
-                        .frame(maxWidth: .infinity)
-                        .aspectRatio(16 / 9, contentMode: .fit)
-                        .background(Color.black)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .accessibilityLabel("\(program.seriesTitle)の動画プレイヤー")
+                    PlaybackVideoSurface(
+                        player: playbackController.player,
+                        pictureInPicture: pictureInPicture,
+                        accessibilityLabel: "\(program.seriesTitle)の動画プレイヤー"
+                    )
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text(program.seriesTitle).font(.title2.bold())
@@ -856,6 +843,8 @@ private struct PlaybackView: View {
                     .controlSize(.large)
 
                     playbackStatus
+
+                    PictureInPictureControl(coordinator: pictureInPicture)
 
                     if !(isCurrent && playbackController.errorPresentation != nil) {
                         Button { openURL(program.webURL) } label: {

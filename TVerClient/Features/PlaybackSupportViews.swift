@@ -94,3 +94,115 @@ struct PlaybackTimelineView: View {
         return String(format: "%d:%02d", minutes, seconds)
     }
 }
+
+@MainActor
+struct PlaybackVideoSurface: View {
+    let player: AVPlayer
+    @ObservedObject var pictureInPicture: PictureInPictureCoordinator
+    let accessibilityLabel: String
+    var cornerRadius: CGFloat = 12
+
+    var body: some View {
+        PlayerLayerView(player: player, pictureInPicture: pictureInPicture)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+@MainActor
+struct PictureInPictureControl: View {
+    @ObservedObject var coordinator: PictureInPictureCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: togglePictureInPicture) {
+                Label(buttonTitle, systemImage: buttonSystemImage)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!isEnabled)
+            .accessibilityLabel(buttonTitle)
+            .accessibilityValue(statusDescription)
+            .accessibilityHint(accessibilityHint)
+
+            if let errorMessage = coordinator.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("ピクチャ・イン・ピクチャのエラー。\(errorMessage)")
+            }
+        }
+    }
+
+    private var isEnabled: Bool {
+        switch coordinator.state {
+        case .active:
+            return true
+        case .starting, .stopping:
+            return false
+        case .inactive, .failed:
+            return coordinator.availability == .available
+        }
+    }
+
+    private var buttonTitle: String {
+        switch coordinator.state {
+        case .active, .stopping:
+            return "ピクチャ・イン・ピクチャを終了"
+        case .starting:
+            return "ピクチャ・イン・ピクチャを開始中"
+        case .inactive, .failed:
+            return "ピクチャ・イン・ピクチャを開始"
+        }
+    }
+
+    private var buttonSystemImage: String {
+        switch coordinator.state {
+        case .active, .stopping:
+            return "pip.exit"
+        case .inactive, .starting, .failed:
+            return "pip.enter"
+        }
+    }
+
+    private var statusDescription: String {
+        switch coordinator.state {
+        case .active:
+            return "使用中"
+        case .starting:
+            return "開始中"
+        case .stopping:
+            return "終了中"
+        case .failed:
+            return "開始できませんでした"
+        case .inactive:
+            switch coordinator.availability {
+            case .available:
+                return "利用可能"
+            case .unavailable:
+                return "再生準備中"
+            case .unsupported:
+                return "このデバイスでは利用できません"
+            }
+        }
+    }
+
+    private var accessibilityHint: String {
+        if coordinator.state == .active {
+            return "動画をアプリ内のプレイヤーに戻します"
+        }
+        return "ほかのアプリを使用しながら動画を小さいウインドウで再生します"
+    }
+
+    private func togglePictureInPicture() {
+        if coordinator.isActive {
+            coordinator.stop()
+        } else {
+            coordinator.start()
+        }
+    }
+}

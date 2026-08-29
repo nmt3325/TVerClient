@@ -457,12 +457,8 @@ private struct ProgramGuideGrid: View {
             HStack(spacing: 0) {
                 ForEach(guide) { item in
                     HStack(spacing: 8) {
-                        AsyncImage(url: item.channel.iconURL) { phase in
-                            if case let .success(image) = phase {
-                                image.resizable().scaledToFit()
-                            } else {
-                                Image(systemName: "tv").foregroundStyle(.secondary)
-                            }
+                        CachedProgramImage(url: item.channel.iconURL, contentMode: .fit) {
+                            Image(systemName: "tv").foregroundStyle(.secondary)
                         }
                         .frame(width: 28, height: 28)
                         .accessibilityHidden(true)
@@ -671,6 +667,7 @@ private struct ProgramGuideDetailSheet: View {
     let selection: ProgramGuideSelection
     @ObservedObject var playbackController: PlaybackController
     let notificationScheduler: ProgramNotificationScheduler
+    @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var requestedPlayback = false
@@ -722,20 +719,20 @@ private struct ProgramGuideDetailSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if requestedPlayback {
-                        VideoPlayer(player: playbackController.player)
-                            .aspectRatio(16 / 9, contentMode: .fit)
-                            .background(Color.black)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .accessibilityLabel("\(selection.program.seriesTitle)のライブ動画プレイヤー")
+                        PlaybackVideoSurface(
+                            player: playbackController.player,
+                            pictureInPicture: pictureInPicture,
+                            accessibilityLabel: "\(selection.program.seriesTitle)のライブ動画プレイヤー",
+                            cornerRadius: 10
+                        )
                     } else {
-                        AsyncImage(url: selection.program.thumbnailURL ?? selection.channel.iconURL) { phase in
-                            if case let .success(image) = phase {
-                                image.resizable().scaledToFill()
-                            } else {
-                                ZStack {
-                                    Color(uiColor: .secondarySystemBackground)
-                                    Image(systemName: "tv").font(.largeTitle).foregroundStyle(.secondary)
-                                }
+                        CachedProgramImage(
+                            url: selection.program.thumbnailURL ?? selection.channel.iconURL,
+                            contentMode: .fill
+                        ) {
+                            ZStack {
+                                Color(uiColor: .secondarySystemBackground)
+                                Image(systemName: "tv").font(.largeTitle).foregroundStyle(.secondary)
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -792,6 +789,10 @@ private struct ProgramGuideDetailSheet: View {
                         .controlSize(.large)
                         .disabled(!canPlay || (requestedPlayback && playbackController.state == .resolving))
                         .accessibilityHint(canPlay ? "現在放送中の番組を再生します" : "放送中のみ再生できます")
+                    }
+
+                    if requestedPlayback {
+                        PictureInPictureControl(coordinator: pictureInPicture)
                     }
 
                     ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
