@@ -12,6 +12,8 @@
 		593A1116BD21A802A4B02FDA /* PreviewFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */; };
 		5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26DFE41E5BF9011519303CBB /* Assets.xcassets */; };
 		5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B037BCAAE8FA70B3D86638 /* BrightcoveStreamResolver.swift */; };
+		6F4775D1C3B2444D9254128F /* TVerResponseCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */; };
+		6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */; };
 		76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98541A0DE8DC22D472A22948 /* LiveTVTests.swift */; };
 		8FB4F5C69927BE3AA196012B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C65634372978E5370261875 /* Models.swift */; };
 		CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */; };
@@ -49,8 +51,10 @@
 		7C62F312991CBB58C678574C /* ProgramGuideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramGuideTests.swift; sourceTree = "<group>"; };
 		812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackController.swift; sourceTree = "<group>"; };
 		8400D2B1B6B7406F0B6900F9 /* ProgramGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramGuideView.swift; sourceTree = "<group>"; };
+		8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIClientCacheTests.swift; sourceTree = "<group>"; };
 		98541A0DE8DC22D472A22948 /* LiveTVTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVTests.swift; sourceTree = "<group>"; };
 		9B694A98CF622006290A9BB2 /* UsabilityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityModels.swift; sourceTree = "<group>"; };
+		9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerResponseCache.swift; sourceTree = "<group>"; };
 		C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixture.swift; sourceTree = "<group>"; };
 		FB028B37C45A52314CECCF58 /* TVerClient.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TVerClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -71,6 +75,7 @@
 			children = (
 				3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */,
 				75AC98889C8008622C1031D7 /* TVerAPIClient.swift */,
+				9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -100,6 +105,7 @@
 				98541A0DE8DC22D472A22948 /* LiveTVTests.swift */,
 				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
 				7C62F312991CBB58C678574C /* ProgramGuideTests.swift */,
+				8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */,
 				36207CBF65F4346306A8B03C /* UsabilityTests.swift */,
 			);
 			path = TVerClientTests;
@@ -250,6 +256,7 @@
 				76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */,
 				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
 				10F35AAD9989DA4237AA1D05 /* ProgramGuideTests.swift in Sources */,
+				6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */,
 				DF63189119EBBED42C1235AB /* UsabilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -268,6 +275,7 @@
 				F9891FBF03F1548A10B5C3EC /* RootTabView.swift in Sources */,
 				ED0FE3115DE2C7F695B210BA /* TVerAPIClient.swift in Sources */,
 				D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */,
+				6F4775D1C3B2444D9254128F /* TVerResponseCache.swift in Sources */,
 				E128732BF26ECBCE412CC806 /* UsabilityModels.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

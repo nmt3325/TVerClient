@@ -8,15 +8,36 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private static let maximumConcurrentRequests = 4
 
     private let session: URLSession
+    private let responseCache: TVerResponseCache
+    private let cacheTTL: TimeInterval
+    private let staleIfErrorTTL: TimeInterval
+    private let dateProvider: @Sendable () -> Date
 
-    init(session: URLSession = .shared) {
+    init(
+        session: URLSession = .shared,
+        responseCache: TVerResponseCache = TVerResponseCache(),
+        cacheTTL: TimeInterval = 60,
+        staleIfErrorTTL: TimeInterval = 15 * 60,
+        dateProvider: @escaping @Sendable () -> Date = Date.init
+    ) {
         self.session = session
+        self.responseCache = responseCache
+        self.cacheTTL = max(0, cacheTTL)
+        self.staleIfErrorTTL = max(0, staleIfErrorTTL)
+        self.dateProvider = dateProvider
     }
 
     func fetchSchedule() async throws -> [ProgramDay] {
+        try await fetchSchedule(forceRefresh: false)
+    }
+
+    func fetchSchedule(forceRefresh: Bool) async throws -> [ProgramDay] {
         let credentials = try await createBrowserCredentials()
 
-        if let rankedEpisodes = try? await fetchEpisodeRanking(credentials: credentials),
+        if let rankedEpisodes = try? await fetchEpisodeRanking(
+            credentials: credentials,
+            forceRefresh: forceRefresh
+        ),
            !rankedEpisodes.isEmpty
         {
             let rankedProgramDays = makeProgramDays(from: rankedEpisodes)
@@ -25,7 +46,10 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             }
         }
 
-        let seriesIDs = try await fetchRankedSeriesIDs(credentials: credentials)
+        let seriesIDs = try await fetchRankedSeriesIDs(
+            credentials: credentials,
+            forceRefresh: forceRefresh
+        )
         guard !seriesIDs.isEmpty else { return [] }
 
         var orderedEpisodes: [EpisodeContent] = []
@@ -40,7 +64,11 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 for (offset, seriesID) in batch.enumerated() {
                     group.addTask { [self] in
                         do {
-                            let episodes = try await fetchEpisodes(seriesID: seriesID, credentials: credentials)
+                            let episodes = try await fetchEpisodes(
+                                seriesID: seriesID,
+                                credentials: credentials,
+                                forceRefresh: forceRefresh
+                            )
                             return (offset, .success(episodes))
                         } catch let error as TVerClientError {
                             return (offset, .failure(error))
@@ -97,9 +125,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return Credentials(uid: result.platformUID, token: result.platformToken)
     }
 
-    private func fetchEpisodeRanking(credentials: Credentials) async throws -> [EpisodeContent] {
+    private func fetchEpisodeRanking(
+        credentials: Credentials,
+        forceRefresh: Bool
+    ) async throws -> [EpisodeContent] {
         let request = try serviceRequest(path: "callEpisodeRanking", credentials: credentials)
-        let data = try await perform(request)
+        let data = try await perform(request, forceRefresh: forceRefresh)
         let response: EpisodeRankingResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
 
@@ -129,9 +160,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return episodes
     }
 
-    private func fetchRankedSeriesIDs(credentials: Credentials) async throws -> [String] {
+    private func fetchRankedSeriesIDs(
+        credentials: Credentials,
+        forceRefresh: Bool
+    ) async throws -> [String] {
         let request = try serviceRequest(path: "callRanking", credentials: credentials)
-        let data = try await perform(request)
+        let data = try await perform(request, forceRefresh: forceRefresh)
         let response: RankingResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
 
@@ -155,10 +189,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return seriesIDs
     }
 
-    private func fetchEpisodes(seriesID: String, credentials: Credentials) async throws -> [EpisodeContent] {
+    private func fetchEpisodes(
+        seriesID: String,
+        credentials: Credentials,
+        forceRefresh: Bool
+    ) async throws -> [EpisodeContent] {
         let encodedSeriesID = seriesID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? seriesID
         let request = try serviceRequest(path: "callSeriesEpisodes/\(encodedSeriesID)", credentials: credentials)
-        let data = try await perform(request)
+        let data = try await perform(request, forceRefresh: forceRefresh)
         let response: SeriesEpisodesResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
 
@@ -194,20 +232,74 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return request
     }
 
-    private func perform(_ request: URLRequest) async throws -> Data {
+    private func perform(_ request: URLRequest, forceRefresh: Bool = false) async throws -> Data {
+        guard let cacheKey = responseCacheKey(for: request) else {
+            return try await performUncached(request)
+        }
+
+        let now = dateProvider()
+        let cached = await responseCache.snapshot(for: cacheKey)
+        if !forceRefresh, let cached, cacheAge(of: cached, at: now) < cacheTTL {
+            return cached.data
+        }
+
+        var conditionalRequest = request
+        if let cached {
+            if let eTag = cached.eTag {
+                conditionalRequest.setValue(eTag, forHTTPHeaderField: "If-None-Match")
+            }
+            if let lastModified = cached.lastModified {
+                conditionalRequest.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+            }
+        }
+
+        do {
+            let (data, response) = try await session.data(for: conditionalRequest)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw TVerClientError.invalidResponse
+            }
+
+            if httpResponse.statusCode == 304, let cached {
+                await responseCache.markRevalidated(cached, for: cacheKey, at: now)
+                return cached.data
+            }
+
+            guard (200 ..< 300).contains(httpResponse.statusCode) else {
+                if isTransient(statusCode: httpResponse.statusCode),
+                   let cached,
+                   canUseStale(cached, at: now)
+                {
+                    return cached.data
+                }
+                throw apiError(statusCode: httpResponse.statusCode, data: data)
+            }
+
+            await responseCache.store(
+                data: data,
+                for: cacheKey,
+                at: now,
+                eTag: httpResponse.value(forHTTPHeaderField: "ETag"),
+                lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified")
+            )
+            return data
+        } catch let error as TVerClientError {
+            throw error
+        } catch {
+            if let cached, canUseStale(cached, at: now) {
+                return cached.data
+            }
+            throw TVerClientError.normalized(from: error)
+        }
+    }
+
+    private func performUncached(_ request: URLRequest) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw TVerClientError.invalidResponse
             }
             guard (200 ..< 300).contains(httpResponse.statusCode) else {
-                if let status = try? JSONDecoder().decode(APIStatus.self, from: data),
-                   let message = status.message,
-                   !message.isEmpty
-                {
-                    throw TVerClientError.api(message)
-                }
-                throw TVerClientError.api("TVer APIでHTTP \(httpResponse.statusCode)エラーが発生しました。")
+                throw apiError(statusCode: httpResponse.statusCode, data: data)
             }
             return data
         } catch let error as TVerClientError {
@@ -215,6 +307,43 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         } catch {
             throw TVerClientError.normalized(from: error)
         }
+    }
+
+    private func responseCacheKey(for request: URLRequest) -> String? {
+        guard request.httpMethod == "GET",
+              let url = request.url,
+              url.scheme == "https",
+              url.host == "platform-api.tver.jp",
+              url.path.hasPrefix("/service/api/v1/")
+        else {
+            return nil
+        }
+
+        // The API's query contains short-lived platform credentials. Deliberately
+        // exclude the entire query so tokens or user identifiers never enter cache state.
+        return "\(url.host ?? "")\(url.path)"
+    }
+
+    private func cacheAge(of snapshot: TVerResponseCache.Snapshot, at date: Date) -> TimeInterval {
+        max(0, date.timeIntervalSince(snapshot.storedAt))
+    }
+
+    private func canUseStale(_ snapshot: TVerResponseCache.Snapshot, at date: Date) -> Bool {
+        cacheAge(of: snapshot, at: date) <= cacheTTL + staleIfErrorTTL
+    }
+
+    private func isTransient(statusCode: Int) -> Bool {
+        statusCode == 408 || statusCode == 425 || statusCode == 429 || (500 ... 599).contains(statusCode)
+    }
+
+    private func apiError(statusCode: Int, data: Data) -> TVerClientError {
+        if let status = try? JSONDecoder().decode(APIStatus.self, from: data),
+           let message = status.message,
+           !message.isEmpty
+        {
+            return .api(message)
+        }
+        return .api("TVer APIでHTTP \(statusCode)エラーが発生しました。")
     }
 
     private func decode<Response: Decodable>(_ data: Data) throws -> Response {
@@ -358,15 +487,24 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     }
 
     func fetchLiveChannels() async throws -> [TVerLiveChannel] {
+        try await fetchLiveChannels(forceRefresh: false)
+    }
+
+    func fetchLiveChannels(forceRefresh: Bool) async throws -> [TVerLiveChannel] {
         let credentials = try await createBrowserCredentials()
-        let rawChannels = try await fetchRawLiveChannels(credentials: credentials)
+        let rawChannels = try await fetchRawLiveChannels(
+            credentials: credentials,
+            forceRefresh: forceRefresh
+        )
         let now = Date()
 
         return await withTaskGroup(of: (Int, TVerLiveChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
                     let timeline = (try? await fetchLiveTimeline(
-                        channelID: raw.channel.id!, credentials: credentials
+                        channelID: raw.channel.id!,
+                        credentials: credentials,
+                        forceRefresh: forceRefresh
                     )) ?? []
                     let current = timeline.first { $0.startAt <= now && now < $0.endAt }
                     return (index, makeLiveChannel(raw: raw, currentProgram: current))
@@ -381,15 +519,24 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     }
 
     func fetchProgramGuide() async throws -> [TVerGuideChannel] {
+        try await fetchProgramGuide(forceRefresh: false)
+    }
+
+    func fetchProgramGuide(forceRefresh: Bool) async throws -> [TVerGuideChannel] {
         let credentials = try await createBrowserCredentials()
-        let rawChannels = try await fetchRawLiveChannels(credentials: credentials)
+        let rawChannels = try await fetchRawLiveChannels(
+            credentials: credentials,
+            forceRefresh: forceRefresh
+        )
         let now = Date()
 
         return await withTaskGroup(of: (Int, TVerGuideChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
                     let timeline = ((try? await fetchLiveTimeline(
-                        channelID: raw.channel.id!, credentials: credentials
+                        channelID: raw.channel.id!,
+                        credentials: credentials,
+                        forceRefresh: forceRefresh
                     )) ?? []).sorted { $0.startAt < $1.startAt }
                     let current = timeline.first { $0.startAt <= now && now < $0.endAt }
                     return (index, TVerGuideChannel(
@@ -406,8 +553,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         }
     }
 
-    private func fetchRawLiveChannels(credentials: Credentials) async throws -> [LiveChannelContent] {
-        let data = try await perform(serviceRequest(path: "callLiveChannel", credentials: credentials))
+    private func fetchRawLiveChannels(
+        credentials: Credentials,
+        forceRefresh: Bool
+    ) async throws -> [LiveChannelContent] {
+        let request = try serviceRequest(path: "callLiveChannel", credentials: credentials)
+        let data = try await perform(request, forceRefresh: forceRefresh)
         let response: LiveChannelResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
         guard let items = response.result?.contents else { throw TVerClientError.invalidResponse }
@@ -425,10 +576,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
 
     private func fetchLiveTimeline(
         channelID: String,
-        credentials: Credentials
+        credentials: Credentials,
+        forceRefresh: Bool
     ) async throws -> [TVerLiveProgram] {
         let pathID = channelID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelID
-        let data = try await perform(serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials))
+        let request = try serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials)
+        let data = try await perform(request, forceRefresh: forceRefresh)
         let response: LiveTimelineResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
         return (response.result?.contents ?? []).compactMap { makeLiveProgram(item: $0, channelID: channelID) }

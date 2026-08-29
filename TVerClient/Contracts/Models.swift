@@ -104,6 +104,13 @@ enum TVerClientError: LocalizedError, Equatable {
 
 protocol TVerCatalogServicing: Sendable {
     func fetchSchedule() async throws -> [ProgramDay]
+    func fetchSchedule(forceRefresh: Bool) async throws -> [ProgramDay]
+}
+
+extension TVerCatalogServicing {
+    func fetchSchedule(forceRefresh _: Bool) async throws -> [ProgramDay] {
+        try await fetchSchedule()
+    }
 }
 
 protocol TVerStreamResolving: Sendable {
@@ -112,10 +119,24 @@ protocol TVerStreamResolving: Sendable {
 
 protocol TVerLiveServicing: Sendable {
     func fetchLiveChannels() async throws -> [TVerLiveChannel]
+    func fetchLiveChannels(forceRefresh: Bool) async throws -> [TVerLiveChannel]
+}
+
+extension TVerLiveServicing {
+    func fetchLiveChannels(forceRefresh _: Bool) async throws -> [TVerLiveChannel] {
+        try await fetchLiveChannels()
+    }
 }
 
 protocol TVerProgramGuideServicing: Sendable {
     func fetchProgramGuide() async throws -> [TVerGuideChannel]
+    func fetchProgramGuide(forceRefresh: Bool) async throws -> [TVerGuideChannel]
+}
+
+extension TVerProgramGuideServicing {
+    func fetchProgramGuide(forceRefresh _: Bool) async throws -> [TVerGuideChannel] {
+        try await fetchProgramGuide()
+    }
 }
 
 protocol TVerLiveStreamResolving: Sendable {

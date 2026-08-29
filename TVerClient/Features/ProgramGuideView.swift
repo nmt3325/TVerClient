@@ -35,7 +35,7 @@ final class ProgramGuideViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         do {
-            let response = try await service.fetchProgramGuide()
+            let response = try await service.fetchProgramGuide(forceRefresh: hasLoaded)
             #if DEBUG
                 guide = response.contains(where: { !$0.programs.isEmpty }) || !usesPreviewFallback
                     ? response : PreviewFixture.programGuide
