@@ -161,10 +161,10 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     var errorMessage: String? { lastFailure?.localizedDescription }
 
     func attach(to playerLayer: AVPlayerLayer) {
-        guard attachedLayer !== playerLayer else {
-            refreshAvailability()
-            return
-        }
+        // SwiftUI may call updateUIView repeatedly while observing this object.
+        // Republishing availability from that update path creates a feedback
+        // loop that can starve the view task responsible for starting playback.
+        guard attachedLayer !== playerLayer else { return }
 
         detach()
         attachedLayer = playerLayer
@@ -229,7 +229,9 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     }
 
     private func setPossible(_ possible: Bool) {
-        availability = possible ? .available : .unavailable
+        let newAvailability: PictureInPictureAvailability = possible ? .available : .unavailable
+        guard availability != newAvailability else { return }
+        availability = newAvailability
     }
 
     private func fail(with failure: PictureInPictureFailure) {
