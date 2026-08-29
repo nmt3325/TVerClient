@@ -4,7 +4,7 @@ final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
     private static let staticsBaseURL = URL(string: "https://statics.tver.jp")!
-    private static let maximumSeriesCount = 12
+    private static let maximumRankedContentCount = 12
     private static let maximumConcurrentRequests = 4
 
     private let session: URLSession
@@ -15,6 +15,13 @@ final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
 
     func fetchSchedule() async throws -> [ProgramDay] {
         let credentials = try await createBrowserCredentials()
+
+        if let rankedEpisodes = try? await fetchEpisodeRanking(credentials: credentials),
+           !rankedEpisodes.isEmpty {
+            let rankedProgramDays = makeProgramDays(from: rankedEpisodes)
+            if !rankedProgramDays.isEmpty { return rankedProgramDays }
+        }
+
         let seriesIDs = try await fetchRankedSeriesIDs(credentials: credentials)
         guard !seriesIDs.isEmpty else { return [] }
 
@@ -84,6 +91,35 @@ final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
         return Credentials(uid: result.platformUID, token: result.platformToken)
     }
 
+    private func fetchEpisodeRanking(credentials: Credentials) async throws -> [EpisodeContent] {
+        let request = try serviceRequest(path: "callEpisodeRanking", credentials: credentials)
+        let data = try await perform(request)
+        let response: EpisodeRankingResponse = try decode(data)
+        try validateAPIResponse(code: response.code, message: response.message)
+
+        guard let sections = response.result?.contents else {
+            throw TVerClientError.invalidResponse
+        }
+
+        var seen = Set<String>()
+        var episodes: [EpisodeContent] = []
+
+        for section in sections {
+            for item in section.contents ?? [] where item.type == "episode" {
+                guard let episode = item.content,
+                      let episodeID = episode.id,
+                      !episodeID.isEmpty,
+                      seen.insert(episodeID).inserted else {
+                    continue
+                }
+                episodes.append(episode)
+                if episodes.count == Self.maximumRankedContentCount { return episodes }
+            }
+        }
+
+        return episodes
+    }
+
     private func fetchRankedSeriesIDs(credentials: Credentials) async throws -> [String] {
         let request = try serviceRequest(path: "callRanking", credentials: credentials)
         let data = try await perform(request)
@@ -101,7 +137,7 @@ final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
             for item in (section.contents ?? []).sorted(by: rankingOrder) where item.type == "series" {
                 guard let id = item.content?.id, !id.isEmpty, seen.insert(id).inserted else { continue }
                 seriesIDs.append(id)
-                if seriesIDs.count == Self.maximumSeriesCount { return seriesIDs }
+                if seriesIDs.count == Self.maximumRankedContentCount { return seriesIDs }
             }
         }
 
@@ -331,6 +367,20 @@ private struct BrowserResult: Decodable {
         case platformUID = "platform_uid"
         case platformToken = "platform_token"
     }
+}
+
+private struct EpisodeRankingResponse: Decodable {
+    let code: Int?
+    let message: String?
+    let result: EpisodeRankingResult?
+}
+
+private struct EpisodeRankingResult: Decodable {
+    let contents: [EpisodeRankingSection]?
+}
+
+private struct EpisodeRankingSection: Decodable {
+    let contents: [EpisodeItem]?
 }
 
 private struct RankingResponse: Decodable {
