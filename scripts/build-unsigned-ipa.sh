@@ -24,7 +24,6 @@ DERIVED_DATA="${TMPDIR:-/tmp}/TVerClient-DerivedData"
 OUTPUT="$REPO_ROOT/TVerClient-unsigned.ipa"
 PROJECT="$REPO_ROOT/TVerClient.xcodeproj"
 SCHEME="TVerClient"
-XCODEBUILD_ARGS=()
 
 while (($#)); do
   case "$1" in
@@ -50,7 +49,6 @@ while (($#)); do
       ;;
     --)
       shift
-      XCODEBUILD_ARGS=("$@")
       break
       ;;
     -h|--help)
@@ -85,7 +83,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY='' \
-  "${XCODEBUILD_ARGS[@]}" \
+  "$@" \
   build
 
 APP_PATH="$DERIVED_DATA/Build/Products/Release-iphoneos/${SCHEME}.app"
