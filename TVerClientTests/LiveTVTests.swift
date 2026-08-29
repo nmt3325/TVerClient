@@ -1,6 +1,6 @@
 import Foundation
-import XCTest
 @testable import TVerClient
+import XCTest
 
 final class LiveTVTests: XCTestCase {
     private var session: URLSession!
@@ -43,6 +43,29 @@ final class LiveTVTests: XCTestCase {
         XCTAssertEqual(channels[0].currentProgram?.thumbnailURL?.host, "statics.tver.jp")
     }
 
+    func testProgramGuidePreservesFullSortedTimelineAndDescription() async throws {
+        LiveStubURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path.contains("platform_users/browser/create") {
+                return Self.response(#"{"code":0,"result":{"platform_uid":"uid","platform_token":"token"}}"#)
+            }
+            if path.hasSuffix("callLiveChannel") {
+                return Self.response(#"{"code":0,"result":{"contents":[{"type":"channel","content":{"id":"ntv","version":2,"name":"日テレ"},"video":{"apiKey":"ntv","projectID":"tver-simul-ntv","mediaID":"ref:simul-ntv"}}]}}"#)
+            }
+            if path.contains("callLiveTimeline/ntv") {
+                return Self.response(#"{"code":0,"result":{"contents":[{"type":"live","content":{"id":"later","title":"後半","seriesTitle":"ニュース","description":"後半の説明","startAt":200,"endAt":300}},{"type":"live","content":{"id":"earlier","title":"前半","seriesTitle":"ニュース","description":"前半の説明","startAt":100,"endAt":200}}]}}"#)
+            }
+            throw URLError(.badURL)
+        }
+
+        let guide = try await TVerAPIClient(session: session).fetchProgramGuide()
+
+        XCTAssertEqual(guide.count, 1)
+        XCTAssertEqual(guide[0].channel.name, "日テレ")
+        XCTAssertEqual(guide[0].programs.map(\.id), ["earlier", "later"])
+        XCTAssertEqual(guide[0].programs[0].description, "前半の説明")
+    }
+
     func testPauseTimelineDisablesPlayback() async throws {
         LiveStubURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
@@ -69,7 +92,7 @@ final class LiveTVTests: XCTestCase {
             }
             XCTAssertEqual(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"), "current-key")
             XCTAssertEqual(request.url?.host, "playback.api.streaks.jp")
-            XCTAssertNil(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
+            XCTAssertNil(try URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
             return Self.response(#"{"sources":[{"src":"https://official.example/live/master.m3u8","type":"application/x-mpegURL"}]}"#)
         }
         let channel = TVerLiveChannel(
@@ -89,7 +112,7 @@ final class LiveTVTests: XCTestCase {
             if path.hasSuffix("streaks_info_v2.json") {
                 return Self.response(#"{"tver-splive-cx":{"api_key":{"key02":"current-key"},"ad_template_id":{"ios":"ios-template","pc":"pc-template"}}}"#)
             }
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            let components = try URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             XCTAssertEqual(components?.queryItems?.first(where: { $0.name == "ati" })?.value, "ios-template")
             return Self.response(#"{"sources":[{"src":"https://official.example/special/master.m3u8","type":"application/vnd.apple.mpegurl"}]}"#)
         }
@@ -112,8 +135,14 @@ final class LiveTVTests: XCTestCase {
 
 private final class LiveStubURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override class func canInit(with _: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
     override func startLoading() {
         do {
             guard let handler = Self.handler else { throw URLError(.unknown) }
@@ -126,5 +155,6 @@ private final class LiveStubURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: error)
         }
     }
+
     override func stopLoading() {}
 }

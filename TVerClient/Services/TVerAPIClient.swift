@@ -1,6 +1,6 @@
 import Foundation
 
-final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked Sendable {
+final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramGuideServicing, @unchecked Sendable {
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
     private static let staticsBaseURL = URL(string: "https://statics.tver.jp")!
@@ -17,9 +17,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
         let credentials = try await createBrowserCredentials()
 
         if let rankedEpisodes = try? await fetchEpisodeRanking(credentials: credentials),
-           !rankedEpisodes.isEmpty {
+           !rankedEpisodes.isEmpty
+        {
             let rankedProgramDays = makeProgramDays(from: rankedEpisodes)
-            if !rankedProgramDays.isEmpty { return rankedProgramDays }
+            if !rankedProgramDays.isEmpty {
+                return rankedProgramDays
+            }
         }
 
         let seriesIDs = try await fetchRankedSeriesIDs(credentials: credentials)
@@ -31,7 +34,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
 
         for batchStart in stride(from: 0, to: seriesIDs.count, by: Self.maximumConcurrentRequests) {
             let batchEnd = min(batchStart + Self.maximumConcurrentRequests, seriesIDs.count)
-            let batch = Array(seriesIDs[batchStart..<batchEnd])
+            let batch = Array(seriesIDs[batchStart ..< batchEnd])
 
             let results = await withTaskGroup(of: (Int, Result<[EpisodeContent], TVerClientError>).self) { group in
                 for (offset, seriesID) in batch.enumerated() {
@@ -56,11 +59,13 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
 
             for (_, result) in results {
                 switch result {
-                case .success(let episodes):
+                case let .success(episodes):
                     successfulRequestCount += 1
                     orderedEpisodes.append(contentsOf: episodes)
-                case .failure(let error):
-                    if firstFailure == nil { firstFailure = error }
+                case let .failure(error):
+                    if firstFailure == nil {
+                        firstFailure = error
+                    }
                 }
             }
         }
@@ -85,7 +90,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
 
         guard let result = response.result,
               !result.platformUID.isEmpty,
-              !result.platformToken.isEmpty else {
+              !result.platformToken.isEmpty
+        else {
             throw TVerClientError.invalidResponse
         }
         return Credentials(uid: result.platformUID, token: result.platformToken)
@@ -109,11 +115,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
                 guard let episode = item.content,
                       let episodeID = episode.id,
                       !episodeID.isEmpty,
-                      seen.insert(episodeID).inserted else {
+                      seen.insert(episodeID).inserted
+                else {
                     continue
                 }
                 episodes.append(episode)
-                if episodes.count == Self.maximumRankedContentCount { return episodes }
+                if episodes.count == Self.maximumRankedContentCount {
+                    return episodes
+                }
             }
         }
 
@@ -137,7 +146,9 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
             for item in (section.contents ?? []).sorted(by: rankingOrder) where item.type == "series" {
                 guard let id = item.content?.id, !id.isEmpty, seen.insert(id).inserted else { continue }
                 seriesIDs.append(id)
-                if seriesIDs.count == Self.maximumRankedContentCount { return seriesIDs }
+                if seriesIDs.count == Self.maximumRankedContentCount {
+                    return seriesIDs
+                }
             }
         }
 
@@ -172,7 +183,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
         }
         components.queryItems = [
             URLQueryItem(name: "platform_uid", value: credentials.uid),
-            URLQueryItem(name: "platform_token", value: credentials.token)
+            URLQueryItem(name: "platform_token", value: credentials.token),
         ]
         guard let url = components.url else { throw TVerClientError.invalidResponse }
 
@@ -189,10 +200,11 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw TVerClientError.invalidResponse
             }
-            guard (200..<300).contains(httpResponse.statusCode) else {
+            guard (200 ..< 300).contains(httpResponse.statusCode) else {
                 if let status = try? JSONDecoder().decode(APIStatus.self, from: data),
                    let message = status.message,
-                   !message.isEmpty {
+                   !message.isEmpty
+                {
                     throw TVerClientError.api(message)
                 }
                 throw TVerClientError.api("TVer APIでHTTP \(httpResponse.statusCode)エラーが発生しました。")
@@ -238,7 +250,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
                   let title = episode.title, !title.isEmpty,
                   let broadcastLabel = episode.broadcastDateLabel,
                   seenEpisodeIDs.insert(episodeID).inserted,
-                  let date = broadcastDate(from: broadcastLabel) else {
+                  let date = broadcastDate(from: broadcastLabel)
+            else {
                 continue
             }
 
@@ -278,7 +291,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
         let now = Date()
         let currentYear = calendar.component(.year, from: now)
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
-        let candidates = (currentYear - 1...currentYear + 1).compactMap { year in
+        let candidates = (currentYear - 1 ... currentYear + 1).compactMap { year in
             calendar.date(from: DateComponents(
                 timeZone: japaneseTimeZone,
                 year: year,
@@ -295,16 +308,17 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
     private func dateComponents(in label: String) -> (year: Int?, month: Int, day: Int)? {
         let patterns = [
             #"(?:(\d{4})年)?\s*(\d{1,2})月\s*(\d{1,2})日"#,
-            #"(?:(\d{4})[./-])?(\d{1,2})[./-](\d{1,2})"#
+            #"(?:(\d{4})[./-])?(\d{1,2})[./-](\d{1,2})"#,
         ]
         let source = label as NSString
 
         for pattern in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern),
                   let match = expression.firstMatch(
-                    in: label,
-                    range: NSRange(location: 0, length: source.length)
-                  ) else {
+                      in: label,
+                      range: NSRange(location: 0, length: source.length)
+                  )
+            else {
                 continue
             }
 
@@ -343,89 +357,129 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked S
             .appendingPathComponent("\(episodeID).jpg")
     }
 
-
     func fetchLiveChannels() async throws -> [TVerLiveChannel] {
         let credentials = try await createBrowserCredentials()
-        let data = try await perform(try serviceRequest(path: "callLiveChannel", credentials: credentials))
-        let response: LiveChannelResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-        guard let items = response.result?.contents else { throw TVerClientError.invalidResponse }
-
-        let rawChannels = items.compactMap { item -> LiveChannelContent? in
-            guard item.type == "channel", let channel = item.content,
-                  channel.id?.isEmpty == false, channel.name?.isEmpty == false,
-                  item.video?.projectID?.isEmpty == false, item.video?.mediaID?.isEmpty == false else {
-                return nil
-            }
-            return LiveChannelContent(channel: channel, video: item.video!)
-        }
-
+        let rawChannels = try await fetchRawLiveChannels(credentials: credentials)
         let now = Date()
+
         return await withTaskGroup(of: (Int, TVerLiveChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
-                    let currentProgram = try? await fetchCurrentLiveProgram(
-                        channelID: raw.channel.id!, credentials: credentials, now: now
-                    )
-                    let state: TVerLiveState
-                    if let currentProgram {
-                        state = currentProgram.isPause ? .paused : .onAir
-                    } else {
-                        state = .unavailable
-                    }
-                    let iconURL = URL(string: "https://statics.tver.jp/images/icon/\(raw.channel.id!).jpg?v=\(raw.channel.version ?? 0)")
-                    return (index, TVerLiveChannel(
-                        id: raw.channel.id!, name: raw.channel.name!, iconURL: iconURL,
-                        projectID: raw.video.projectID!, mediaID: raw.video.mediaID!,
-                        apiKey: raw.video.apiKey ?? raw.channel.id!,
-                        currentProgram: currentProgram, state: state
-                    ))
+                    let timeline = (try? await fetchLiveTimeline(
+                        channelID: raw.channel.id!, credentials: credentials
+                    )) ?? []
+                    let current = timeline.first { $0.startAt <= now && now < $0.endAt }
+                    return (index, makeLiveChannel(raw: raw, currentProgram: current))
                 }
             }
             var channels: [(Int, TVerLiveChannel)] = []
-            for await channel in group { channels.append(channel) }
+            for await channel in group {
+                channels.append(channel)
+            }
             return channels.sorted { $0.0 < $1.0 }.map(\.1)
         }
     }
 
-    private func fetchCurrentLiveProgram(
+    func fetchProgramGuide() async throws -> [TVerGuideChannel] {
+        let credentials = try await createBrowserCredentials()
+        let rawChannels = try await fetchRawLiveChannels(credentials: credentials)
+        let now = Date()
+
+        return await withTaskGroup(of: (Int, TVerGuideChannel).self) { group in
+            for (index, raw) in rawChannels.enumerated() {
+                group.addTask { [self] in
+                    let timeline = ((try? await fetchLiveTimeline(
+                        channelID: raw.channel.id!, credentials: credentials
+                    )) ?? []).sorted { $0.startAt < $1.startAt }
+                    let current = timeline.first { $0.startAt <= now && now < $0.endAt }
+                    return (index, TVerGuideChannel(
+                        channel: makeLiveChannel(raw: raw, currentProgram: current),
+                        programs: timeline
+                    ))
+                }
+            }
+            var guide: [(Int, TVerGuideChannel)] = []
+            for await channel in group {
+                guide.append(channel)
+            }
+            return guide.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+    }
+
+    private func fetchRawLiveChannels(credentials: Credentials) async throws -> [LiveChannelContent] {
+        let data = try await perform(serviceRequest(path: "callLiveChannel", credentials: credentials))
+        let response: LiveChannelResponse = try decode(data)
+        try validateAPIResponse(code: response.code, message: response.message)
+        guard let items = response.result?.contents else { throw TVerClientError.invalidResponse }
+
+        return items.compactMap { item -> LiveChannelContent? in
+            guard item.type == "channel", let channel = item.content,
+                  channel.id?.isEmpty == false, channel.name?.isEmpty == false,
+                  item.video?.projectID?.isEmpty == false, item.video?.mediaID?.isEmpty == false
+            else {
+                return nil
+            }
+            return LiveChannelContent(channel: channel, video: item.video!)
+        }
+    }
+
+    private func fetchLiveTimeline(
         channelID: String,
-        credentials: Credentials,
-        now: Date
-    ) async throws -> TVerLiveProgram? {
+        credentials: Credentials
+    ) async throws -> [TVerLiveProgram] {
         let pathID = channelID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelID
-        let data = try await perform(try serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials))
+        let data = try await perform(serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials))
         let response: LiveTimelineResponse = try decode(data)
         try validateAPIResponse(code: response.code, message: response.message)
-        let nowSeconds = Int(now.timeIntervalSince1970)
-        guard let item = response.result?.contents?.first(where: {
-            guard let content = $0.content, let start = content.startAt, let end = content.endAt else { return false }
-            return start <= nowSeconds && nowSeconds < end
-        }), let content = item.content else { return nil }
+        return (response.result?.contents ?? []).compactMap { makeLiveProgram(item: $0, channelID: channelID) }
+    }
 
+    private func makeLiveProgram(item: LiveTimelineItem, channelID: String) -> TVerLiveProgram? {
+        guard let content = item.content, let startAt = content.startAt, let endAt = content.endAt,
+              endAt > startAt else { return nil }
         let isPause = item.type == "pause"
             || content.seriesTitle?.contains("配信休止") == true
             || content.title?.contains("配信休止") == true
             || content.seriesTitle?.contains("配信準備中") == true
             || content.title?.contains("配信準備中") == true
-        let identifier = content.id?.isEmpty == false ? content.id! : "pause-\(channelID)-\(content.startAt ?? 0)"
-        let path = content.thumbnailPath
-        let thumbnailURL: URL?
-        if let path, !path.isEmpty {
-            thumbnailURL = URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL
-        } else {
-            thumbnailURL = nil
+        let identifier = content.id?.isEmpty == false ? content.id! : "pause-\(channelID)-\(startAt)"
+        let thumbnailURL = content.thumbnailPath.flatMap { path -> URL? in
+            guard !path.isEmpty else { return nil }
+            return URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL
+        }
+        func cleaned(_ value: String?) -> String? {
+            let text = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text?.isEmpty == false ? text : nil
         }
         return TVerLiveProgram(
             id: identifier,
-            title: content.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? content.title!.trimmingCharacters(in: .whitespacesAndNewlines) : (isPause ? "配信休止" : "番組情報なし"),
-            seriesTitle: content.seriesTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? content.seriesTitle!.trimmingCharacters(in: .whitespacesAndNewlines) : (isPause ? "配信休止" : "ライブ配信"),
-            startAt: Date(timeIntervalSince1970: TimeInterval(content.startAt ?? 0)),
-            endAt: Date(timeIntervalSince1970: TimeInterval(content.endAt ?? 0)),
+            title: cleaned(content.title) ?? (isPause ? "配信休止" : "番組情報なし"),
+            seriesTitle: cleaned(content.seriesTitle) ?? (isPause ? "配信休止" : "ライブ配信"),
+            description: cleaned(content.description) ?? "",
+            startAt: Date(timeIntervalSince1970: TimeInterval(startAt)),
+            endAt: Date(timeIntervalSince1970: TimeInterval(endAt)),
             thumbnailURL: thumbnailURL,
             isPause: isPause
+        )
+    }
+
+    private func makeLiveChannel(
+        raw: LiveChannelContent,
+        currentProgram: TVerLiveProgram?
+    ) -> TVerLiveChannel {
+        let channelID = raw.channel.id!
+        let state: TVerLiveState
+        if let currentProgram {
+            state = currentProgram.isPause ? .paused : .onAir
+        } else {
+            state = .unavailable
+        }
+        let iconURL = URL(string: "https://statics.tver.jp/images/icon/\(channelID).jpg?v=\(raw.channel.version ?? 0)")
+        return TVerLiveChannel(
+            id: channelID, name: raw.channel.name!, iconURL: iconURL,
+            projectID: raw.video.projectID!, mediaID: raw.video.mediaID!,
+            apiKey: raw.video.apiKey ?? channelID,
+            currentProgram: currentProgram, state: state
         )
     }
 }
@@ -524,46 +578,53 @@ private struct EpisodeContent: Decodable, Sendable {
     let thumbnailPath: String?
 }
 
-
 private struct LiveChannelResponse: Decodable {
     let code: Int?
     let message: String?
     let result: LiveChannelResult?
 }
+
 private struct LiveChannelResult: Decodable { let contents: [LiveChannelItem]? }
 private struct LiveChannelItem: Decodable {
     let type: String?
     let content: LiveChannelMetadata?
     let video: LiveVideoMetadata?
 }
+
 private struct LiveChannelMetadata: Decodable, Sendable {
     let id: String?
     let version: Int?
     let name: String?
 }
+
 private struct LiveVideoMetadata: Decodable, Sendable {
     let apiKey: String?
     let projectID: String?
     let mediaID: String?
 }
+
 private struct LiveChannelContent: Sendable {
     let channel: LiveChannelMetadata
     let video: LiveVideoMetadata
 }
+
 private struct LiveTimelineResponse: Decodable {
     let code: Int?
     let message: String?
     let result: LiveTimelineResult?
 }
+
 private struct LiveTimelineResult: Decodable { let contents: [LiveTimelineItem]? }
 private struct LiveTimelineItem: Decodable {
     let type: String?
     let content: LiveTimelineContent?
 }
+
 private struct LiveTimelineContent: Decodable {
     let id: String?
     let title: String?
     let seriesTitle: String?
+    let description: String?
     let startAt: Int?
     let endAt: Int?
     let thumbnailPath: String?

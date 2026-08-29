@@ -6,14 +6,21 @@ struct RootTabView: View {
 
     var body: some View {
         TabView {
+            ProgramGuideView(
+                viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
+                playbackController: playbackController
+            )
+            .tabItem {
+                Label("番組表", systemImage: "rectangle.grid.3x2")
+            }
+
             ScheduleView(
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
                 playbackController: playbackController
             )
             .tabItem {
-                Label("番組表", systemImage: "rectangle.grid.1x2")
+                Label("見逃し", systemImage: "play.rectangle.on.rectangle")
             }
-
 
             LiveView(
                 viewModel: LiveViewModel(service: TVerAPIClient()),
@@ -42,7 +49,9 @@ final class ScheduleViewModel: ObservableObject {
         self.usesPreviewFallback = usesPreviewFallback
     }
 
-    var showsInitialLoading: Bool { isLoading && days.isEmpty }
+    var showsInitialLoading: Bool {
+        isLoading && days.isEmpty
+    }
 
     func loadIfNeeded() async {
         guard !hasLoaded else { return }
@@ -57,9 +66,9 @@ final class ScheduleViewModel: ObservableObject {
         do {
             let response = try await service.fetchSchedule()
             #if DEBUG
-            days = response.isEmpty && usesPreviewFallback ? PreviewFixture.schedule : response
+                days = response.isEmpty && usesPreviewFallback ? PreviewFixture.schedule : response
             #else
-            days = response
+                days = response
             #endif
             hasLoaded = true
         } catch {
@@ -188,9 +197,9 @@ final class LiveViewModel: ObservableObject {
         do {
             let response = try await service.fetchLiveChannels()
             #if DEBUG
-            channels = response.isEmpty && usesPreviewFallback ? PreviewFixture.liveChannels : response
+                channels = response.isEmpty && usesPreviewFallback ? PreviewFixture.liveChannels : response
             #else
-            channels = response
+                channels = response
             #endif
             hasLoaded = true
         } catch {
@@ -322,7 +331,8 @@ private struct LivePlaybackView: View {
                     }
 
                     if playbackController.currentLiveChannel?.id == channel.id,
-                       let message = playbackController.errorMessage {
+                       let message = playbackController.errorMessage
+                    {
                         VStack(alignment: .leading, spacing: 6) {
                             Label("アプリ内で直接再生できません", systemImage: "exclamationmark.triangle")
                                 .font(.headline)
@@ -453,7 +463,7 @@ private struct ProgramThumbnail: View {
                     ProgressView()
                         .tint(.secondary)
                 }
-            case .success(let image):
+            case let .success(image):
                 image
                     .resizable()
                     .scaledToFill()

@@ -10,7 +10,9 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
     let availableUntil: String?
     let thumbnailURL: URL?
 
-    var webURL: URL { URL(string: "https://tver.jp/episodes/\(id)")! }
+    var webURL: URL {
+        URL(string: "https://tver.jp/episodes/\(id)")!
+    }
 }
 
 enum TVerLiveState: String, Codable, Hashable, Sendable {
@@ -31,6 +33,7 @@ struct TVerLiveProgram: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let title: String
     let seriesTitle: String
+    let description: String
     let startAt: Date
     let endAt: Date
     let thumbnailURL: URL?
@@ -45,6 +48,15 @@ struct TVerLiveProgram: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+struct TVerGuideChannel: Identifiable, Codable, Hashable, Sendable {
+    let channel: TVerLiveChannel
+    let programs: [TVerLiveProgram]
+
+    var id: String {
+        channel.id
+    }
+}
+
 struct TVerLiveChannel: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
@@ -55,14 +67,21 @@ struct TVerLiveChannel: Identifiable, Codable, Hashable, Sendable {
     let currentProgram: TVerLiveProgram?
     let state: TVerLiveState
 
-    var webURL: URL { URL(string: "https://tver.jp/live/\(id)")! }
-    var isPlayable: Bool { state == .onAir }
+    var webURL: URL {
+        URL(string: "https://tver.jp/live/\(id)")!
+    }
+
+    var isPlayable: Bool {
+        state == .onAir
+    }
 }
 
 struct ProgramDay: Identifiable, Hashable, Sendable {
     let date: Date
     var programs: [TVerProgram]
-    var id: Date { date }
+    var id: Date {
+        date
+    }
 }
 
 enum TVerClientError: LocalizedError, Equatable {
@@ -73,7 +92,7 @@ enum TVerClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidResponse: return "TVerから正しい応答を取得できませんでした。"
-        case .api(let message): return message
+        case let .api(message): return message
         case .noPlayableStream: return "再生可能なストリームが見つかりませんでした。"
         }
     }
@@ -89,6 +108,10 @@ protocol TVerStreamResolving: Sendable {
 
 protocol TVerLiveServicing: Sendable {
     func fetchLiveChannels() async throws -> [TVerLiveChannel]
+}
+
+protocol TVerProgramGuideServicing: Sendable {
+    func fetchProgramGuide() async throws -> [TVerGuideChannel]
 }
 
 protocol TVerLiveStreamResolving: Sendable {
