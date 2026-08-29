@@ -9,7 +9,7 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
     private let requestObserver: ((URLRequest) -> Void)?
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = TVerNetworking.makeEphemeralSession(),
         dateProvider: @escaping () -> Date = Date.init,
         requestObserver: ((URLRequest) -> Void)? = nil
     ) {
@@ -64,7 +64,7 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
         guard let preferred = hlsSources.first,
               let preferredRawURL = Self.string(preferred["src"]),
               let preferredURL = URL(string: preferredRawURL),
-              preferredURL.scheme?.lowercased() == "https" else {
+              TVerNetworking.isPermittedStreamURL(preferredURL) else {
             throw TVerClientError.noPlayableStream
         }
 
@@ -125,7 +125,8 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
                   !opaqueQuery.isEmpty else { continue }
             let separator = rawSource.contains("?") ? "&" : "?"
             guard let finalURL = URL(string: rawSource + separator + opaqueQuery),
-                  finalURL.scheme?.lowercased() == "https" else { continue }
+                  TVerNetworking.isPermittedStreamURL(finalURL),
+                  Self.isSessionized(finalURL.absoluteString) else { continue }
             return finalURL
         }
         throw TVerClientError.noPlayableStream
@@ -203,10 +204,20 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
 
     private static func isClearHLS(_ source: [String: Any]) -> Bool {
         guard let raw = string(source["src"]), let url = URL(string: raw),
-              url.scheme?.lowercased() == "https" else { return false }
+              TVerNetworking.isPermittedStreamURL(url),
+              isDRMFree(source) else { return false }
         let type = string(source["type"])?.lowercased() ?? ""
-        guard type.contains("mpegurl") || raw.lowercased().contains(".m3u8") else { return false }
-        if let keySystems = source["key_systems"] as? [String: Any], !keySystems.isEmpty { return false }
+        return type.contains("mpegurl") || raw.lowercased().contains(".m3u8")
+    }
+
+    private static func isDRMFree(_ source: [String: Any]) -> Bool {
+        for key in ["key_systems", "keySystems"] where source.keys.contains(key) {
+            guard let systems = source[key] as? [String: Any], systems.isEmpty else { return false }
+        }
+        for key in ["drm", "protected"] where isEnabledSSAI(source[key]) { return false }
+        if string(source["license_url"]) != nil || string(source["licenseUrl"]) != nil {
+            return false
+        }
         return true
     }
 
@@ -226,7 +237,10 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
     private static func isSessionized(_ rawURL: String?) -> Bool {
         guard let rawURL,
               let components = URLComponents(string: rawURL) else { return false }
-        return components.queryItems?.contains(where: { $0.name.lowercased() == "session" }) == true
+        return components.queryItems?.contains { item in
+            item.name.lowercased() == "session"
+                && item.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        } == true
     }
 
     private static func string(_ value: Any?) -> String? {

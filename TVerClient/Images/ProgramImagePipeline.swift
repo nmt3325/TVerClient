@@ -55,7 +55,7 @@ final class ProgramImagePipeline: @unchecked Sendable {
     private var memoryWarningObserver: NSObjectProtocol?
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = TVerNetworking.makeEphemeralSession(),
         cache: NSCache<NSURL, UIImage> = NSCache(),
         maximumResponseBytes: Int = 8 * 1_024 * 1_024,
         maximumCacheBytes: Int = 48 * 1_024 * 1_024,
@@ -243,7 +243,7 @@ final class ProgramImagePipeline: @unchecked Sendable {
     }
 
     private static func isPermitted(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "https" && url.host?.isEmpty == false
+        TVerNetworking.isPermittedImageURL(url)
     }
 }
 

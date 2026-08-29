@@ -1,5 +1,52 @@
 import Foundation
 
+/// Centralizes the production networking defaults and validation for URLs
+/// received from TVer's APIs. Injected sessions remain supported for tests.
+enum TVerNetworking {
+    private static let streamHostSuffixes = [
+        "streaks.jp",
+        "boltdns.net",
+        "brightcovecdn.com",
+        "akamaized.net",
+        "akamaihd.net",
+    ]
+
+    static func makeEphemeralConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        return configuration
+    }
+
+    static func makeEphemeralSession() -> URLSession {
+        URLSession(configuration: makeEphemeralConfiguration())
+    }
+
+    static func isPermittedImageURL(_ url: URL) -> Bool {
+        isHTTPS(url) && url.host?.lowercased() == "statics.tver.jp"
+    }
+
+    static func isPermittedStreamURL(_ url: URL) -> Bool {
+        guard isHTTPS(url), let host = url.host?.lowercased() else { return false }
+        return streamHostSuffixes.contains { suffix in
+            host == suffix || host.hasSuffix("." + suffix)
+        }
+    }
+
+    private static func isHTTPS(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil || url.port == 443,
+              url.host?.isEmpty == false else {
+            return false
+        }
+        return true
+    }
+}
+
 final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramGuideServicing, @unchecked Sendable {
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
@@ -14,7 +61,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private let dateProvider: @Sendable () -> Date
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = TVerNetworking.makeEphemeralSession(),
         responseCache: TVerResponseCache = TVerResponseCache(),
         cacheTTL: TimeInterval = 60,
         staleIfErrorTTL: TimeInterval = 15 * 60,
@@ -474,16 +521,20 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     }
 
     private func thumbnailURL(path: String?, episodeID: String) -> URL? {
+        let candidate: URL?
         if let path, !path.isEmpty {
             if let absoluteURL = URL(string: path), absoluteURL.scheme != nil {
-                return absoluteURL
+                candidate = absoluteURL
+            } else {
+                candidate = URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL
             }
-            let separator = path.hasPrefix("/") ? "" : "/"
-            return URL(string: "https://statics.tver.jp\(separator)\(path)")
+        } else {
+            candidate = Self.staticsBaseURL
+                .appendingPathComponent("images/content/thumbnail/episode/xlarge")
+                .appendingPathComponent("\(episodeID).jpg")
         }
-        return Self.staticsBaseURL
-            .appendingPathComponent("images/content/thumbnail/episode/xlarge")
-            .appendingPathComponent("\(episodeID).jpg")
+        guard let candidate, TVerNetworking.isPermittedImageURL(candidate) else { return nil }
+        return candidate
     }
 
     func fetchLiveChannels() async throws -> [TVerLiveChannel] {
@@ -597,8 +648,10 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             || content.title?.contains("配信準備中") == true
         let identifier = content.id?.isEmpty == false ? content.id! : "pause-\(channelID)-\(startAt)"
         let thumbnailURL = content.thumbnailPath.flatMap { path -> URL? in
-            guard !path.isEmpty else { return nil }
-            return URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL
+            guard !path.isEmpty,
+                  let url = URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL,
+                  TVerNetworking.isPermittedImageURL(url) else { return nil }
+            return url
         }
         func cleaned(_ value: String?) -> String? {
             let text = value?.trimmingCharacters(in: .whitespacesAndNewlines)

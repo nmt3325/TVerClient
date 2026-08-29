@@ -41,7 +41,7 @@ final class NetworkDiagnosticsService: @unchecked Sendable {
     private let endpoints: [NetworkDiagnosticTarget: URL]
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = TVerNetworking.makeEphemeralSession(),
         tverURL: URL = NetworkDiagnosticsService.tverProbeURL,
         streaksURL: URL = NetworkDiagnosticsService.streaksProbeURL
     ) {

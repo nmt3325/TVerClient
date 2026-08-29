@@ -30,7 +30,7 @@ final class ProgramImagePipelineTests: XCTestCase {
     }
 
     func testCoalescesDuplicateRequestsAndCachesDecodedImage() throws {
-        let url = try XCTUnwrap(URL(string: "https://images.example.test/program.png?token=secret"))
+        let url = try XCTUnwrap(URL(string: "https://statics.tver.jp/program.png?token=secret"))
         let imageData = try makeImageData()
         MockImageURLProtocol.handler = { request in
             MockImageURLProtocol.incrementRequestCount()
@@ -65,7 +65,7 @@ final class ProgramImagePipelineTests: XCTestCase {
     }
 
     func testCancellingOneSubscriberKeepsCoalescedRequestAlive() throws {
-        let url = try XCTUnwrap(URL(string: "https://images.example.test/live.png"))
+        let url = try XCTUnwrap(URL(string: "https://statics.tver.jp/live.png"))
         let imageData = try makeImageData()
         MockImageURLProtocol.handler = { request in
             MockImageURLProtocol.incrementRequestCount()
@@ -105,8 +105,25 @@ final class ProgramImagePipelineTests: XCTestCase {
         XCTAssertEqual(MockImageURLProtocol.requestCount, 0)
     }
 
+
+    func testRejectsUntrustedHTTPSHostWithoutStartingNetworkRequest() throws {
+        let url = try XCTUnwrap(URL(string: "https://images.example.test/program.png"))
+        let rejected = expectation(description: "untrusted host rejected")
+        let token = pipeline.loadImage(from: url) { result in
+            guard case .failure(.insecureURL) = result else {
+                return XCTFail("Expected insecureURL")
+            }
+            rejected.fulfill()
+        }
+
+        withExtendedLifetime(token) {
+            wait(for: [rejected], timeout: 1)
+        }
+        XCTAssertEqual(MockImageURLProtocol.requestCount, 0)
+    }
+
     func testRejectsResponseBodyOverConfiguredLimit() throws {
-        let url = try XCTUnwrap(URL(string: "https://images.example.test/large.png"))
+        let url = try XCTUnwrap(URL(string: "https://statics.tver.jp/large.png"))
         MockImageURLProtocol.handler = { request in
             MockImageURLProtocol.incrementRequestCount()
             return .success(

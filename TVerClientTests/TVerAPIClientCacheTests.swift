@@ -20,6 +20,16 @@ final class TVerAPIClientCacheTests: XCTestCase {
         super.tearDown()
     }
 
+
+    func testProductionSessionConfigurationIsEphemeralAndNonPersistent() {
+        let configuration = TVerNetworking.makeEphemeralConfiguration()
+        XCTAssertNil(configuration.identifier)
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertFalse(configuration.httpShouldSetCookies)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
     func testFreshGETResponseIsServedFromMemoryCache() async throws {
         var rankingRequestCount = 0
         CacheStubURLProtocol.handler = { request in

@@ -102,7 +102,7 @@ final class LiveTVTests: XCTestCase {
                 XCTAssertEqual(request.value(forHTTPHeaderField: "Referer"), "https://tver.jp/")
                 XCTAssertNil(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
                 XCTAssertFalse(request.url!.absoluteString.contains("ati"))
-                return Self.response(#"{"project":"response-project","mediaId":"response-media","ssai":{"trackingType":"auto"},"ad_fields":{"custom01":"wire-value","video_id":"wire-video"},"sources":[{"id":"dash","src":"https://official.example/manifest.mpd","type":"application/dash+xml","ssai":{"trackingType":"auto"}},{"id":"drm","src":"https://official.example/drm.m3u8","type":"application/x-mpegURL","key_systems":{"fairplay":{}},"ssai":{"trackingType":"auto"}},{"id":"hls-main","src":"https://official.example/live/master.m3u8?existing=1","type":"application/x-mpegURL","key_systems":{},"ssai":{"trackingType":"auto"}},{"id":"hls-backup","src":"https://official.example/live/backup.m3u8","type":"application/vnd.apple.mpegurl","ssai":{"trackingType":"auto"}}]}"#)
+                return Self.response(#"{"project":"response-project","mediaId":"response-media","ssai":{"trackingType":"auto"},"ad_fields":{"custom01":"wire-value","video_id":"wire-video"},"sources":[{"id":"dash","src":"https://cdn.streaks.jp/manifest.mpd","type":"application/dash+xml","ssai":{"trackingType":"auto"}},{"id":"drm","src":"https://cdn.streaks.jp/drm.m3u8","type":"application/x-mpegURL","key_systems":{"fairplay":{}},"ssai":{"trackingType":"auto"}},{"id":"hls-main","src":"https://cdn.streaks.jp/live/master.m3u8?existing=1","type":"application/x-mpegURL","key_systems":{},"ssai":{"trackingType":"auto"}},{"id":"hls-backup","src":"https://cdn.streaks.jp/live/backup.m3u8","type":"application/vnd.apple.mpegurl","ssai":{"trackingType":"auto"}}]}"#)
             }
             XCTAssertEqual(request.url?.host, "ssai.api.streaks.jp")
             order.append("session")
@@ -125,7 +125,7 @@ final class LiveTVTests: XCTestCase {
         )
         let url = try await resolver.resolveLiveStream(for: Self.channel())
         XCTAssertEqual(order, ["info", "playback", "session"])
-        XCTAssertEqual(url.absoluteString, "https://official.example/live/master.m3u8?existing=1&token=abc%2Fdef&pdt=-7413&session=opaque-session")
+        XCTAssertEqual(url.absoluteString, "https://cdn.streaks.jp/live/master.m3u8?existing=1&token=abc%2Fdef&pdt=-7413&session=opaque-session")
 
         let body = try XCTUnwrap(observedSessionBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -146,12 +146,12 @@ final class LiveTVTests: XCTestCase {
                 return Self.infoResponse
             }
             if request.url?.host == "playback.api.streaks.jp" {
-                return Self.response(#"{"projectId":"p","id":"m","sources":[{"id":"hls","src":"https://official.example/live.m3u8","type":"application/x-mpegURL","ssai":true}]}"#)
+                return Self.response(#"{"projectId":"p","id":"m","sources":[{"id":"hls","src":"https://cdn.streaks.jp/live.m3u8","type":"application/x-mpegURL","ssai":true}]}"#)
             }
             return Self.response(#"[{"id":"hls","query":"session=s&token=t"}]"#)
         }
         let url = try await resolver().resolveLiveStream(for: Self.channel())
-        XCTAssertEqual(url.absoluteString, "https://official.example/live.m3u8?session=s&token=t")
+        XCTAssertEqual(url.absoluteString, "https://cdn.streaks.jp/live.m3u8?session=s&token=t")
     }
 
     func testLiveResolverKeepsNonSSAISourceFallback() async throws {
@@ -159,13 +159,13 @@ final class LiveTVTests: XCTestCase {
         LiveStubURLProtocol.handler = { request in
             if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
             if request.url?.host == "playback.api.streaks.jp" {
-                return Self.response(#"{"sources":[{"src":"https://official.example/plain.m3u8","type":"application/x-mpegURL"}]}"#)
+                return Self.response(#"{"sources":[{"src":"https://cdn.streaks.jp/plain.m3u8","type":"application/x-mpegURL"}]}"#)
             }
             didPost = true
             throw URLError(.badServerResponse)
         }
         let url = try await resolver().resolveLiveStream(for: Self.channel())
-        XCTAssertEqual(url.absoluteString, "https://official.example/plain.m3u8")
+        XCTAssertEqual(url.absoluteString, "https://cdn.streaks.jp/plain.m3u8")
         XCTAssertFalse(didPost)
     }
 
@@ -174,13 +174,13 @@ final class LiveTVTests: XCTestCase {
         LiveStubURLProtocol.handler = { request in
             if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
             if request.url?.host == "playback.api.streaks.jp" {
-                return Self.response(#"{"ssai":true,"sources":[{"id":"hls","src":"https://official.example/live.m3u8?session=existing&token=t","type":"application/x-mpegURL"}]}"#)
+                return Self.response(#"{"ssai":true,"sources":[{"id":"hls","src":"https://cdn.streaks.jp/live.m3u8?session=existing&token=t","type":"application/x-mpegURL"}]}"#)
             }
             didPost = true
             throw URLError(.badServerResponse)
         }
         let url = try await resolver().resolveLiveStream(for: Self.channel())
-        XCTAssertEqual(url.absoluteString, "https://official.example/live.m3u8?session=existing&token=t")
+        XCTAssertEqual(url.absoluteString, "https://cdn.streaks.jp/live.m3u8?session=existing&token=t")
         XCTAssertFalse(didPost)
     }
 
@@ -188,7 +188,7 @@ final class LiveTVTests: XCTestCase {
         LiveStubURLProtocol.handler = { request in
             if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
             if request.url?.host == "playback.api.streaks.jp" {
-                return Self.response(#"{"project":"p","mediaId":"m","ssai":true,"sources":[{"id":"hls","src":"https://official.example/raw.m3u8","type":"application/x-mpegURL"}]}"#)
+                return Self.response(#"{"project":"p","mediaId":"m","ssai":true,"sources":[{"id":"hls","src":"https://cdn.streaks.jp/raw.m3u8","type":"application/x-mpegURL"}]}"#)
             }
             return Self.response(#"[]"#, statusCode: 503)
         }
@@ -197,6 +197,69 @@ final class LiveTVTests: XCTestCase {
             XCTFail("Raw SSAI source must not be returned after a failed session request")
         } catch let error as TVerClientError {
             XCTAssertEqual(error, .noPlayableStream)
+        }
+    }
+
+
+    func testLiveResolverRejectsUntrustedHTTPSStreamHost() async throws {
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            return Self.response(#"{"sources":[{"src":"https://attacker.example/live.m3u8","type":"application/x-mpegURL"}]}"#)
+        }
+        await assertNoPlayableStream { try await self.resolver().resolveLiveStream(for: Self.channel()) }
+    }
+
+    func testLiveResolverRejectsDRMOnlyHLS() async throws {
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            return Self.response(#"{"sources":[{"src":"https://cdn.streaks.jp/drm.m3u8","type":"application/x-mpegURL","key_systems":{"fairplay":{}}}]}"#)
+        }
+        await assertNoPlayableStream { try await self.resolver().resolveLiveStream(for: Self.channel()) }
+    }
+
+    func testLiveResolverRejectsSSAIResponseWithoutSessionToken() async throws {
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            if request.url?.host == "playback.api.streaks.jp" {
+                return Self.response(#"{"project":"p","mediaId":"m","ssai":true,"sources":[{"id":"hls","src":"https://cdn.streaks.jp/raw.m3u8","type":"application/x-mpegURL"}]}"#)
+            }
+            return Self.response(#"[{"id":"hls","query":"token=not-a-session"}]"#)
+        }
+        await assertNoPlayableStream { try await self.resolver().resolveLiveStream(for: Self.channel()) }
+    }
+
+    func testBrightcoveResolverRejectsDRMAndUntrustedHLS() async throws {
+        LiveStubURLProtocol.handler = { request in
+            switch request.url?.host {
+            case "statics.tver.jp":
+                return Self.response(#"{"video":{"accountID":"account","videoID":"video"}}"#)
+            case "players.brightcove.net":
+                return Self.response(#"{"video_cloud":{"policy_key":"policy"}}"#)
+            case "edge.api.brightcove.com":
+                return Self.response(#"{"sources":[{"src":"https://cdn.streaks.jp/drm.m3u8","type":"application/x-mpegURL","key_systems":{"fairplay":{}}},{"src":"https://attacker.example/clear.m3u8","type":"application/x-mpegURL"}]}"#)
+            default:
+                throw URLError(.badURL)
+            }
+        }
+        let program = TVerProgram(
+            id: "episode", seriesID: nil, title: "Episode", seriesTitle: "Series",
+            description: "", broadcastLabel: "", availableUntil: nil, thumbnailURL: nil
+        )
+        await assertNoPlayableStream { try await BrightcoveStreamResolver(session: self.session).resolveStream(for: program) }
+    }
+
+    private func assertNoPlayableStream(
+        operation: () async throws -> URL,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await operation()
+            XCTFail("Expected noPlayableStream", file: file, line: line)
+        } catch let error as TVerClientError {
+            XCTAssertEqual(error, .noPlayableStream, file: file, line: line)
+        } catch {
+            XCTFail("Unexpected error: \(error)", file: file, line: line)
         }
     }
 

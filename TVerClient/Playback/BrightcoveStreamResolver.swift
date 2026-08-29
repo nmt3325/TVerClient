@@ -5,7 +5,7 @@ import Foundation
 final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
   private let session: URLSession
 
-  init(session: URLSession = .shared) {
+  init(session: URLSession = TVerNetworking.makeEphemeralSession()) {
     self.session = session
   }
 
@@ -156,7 +156,10 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
     let data = try await load(request)
     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
       let sourceObjects = Self.sourceObjects(from: json["sources"]),
-      let hlsURL = Self.preferredHLSURL(from: sourceObjects)
+      let hlsURL = Self.preferredHLSURL(
+        from: sourceObjects,
+        requiresSession: Self.isEnabledSSAI(json["ssai"])
+      )
     else {
       throw TVerClientError.noPlayableStream
     }
@@ -283,21 +286,30 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
     return nil
   }
 
-  private static func preferredHLSURL(from sourceObjects: [[String: Any]]) -> URL? {
+  private static func preferredHLSURL(
+    from sourceObjects: [[String: Any]],
+    requiresSession: Bool = false
+  ) -> URL? {
     sourceObjects.enumerated()
-      .compactMap { index, source in hlsSource(from: source, index: index) }
+      .compactMap { index, source in
+        hlsSource(from: source, index: index, requiresSession: requiresSession)
+      }
       .sorted { lhs, rhs in
         if lhs.isVersionFour != rhs.isVersionFour { return lhs.isVersionFour }
-        if lhs.isProtected != rhs.isProtected { return !lhs.isProtected }
         return lhs.index < rhs.index
       }
       .first?.url
   }
 
-  private static func hlsSource(from source: [String: Any], index: Int) -> HLSCandidate? {
+  private static func hlsSource(
+    from source: [String: Any],
+    index: Int,
+    requiresSession: Bool
+  ) -> HLSCandidate? {
     guard let rawURL = string(from: source["src"]),
       let url = URL(string: rawURL),
-      url.scheme?.lowercased() == "https"
+      TVerNetworking.isPermittedStreamURL(url),
+      isDRMFree(source)
     else {
       return nil
     }
@@ -309,14 +321,45 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
       || rawURL.lowercased().contains(".m3u8")
     guard isHLS else { return nil }
 
-    let version = string(from: source["ext_x_version"])
-    let keySystems = source["key_systems"] as? [String: Any]
+    let sourceUsesSSAI = isEnabledSSAI(source["ssai"])
+    guard !(requiresSession || sourceUsesSSAI) || isSessionized(url) else { return nil }
+
     return HLSCandidate(
       url: url,
-      isVersionFour: version == "4",
-      isProtected: keySystems?.isEmpty == false,
+      isVersionFour: string(from: source["ext_x_version"]) == "4",
       index: index
     )
+  }
+
+  private static func isDRMFree(_ source: [String: Any]) -> Bool {
+    for key in ["key_systems", "keySystems"] where source.keys.contains(key) {
+      guard let systems = source[key] as? [String: Any], systems.isEmpty else { return false }
+    }
+    for key in ["drm", "protected"] where isEnabledSSAI(source[key]) { return false }
+    if string(from: source["license_url"]) != nil || string(from: source["licenseUrl"]) != nil {
+      return false
+    }
+    return true
+  }
+
+  private static func isEnabledSSAI(_ value: Any?) -> Bool {
+    switch value {
+    case let flag as Bool: return flag
+    case let number as NSNumber: return number.boolValue
+    case let text as String:
+      return !text.isEmpty && !["false", "0", "disabled", "none"].contains(text.lowercased())
+    case let dictionary as [String: Any]:
+      if let enabled = dictionary["enabled"] { return isEnabledSSAI(enabled) }
+      return !dictionary.isEmpty
+    default: return false
+    }
+  }
+
+  private static func isSessionized(_ url: URL) -> Bool {
+    URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { item in
+      item.name.lowercased() == "session"
+        && item.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    } == true
   }
 }
 
@@ -340,6 +383,5 @@ private struct StreaksVideo {
 private struct HLSCandidate {
   let url: URL
   let isVersionFour: Bool
-  let isProtected: Bool
   let index: Int
 }
