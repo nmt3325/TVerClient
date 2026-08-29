@@ -1,6 +1,6 @@
 import Foundation
 
-final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
+final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, @unchecked Sendable {
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
     private static let staticsBaseURL = URL(string: "https://statics.tver.jp")!
@@ -342,6 +342,92 @@ final class TVerAPIClient: TVerCatalogServicing, @unchecked Sendable {
             .appendingPathComponent("images/content/thumbnail/episode/xlarge")
             .appendingPathComponent("\(episodeID).jpg")
     }
+
+
+    func fetchLiveChannels() async throws -> [TVerLiveChannel] {
+        let credentials = try await createBrowserCredentials()
+        let data = try await perform(try serviceRequest(path: "callLiveChannel", credentials: credentials))
+        let response: LiveChannelResponse = try decode(data)
+        try validateAPIResponse(code: response.code, message: response.message)
+        guard let items = response.result?.contents else { throw TVerClientError.invalidResponse }
+
+        let rawChannels = items.compactMap { item -> LiveChannelContent? in
+            guard item.type == "channel", let channel = item.content,
+                  channel.id?.isEmpty == false, channel.name?.isEmpty == false,
+                  item.video?.projectID?.isEmpty == false, item.video?.mediaID?.isEmpty == false else {
+                return nil
+            }
+            return LiveChannelContent(channel: channel, video: item.video!)
+        }
+
+        let now = Date()
+        return await withTaskGroup(of: (Int, TVerLiveChannel).self) { group in
+            for (index, raw) in rawChannels.enumerated() {
+                group.addTask { [self] in
+                    let currentProgram = try? await fetchCurrentLiveProgram(
+                        channelID: raw.channel.id!, credentials: credentials, now: now
+                    )
+                    let state: TVerLiveState
+                    if let currentProgram {
+                        state = currentProgram.isPause ? .paused : .onAir
+                    } else {
+                        state = .unavailable
+                    }
+                    let iconURL = URL(string: "https://statics.tver.jp/images/icon/\(raw.channel.id!).jpg?v=\(raw.channel.version ?? 0)")
+                    return (index, TVerLiveChannel(
+                        id: raw.channel.id!, name: raw.channel.name!, iconURL: iconURL,
+                        projectID: raw.video.projectID!, mediaID: raw.video.mediaID!,
+                        apiKey: raw.video.apiKey ?? raw.channel.id!,
+                        currentProgram: currentProgram, state: state
+                    ))
+                }
+            }
+            var channels: [(Int, TVerLiveChannel)] = []
+            for await channel in group { channels.append(channel) }
+            return channels.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+    }
+
+    private func fetchCurrentLiveProgram(
+        channelID: String,
+        credentials: Credentials,
+        now: Date
+    ) async throws -> TVerLiveProgram? {
+        let pathID = channelID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelID
+        let data = try await perform(try serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials))
+        let response: LiveTimelineResponse = try decode(data)
+        try validateAPIResponse(code: response.code, message: response.message)
+        let nowSeconds = Int(now.timeIntervalSince1970)
+        guard let item = response.result?.contents?.first(where: {
+            guard let content = $0.content, let start = content.startAt, let end = content.endAt else { return false }
+            return start <= nowSeconds && nowSeconds < end
+        }), let content = item.content else { return nil }
+
+        let isPause = item.type == "pause"
+            || content.seriesTitle?.contains("配信休止") == true
+            || content.title?.contains("配信休止") == true
+            || content.seriesTitle?.contains("配信準備中") == true
+            || content.title?.contains("配信準備中") == true
+        let identifier = content.id?.isEmpty == false ? content.id! : "pause-\(channelID)-\(content.startAt ?? 0)"
+        let path = content.thumbnailPath
+        let thumbnailURL: URL?
+        if let path, !path.isEmpty {
+            thumbnailURL = URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL
+        } else {
+            thumbnailURL = nil
+        }
+        return TVerLiveProgram(
+            id: identifier,
+            title: content.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? content.title!.trimmingCharacters(in: .whitespacesAndNewlines) : (isPause ? "配信休止" : "番組情報なし"),
+            seriesTitle: content.seriesTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? content.seriesTitle!.trimmingCharacters(in: .whitespacesAndNewlines) : (isPause ? "配信休止" : "ライブ配信"),
+            startAt: Date(timeIntervalSince1970: TimeInterval(content.startAt ?? 0)),
+            endAt: Date(timeIntervalSince1970: TimeInterval(content.endAt ?? 0)),
+            thumbnailURL: thumbnailURL,
+            isPause: isPause
+        )
+    }
 }
 
 private struct Credentials: Sendable {
@@ -434,6 +520,51 @@ private struct EpisodeContent: Decodable, Sendable {
     let seriesTitle: String?
     let description: String?
     let broadcastDateLabel: String?
+    let endAt: Int?
+    let thumbnailPath: String?
+}
+
+
+private struct LiveChannelResponse: Decodable {
+    let code: Int?
+    let message: String?
+    let result: LiveChannelResult?
+}
+private struct LiveChannelResult: Decodable { let contents: [LiveChannelItem]? }
+private struct LiveChannelItem: Decodable {
+    let type: String?
+    let content: LiveChannelMetadata?
+    let video: LiveVideoMetadata?
+}
+private struct LiveChannelMetadata: Decodable, Sendable {
+    let id: String?
+    let version: Int?
+    let name: String?
+}
+private struct LiveVideoMetadata: Decodable, Sendable {
+    let apiKey: String?
+    let projectID: String?
+    let mediaID: String?
+}
+private struct LiveChannelContent: Sendable {
+    let channel: LiveChannelMetadata
+    let video: LiveVideoMetadata
+}
+private struct LiveTimelineResponse: Decodable {
+    let code: Int?
+    let message: String?
+    let result: LiveTimelineResult?
+}
+private struct LiveTimelineResult: Decodable { let contents: [LiveTimelineItem]? }
+private struct LiveTimelineItem: Decodable {
+    let type: String?
+    let content: LiveTimelineContent?
+}
+private struct LiveTimelineContent: Decodable {
+    let id: String?
+    let title: String?
+    let seriesTitle: String?
+    let startAt: Int?
     let endAt: Int?
     let thumbnailPath: String?
 }

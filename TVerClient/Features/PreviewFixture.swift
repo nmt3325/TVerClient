@@ -44,5 +44,30 @@ enum PreviewFixture {
             ]
         )
     ]
+
+    static let liveChannels: [TVerLiveChannel] = {
+        let now = Date()
+        let program = TVerLiveProgram(
+            id: "preview-live", title: "今日のニュースと天気", seriesTitle: "夕方ニュース",
+            startAt: now.addingTimeInterval(-900), endAt: now.addingTimeInterval(2700),
+            thumbnailURL: URL(string: "https://placehold.co/640x360/CC2020/FFFFFF.png?text=LIVE"), isPause: false
+        )
+        return [
+            TVerLiveChannel(
+                id: "ntv", name: "日テレ", iconURL: nil,
+                projectID: "tver-simul-ntv", mediaID: "ref:simul-ntv", apiKey: "ntv",
+                currentProgram: program, state: .onAir
+            ),
+            TVerLiveChannel(
+                id: "tbs", name: "TBS", iconURL: nil,
+                projectID: "tver-simul-tbs", mediaID: "ref:simul-tbs", apiKey: "tbs",
+                currentProgram: TVerLiveProgram(
+                    id: "preview-pause", title: "配信休止", seriesTitle: "配信休止",
+                    startAt: now, endAt: now.addingTimeInterval(3600), thumbnailURL: nil, isPause: true
+                ), state: .paused
+            )
+        ]
+    }()
+
 }
 #endif

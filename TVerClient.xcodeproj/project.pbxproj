@@ -7,9 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2081C1FB6DBB34719DB46A27 /* LiveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56076CA99E17730103B2AA70 /* LiveStreamResolver.swift */; };
 		593A1116BD21A802A4B02FDA /* PreviewFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */; };
 		5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26DFE41E5BF9011519303CBB /* Assets.xcassets */; };
 		5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B037BCAAE8FA70B3D86638 /* BrightcoveStreamResolver.swift */; };
+		76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98541A0DE8DC22D472A22948 /* LiveTVTests.swift */; };
 		8FB4F5C69927BE3AA196012B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C65634372978E5370261875 /* Models.swift */; };
 		CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */; };
 		D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */; };
@@ -32,11 +34,13 @@
 		03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerClientApp.swift; sourceTree = "<group>"; };
 		26DFE41E5BF9011519303CBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4C65634372978E5370261875 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		56076CA99E17730103B2AA70 /* LiveStreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveStreamResolver.swift; sourceTree = "<group>"; };
 		5FA5AB808FC8BDEA8AE7509A /* TVerClientTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TVerClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		646EC583681606D172A307BB /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		68B037BCAAE8FA70B3D86638 /* BrightcoveStreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrightcoveStreamResolver.swift; sourceTree = "<group>"; };
 		75AC98889C8008622C1031D7 /* TVerAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIClient.swift; sourceTree = "<group>"; };
 		812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackController.swift; sourceTree = "<group>"; };
+		98541A0DE8DC22D472A22948 /* LiveTVTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVTests.swift; sourceTree = "<group>"; };
 		C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixture.swift; sourceTree = "<group>"; };
 		FB028B37C45A52314CECCF58 /* TVerClient.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TVerClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -64,6 +68,7 @@
 			isa = PBXGroup;
 			children = (
 				68B037BCAAE8FA70B3D86638 /* BrightcoveStreamResolver.swift */,
+				56076CA99E17730103B2AA70 /* LiveStreamResolver.swift */,
 				812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */,
 			);
 			path = Playback;
@@ -81,6 +86,7 @@
 		506EE39FC99278D1DA88A0C2 /* TVerClientTests */ = {
 			isa = PBXGroup;
 			children = (
+				98541A0DE8DC22D472A22948 /* LiveTVTests.swift */,
 				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
 			);
 			path = TVerClientTests;
@@ -226,6 +232,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */,
 				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -235,6 +242,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */,
+				2081C1FB6DBB34719DB46A27 /* LiveStreamResolver.swift in Sources */,
 				8FB4F5C69927BE3AA196012B /* Models.swift in Sources */,
 				CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */,
 				593A1116BD21A802A4B02FDA /* PreviewFixture.swift in Sources */,
