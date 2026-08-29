@@ -1,0 +1,113 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-ipa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test, and package
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Select an available iPhone simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="$({ xcrun simctl list devices available -j; } | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data["devices"].items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      print(device["udid"])
+                      raise SystemExit(0)
+          raise SystemExit("No available iPhone simulator found")
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Run simulator tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project TVerClient.xcodeproj \
+            -scheme TVerClient \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-simulator" \
+            test
+
+      - name: Build unsigned IPA
+        run: |
+          ./scripts/build-unsigned-ipa.sh \
+            --derived-data "$RUNNER_TEMP/DerivedData-device" \
+            --output "$RUNNER_TEMP/TVerClient-unsigned.ipa"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVerClient-unsigned
+          path: ${{ runner.temp }}/TVerClient-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish unsigned IPA release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download unsigned IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: TVerClient-unsigned
+          path: release-assets
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="unsigned-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          asset="release-assets/TVerClient-unsigned.ipa"
+          title="Unsigned build #${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          notes="Unsigned TVerClient IPA built from ${GITHUB_SHA}. Sign it with your own Apple ID before installation."
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          elif ! gh release create "$tag" "$asset" \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes "$notes" \
+            --latest; then
+            # A retried or concurrent publisher may have created the tag first.
+            gh release upload "$tag" "$asset" --clobber
+          fi
