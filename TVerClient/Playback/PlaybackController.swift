@@ -2,10 +2,20 @@ import AVFoundation
 import Foundation
 import MediaPlayer
 
+enum PlaybackState: Equatable, Sendable {
+    case idle
+    case resolving
+    case playing
+    case paused
+    case ended
+    case failed(TVerClientError)
+}
+
 @MainActor
 final class PlaybackController: ObservableObject {
     @Published private(set) var currentProgram: TVerProgram?
     @Published private(set) var currentLiveChannel: TVerLiveChannel?
+    @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var isPlaying = false
     @Published private(set) var error: TVerClientError?
 
@@ -15,8 +25,11 @@ final class PlaybackController: ObservableObject {
     private let audioSession: AVAudioSession
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var failedObserver: NSObjectProtocol?
+    private var itemStatusObservation: NSKeyValueObservation?
     private var remoteTargets: [(command: MPRemoteCommand, target: Any)] = []
     private var requestGeneration = 0
+    private var wantsPlayback = false
 
     init(
         resolver: any TVerStreamResolving = BrightcoveStreamResolver(),
@@ -33,12 +46,15 @@ final class PlaybackController: ObservableObject {
     }
 
     deinit {
+        itemStatusObservation?.invalidate()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
         for entry in remoteTargets { entry.command.removeTarget(entry.target) }
     }
 
     var errorMessage: String? { error?.localizedDescription }
+    var errorPresentation: TVerErrorPresentation? { error?.presentation }
     var isLive: Bool { currentLiveChannel != nil }
 
     func play(_ program: TVerProgram) async {
@@ -66,29 +82,39 @@ final class PlaybackController: ObservableObject {
     }
 
     func resume() {
-        guard player.currentItem != nil else { return }
+        guard let item = player.currentItem else { return }
         do {
             try activateAudioSession()
+            wantsPlayback = true
+            error = nil
             player.play()
-            isPlaying = true
-            updateNowPlayingInfo()
-        } catch { self.error = Self.playbackError(from: error) }
+            if item.status == .readyToPlay {
+                transition(to: .playing)
+            } else {
+                transition(to: .resolving)
+            }
+        } catch {
+            applyPlaybackFailure(error)
+        }
     }
 
     func pause() {
+        wantsPlayback = false
         player.pause()
-        isPlaying = false
-        updateNowPlayingInfo()
+        transition(to: .paused)
     }
 
     func stop() {
         requestGeneration += 1
+        wantsPlayback = false
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         currentProgram = nil
         currentLiveChannel = nil
-        isPlaying = false
         error = nil
+        transition(to: .idle, updateNowPlaying: false)
         configureRemoteCommandsForCurrentItem()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
@@ -112,31 +138,77 @@ final class PlaybackController: ObservableObject {
 
     private func beginRequest(program: TVerProgram?, liveChannel: TVerLiveChannel?) {
         requestGeneration += 1
+        wantsPlayback = true
         currentProgram = program
         currentLiveChannel = liveChannel
-        isPlaying = false
         error = nil
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        transition(to: .resolving)
         configureRemoteCommandsForCurrentItem()
-        updateNowPlayingInfo(elapsed: 0)
     }
 
     private func start(url: URL, generation: Int) async throws {
         guard generation == requestGeneration else { return }
         try activateAudioSession()
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let item = AVPlayerItem(url: url)
+        observeStatus(of: item, generation: generation)
+        player.replaceCurrentItem(with: item)
         player.play()
-        isPlaying = true
-        updateNowPlayingInfo(elapsed: 0)
+        transition(to: .resolving)
+    }
+
+    private func observeStatus(of item: AVPlayerItem, generation: Int) {
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self, weak item] _, _ in
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item,
+                      generation == self.requestGeneration,
+                      item === self.player.currentItem else { return }
+                switch item.status {
+                case .readyToPlay:
+                    if self.wantsPlayback {
+                        self.player.play()
+                        self.transition(to: .playing)
+                    } else {
+                        self.transition(to: .paused)
+                    }
+                case .failed:
+                    self.applyPlaybackFailure(item.error ?? TVerClientError.playback("再生項目を読み込めませんでした。"))
+                case .unknown:
+                    self.transition(to: .resolving)
+                @unknown default:
+                    self.applyPlaybackFailure(TVerClientError.playback("不明な再生エラーが発生しました。"))
+                }
+            }
+        }
     }
 
     private func finishWithError(_ sourceError: Error, generation: Int) {
         guard generation == requestGeneration else { return }
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         player.replaceCurrentItem(with: nil)
-        isPlaying = false
-        error = Self.playbackError(from: sourceError)
-        updateNowPlayingInfo(elapsed: 0)
+        wantsPlayback = false
+        let normalized = TVerClientError.normalized(from: sourceError, playback: true)
+        error = normalized
+        transition(to: .failed(normalized))
+    }
+
+    private func applyPlaybackFailure(_ sourceError: Error) {
+        let normalized = TVerClientError.normalized(from: sourceError, playback: true)
+        wantsPlayback = false
+        player.pause()
+        error = normalized
+        transition(to: .failed(normalized))
+    }
+
+    private func transition(to newState: PlaybackState, updateNowPlaying: Bool = true) {
+        state = newState
+        isPlaying = newState == .playing
+        if updateNowPlaying { updateNowPlayingInfo() }
     }
 
     private func activateAudioSession() throws {
@@ -151,8 +223,16 @@ final class PlaybackController: ObservableObject {
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
-                self.isPlaying = false
-                self.updateNowPlayingInfo()
+                self.wantsPlayback = false
+                self.transition(to: .ended)
+            }
+        }
+        failedObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
+                let sourceError = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                    ?? TVerClientError.playback("再生を完了できませんでした。")
+                self.applyPlaybackFailure(sourceError)
             }
         }
     }
@@ -208,9 +288,5 @@ final class PlaybackController: ObservableObject {
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
-    }
-
-    private static func playbackError(from error: Error) -> TVerClientError {
-        (error as? TVerClientError) ?? .api(error.localizedDescription)
     }
 }

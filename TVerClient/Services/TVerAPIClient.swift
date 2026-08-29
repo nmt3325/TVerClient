@@ -213,7 +213,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         } catch let error as TVerClientError {
             throw error
         } catch {
-            throw TVerClientError.api(error.localizedDescription)
+            throw TVerClientError.normalized(from: error)
         }
     }
 

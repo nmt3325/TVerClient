@@ -85,15 +85,19 @@ struct ProgramDay: Identifiable, Hashable, Sendable {
 }
 
 enum TVerClientError: LocalizedError, Equatable {
+    case network(String)
     case invalidResponse
     case api(String)
     case noPlayableStream
+    case playback(String)
 
     var errorDescription: String? {
         switch self {
+        case .network(let message): return message
         case .invalidResponse: return "TVerから正しい応答を取得できませんでした。"
         case let .api(message): return message
         case .noPlayableStream: return "再生可能なストリームが見つかりませんでした。"
+        case .playback(let message): return message
         }
     }
 }
