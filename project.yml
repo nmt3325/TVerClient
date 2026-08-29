@@ -21,6 +21,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.nmt3325.TVerClient
         PRODUCT_NAME: TVerClient
         INFOPLIST_KEY_CFBundleDisplayName: TVer Client
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_UIBackgroundModes: [audio]
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoadsInWebContent: true
         GENERATE_INFOPLIST_FILE: true
