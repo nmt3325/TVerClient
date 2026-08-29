@@ -117,12 +117,19 @@ enum ProgramGuideMetrics {
 struct ProgramGuideView: View {
     @StateObject private var viewModel: ProgramGuideViewModel
     @ObservedObject private var playbackController: PlaybackController
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedDate = ProgramGuideMetrics.calendar.startOfDay(for: Date())
     @State private var selectedProgram: ProgramGuideSelection?
+    private let notificationScheduler: ProgramNotificationScheduler
 
-    init(viewModel: ProgramGuideViewModel, playbackController: PlaybackController) {
+    init(
+        viewModel: ProgramGuideViewModel,
+        playbackController: PlaybackController,
+        notificationScheduler: ProgramNotificationScheduler = ProgramNotificationScheduler()
+    ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.playbackController = playbackController
+        self.notificationScheduler = notificationScheduler
     }
 
     var body: some View {
@@ -189,7 +196,8 @@ struct ProgramGuideView: View {
         .sheet(item: $selectedProgram) { selection in
             ProgramGuideDetailSheet(
                 selection: selection,
-                playbackController: playbackController
+                playbackController: playbackController,
+                notificationScheduler: notificationScheduler
             )
             .presentationDetents([.medium, .large])
         }
@@ -202,13 +210,21 @@ struct ProgramGuideView: View {
                 selectedDate: $selectedDate
             )
             Divider()
-            ProgramGuideGrid(
-                guide: viewModel.guide,
-                selectedDate: selectedDate,
-                onSelect: { channel, program in
-                    selectedProgram = ProgramGuideSelection(channel: channel, program: program)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    ProgramGuideAccessibleList(
+                        guide: viewModel.guide,
+                        selectedDate: selectedDate,
+                        onSelect: selectProgram
+                    )
+                } else {
+                    ProgramGuideGrid(
+                        guide: viewModel.guide,
+                        selectedDate: selectedDate,
+                        onSelect: selectProgram
+                    )
                 }
-            )
+            }
             .id(selectedDate)
         }
         .overlay(alignment: .top) {
@@ -221,11 +237,16 @@ struct ProgramGuideView: View {
             }
         }
     }
+
+    private func selectProgram(channel: TVerLiveChannel, program: TVerLiveProgram) {
+        selectedProgram = ProgramGuideSelection(channel: channel, program: program)
+    }
 }
 
 private struct ProgramGuideDatePicker: View {
     let dates: [Date]
     @Binding var selectedDate: Date
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -243,7 +264,11 @@ private struct ProgramGuideDatePicker: View {
                                     .font(.caption)
                             }
                             .foregroundStyle(isSelected ? Color.white : Color.primary)
-                            .frame(minWidth: 68, minHeight: 44)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(
+                                minWidth: dynamicTypeSize.isAccessibilitySize ? 96 : 68,
+                                minHeight: dynamicTypeSize.isAccessibilitySize ? 64 : 44
+                            )
                             .padding(.horizontal, 4)
                             .background(isSelected ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -300,6 +325,76 @@ private struct ProgramGuideDatePicker: View {
         formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
         formatter.dateFormat = "M月d日EEEE"
         return TVerAccessibilityText.guideDate(date, relativeLabel: relativeLabel(for: date))
+    }
+}
+
+private struct ProgramGuideAccessibleList: View {
+    let guide: [TVerGuideChannel]
+    let selectedDate: Date
+    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 20) {
+                ForEach(guide) { item in
+                    let programs = ProgramGuideMetrics.programs(item.programs, on: selectedDate)
+                        .sorted { $0.startAt < $1.startAt }
+                    if !programs.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(item.channel.name, systemImage: "tv")
+                                .font(.headline)
+                                .accessibilityAddTraits(.isHeader)
+
+                            ForEach(programs) { program in
+                                let isOnAir = program.startAt <= Date() && Date() < program.endAt
+                                Button {
+                                    onSelect(item.channel, program)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack(alignment: .firstTextBaseline) {
+                                            Text(program.timeLabel)
+                                                .font(.subheadline.monospacedDigit().weight(.semibold))
+                                            if isOnAir {
+                                                Text("放送中")
+                                                    .font(.subheadline.bold())
+                                                    .foregroundStyle(.red)
+                                            }
+                                        }
+                                        Text(program.seriesTitle)
+                                            .font(.headline)
+                                        if program.title != program.seriesTitle {
+                                            Text(program.title)
+                                                .font(.body)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .foregroundStyle(.primary)
+                                    .padding(14)
+                                    .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget, alignment: .leading)
+                                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(
+                                    TVerAccessibilityText.guideProgram(
+                                        stationName: item.channel.name,
+                                        program: program,
+                                        isOnAir: isOnAir
+                                    )
+                                )
+                                .accessibilityHint("ダブルタップして番組詳細を開きます")
+                                .accessibilityAddTraits(isOnAir ? .isSelected : [])
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -379,7 +474,8 @@ private struct ProgramGuideGrid: View {
                     .frame(width: ProgramGuideMetrics.stationWidth, height: ProgramGuideMetrics.stationHeaderHeight)
                     .background(.regularMaterial)
                     .overlay(alignment: .trailing) { Divider() }
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(item.channel.name)、放送局")
                     .accessibilityAddTraits(.isHeader)
                 }
             }
@@ -545,7 +641,9 @@ private struct ProgramGuideBlock: View {
             stationName: stationName,
             program: program,
             isOnAir: isOnAir
-        ))        .accessibilityHint("ダブルタップして番組詳細を開きます")
+        ))
+        .accessibilityHint("ダブルタップして番組詳細を開きます")
+        .accessibilityInputLabels([program.seriesTitle, program.title])
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
     }
 
@@ -572,9 +670,29 @@ struct ProgramGuideSelection: Identifiable {
 private struct ProgramGuideDetailSheet: View {
     let selection: ProgramGuideSelection
     @ObservedObject var playbackController: PlaybackController
+    let notificationScheduler: ProgramNotificationScheduler
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var requestedPlayback = false
+    @State private var selectedLeadTime: ProgramNotificationLeadTime
+    @State private var isNotificationScheduled = false
+    @State private var isUpdatingNotification = false
+    @State private var notificationStatus: String?
+    @State private var notificationStatusIsError = false
+
+    init(
+        selection: ProgramGuideSelection,
+        playbackController: PlaybackController,
+        notificationScheduler: ProgramNotificationScheduler
+    ) {
+        self.selection = selection
+        self.playbackController = playbackController
+        self.notificationScheduler = notificationScheduler
+        let preferredLeadTime: ProgramNotificationLeadTime = selection.program.startAt
+            .addingTimeInterval(-ProgramNotificationLeadTime.fiveMinutes.rawValue) > Date()
+            ? .fiveMinutes : .atStart
+        _selectedLeadTime = State(initialValue: preferredLeadTime)
+    }
 
     private var canPlay: Bool {
         let now = Date()
@@ -650,6 +768,10 @@ private struct ProgramGuideDetailSheet: View {
                         )
                     )
 
+                    if isFutureProgram {
+                        notificationControls
+                    }
+
                     if requestedPlayback, isCurrent, let presentation = playbackController.errorPresentation {
                         PlaybackFailureView(presentation: presentation, officialURL: selection.channel.webURL) {
                             Task { await playbackController.playLive(playbackChannel) }
@@ -696,8 +818,155 @@ private struct ProgramGuideDetailSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("閉じる") { dismiss() }
-                        .frame(minWidth: ProgramGuideMetrics.minimumTapTarget, minHeight: ProgramGuideMetrics.minimumTapTarget)                }
+                        .frame(
+                            minWidth: ProgramGuideMetrics.minimumTapTarget,
+                            minHeight: ProgramGuideMetrics.minimumTapTarget
+                        )
+                }
             }
+        }
+    }
+
+    private var isFutureProgram: Bool {
+        !selection.program.isPause && selection.program.startAt > Date()
+    }
+
+    private var availableLeadTimes: [ProgramNotificationLeadTime] {
+        [
+            .thirtyMinutes,
+            .tenMinutes,
+            .fiveMinutes,
+            .atStart,
+        ].filter { selection.program.startAt.addingTimeInterval(-$0.rawValue) > Date() }
+    }
+
+    private var notificationControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("放送開始通知", systemImage: "bell")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+
+            Menu {
+                ForEach(availableLeadTimes, id: \.rawValue) { leadTime in
+                    Button {
+                        selectedLeadTime = leadTime
+                    } label: {
+                        if leadTime == selectedLeadTime {
+                            Label(notificationLeadTimeLabel(leadTime), systemImage: "checkmark")
+                        } else {
+                            Text(notificationLeadTimeLabel(leadTime))
+                        }
+                    }
+                }
+            } label: {
+                HStack {
+                    Text("通知時刻")
+                    Spacer()
+                    Text(notificationLeadTimeLabel(selectedLeadTime))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption)
+                }
+                .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("通知時刻、\(notificationLeadTimeLabel(selectedLeadTime))")
+            .accessibilityHint("ダブルタップして通知時刻を選びます")
+
+            Button {
+                scheduleNotification()
+            } label: {
+                Label(
+                    isNotificationScheduled ? "通知を更新" : "通知を設定",
+                    systemImage: isNotificationScheduled ? "bell.badge.fill" : "bell.badge"
+                )
+                .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isUpdatingNotification || availableLeadTimes.isEmpty)
+            .accessibilityHint("選択した時刻に、この番組の放送開始を通知します")
+
+            if isNotificationScheduled {
+                Button(role: .destructive) {
+                    cancelNotification()
+                } label: {
+                    Label("通知を解除", systemImage: "bell.slash")
+                        .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(isUpdatingNotification)
+            }
+
+            if isUpdatingNotification {
+                ProgressView("通知を更新中")
+            }
+
+            if let notificationStatus {
+                Text(notificationStatus)
+                    .font(.footnote)
+                    .foregroundStyle(notificationStatusIsError ? Color.red : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func notificationLeadTimeLabel(_ leadTime: ProgramNotificationLeadTime) -> String {
+        switch leadTime {
+        case .thirtyMinutes:
+            return "30分前"
+        case .tenMinutes:
+            return "10分前"
+        case .fiveMinutes:
+            return "5分前"
+        default:
+            return "開始時刻"
+        }
+    }
+
+    private func scheduleNotification() {
+        isUpdatingNotification = true
+        notificationStatus = nil
+        Task {
+            do {
+                var authorization = await notificationScheduler.authorizationState()
+                if authorization == .notDetermined {
+                    authorization = try await notificationScheduler.requestAuthorization()
+                }
+                guard authorization.canSchedule else {
+                    throw ProgramNotificationSchedulerError.authorizationDenied
+                }
+                _ = try await notificationScheduler.update(
+                    program: selection.program,
+                    channel: selection.channel,
+                    leadTime: selectedLeadTime
+                )
+                isNotificationScheduled = true
+                notificationStatusIsError = false
+                notificationStatus = "\(notificationLeadTimeLabel(selectedLeadTime))に通知します。"
+            } catch {
+                notificationStatusIsError = true
+                notificationStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+            isUpdatingNotification = false
+            UIAccessibility.post(notification: .announcement, argument: notificationStatus)
+        }
+    }
+
+    private func cancelNotification() {
+        isUpdatingNotification = true
+        notificationStatus = nil
+        Task {
+            await notificationScheduler.cancel(program: selection.program, channel: selection.channel)
+            isNotificationScheduled = false
+            notificationStatusIsError = false
+            notificationStatus = "通知を解除しました。"
+            isUpdatingNotification = false
+            UIAccessibility.post(notification: .announcement, argument: notificationStatus)
         }
     }
 
