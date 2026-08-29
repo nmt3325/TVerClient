@@ -21,12 +21,30 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         timeout-minutes: 2
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install pinned XcodeGen
+        env:
+          XCODEGEN_VERSION: 2.46.0
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        shell: bash
         timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-${XCODEGEN_VERSION}.zip"
+          install_root="$RUNNER_TEMP/xcodegen-${XCODEGEN_VERSION}"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --tlsv1.2 --retry 3 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$archive"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$archive" | shasum -a 256 --check
+          rm -rf "$install_root"
+          mkdir -p "$install_root"
+          /usr/bin/unzip -q "$archive" -d "$install_root"
+          test -x "$install_root/xcodegen/bin/xcodegen"
+          echo "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
+          "$install_root/xcodegen/bin/xcodegen" --version
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -62,7 +80,7 @@ jobs:
             --timeout-seconds 900 \
             --attempts 3
 
-      - name: Build unsigned IPA
+      - name: Build and verify unsigned IPA
         timeout-minutes: 17
         run: |
           ./scripts/build-unsigned-ipa.sh \
@@ -71,9 +89,27 @@ jobs:
             --log-dir "$RUNNER_TEMP/ci-logs/device" \
             --timeout-seconds 900
 
+      - name: Generate SBOM and build provenance
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          xcode_version="$(xcodebuild -version | paste -sd ' ' -)"
+          python3 scripts/generate-build-metadata.py \
+            --ipa "$RUNNER_TEMP/TVerClient-unsigned.ipa" \
+            --output-dir "$RUNNER_TEMP" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --xcode-version "$xcode_version" \
+            --xcodegen-version "$(xcodegen --version)"
+
       - name: Upload build diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: TVerClient-build-diagnostics-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-logs
@@ -81,12 +117,14 @@ jobs:
           retention-days: 7
 
       - name: Upload unsigned IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: TVerClient-unsigned
           path: |
             ${{ runner.temp }}/TVerClient-unsigned.ipa
             ${{ runner.temp }}/TVerClient-unsigned.ipa.sha256
+            ${{ runner.temp }}/TVerClient.cdx.json
+            ${{ runner.temp }}/TVerClient-build-provenance.intoto.jsonl
           if-no-files-found: error
           retention-days: 14
 
@@ -101,15 +139,23 @@ jobs:
 
     steps:
       - name: Download unsigned IPA artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         timeout-minutes: 3
         with:
           name: TVerClient-unsigned
           path: release-assets
 
-      - name: Verify unsigned IPA checksum
+      - name: Verify unsigned IPA checksum and metadata
         working-directory: release-assets
-        run: sha256sum --check TVerClient-unsigned.ipa.sha256
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check TVerClient-unsigned.ipa.sha256
+          python3 -m json.tool TVerClient.cdx.json >/dev/null
+          python3 -m json.tool TVerClient-build-provenance.intoto.jsonl >/dev/null
+          expected="$(sha256sum TVerClient-unsigned.ipa | awk '{print $1}')"
+          actual="$(python3 -c 'import json; print(json.load(open("TVerClient-build-provenance.intoto.jsonl"))["subject"][0]["digest"]["sha256"])')"
+          test "$actual" = "$expected"
         timeout-minutes: 1
 
       - name: Create or update GitHub Release
@@ -123,16 +169,18 @@ jobs:
           tag="unsigned-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           asset="release-assets/TVerClient-unsigned.ipa"
           checksum="${asset}.sha256"
+          sbom="release-assets/TVerClient.cdx.json"
+          provenance="release-assets/TVerClient-build-provenance.intoto.jsonl"
           title="Unsigned build #${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          notes="Unsigned TVerClient IPA built from ${GITHUB_SHA}. SHA-256 is attached. Sign it with your own Apple ID before installation."
+          notes="Unsigned TVerClient IPA built from ${GITHUB_SHA}. SHA-256, CycloneDX SBOM, and build provenance are attached. Sign it with your own Apple ID before installation."
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" "$checksum" --clobber
-          elif ! gh release create "$tag" "$asset" "$checksum" \
+            gh release upload "$tag" "$asset" "$checksum" "$sbom" "$provenance" --clobber
+          elif ! gh release create "$tag" "$asset" "$checksum" "$sbom" "$provenance" \
             --target "$GITHUB_SHA" \
             --title "$title" \
             --notes "$notes" \
             --latest; then
             # A retried or concurrent publisher may have created the tag first.
-            gh release upload "$tag" "$asset" "$checksum" --clobber
+            gh release upload "$tag" "$asset" "$checksum" "$sbom" "$provenance" --clobber
           fi

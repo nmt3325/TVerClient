@@ -29,6 +29,7 @@ SCHEME="TVerClient"
 TIMEOUT_SECONDS=1200
 LOG_DIR=""
 TIMEOUT_RUNNER="$SCRIPT_DIR/run-with-timeout.sh"
+UNSIGNED_VERIFIER="$SCRIPT_DIR/verify-unsigned-ipa.sh"
 
 while (($#)); do
   case "$1" in
@@ -80,6 +81,7 @@ done
 
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid timeout: $TIMEOUT_SECONDS" >&2; exit 2; }
 [[ -x "$TIMEOUT_RUNNER" ]] || { echo "Timeout runner not executable: $TIMEOUT_RUNNER" >&2; exit 1; }
+[[ -x "$UNSIGNED_VERIFIER" ]] || { echo "Unsigned verifier not executable: $UNSIGNED_VERIFIER" >&2; exit 1; }
 mkdir -p "$DERIVED_DATA" "$(dirname "$OUTPUT")"
 DERIVED_DATA="$(cd "$DERIVED_DATA" && pwd)"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT")" && pwd)"
@@ -130,8 +132,6 @@ STAGING_DIR="$(mktemp -d "$DERIVED_DATA/unsigned-ipa.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 mkdir -p "$STAGING_DIR/Payload"
 /usr/bin/ditto "$APP_PATH" "$STAGING_DIR/Payload/${SCHEME}.app"
-rm -rf "$STAGING_DIR/Payload/${SCHEME}.app/_CodeSignature"
-
 APP_COUNT="$(find "$STAGING_DIR/Payload" -mindepth 1 -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')"
 [[ "$APP_COUNT" == "1" ]] || { echo "Payload must contain exactly one .app (found $APP_COUNT)" >&2; exit 1; }
 
@@ -146,6 +146,8 @@ rm -f "$OUTPUT"
   echo "IPA does not contain Payload/${SCHEME}.app/Info.plist" >&2
   exit 1
 }
+
+"$UNSIGNED_VERIFIER" "$OUTPUT"
 
 CHECKSUM="$OUTPUT.sha256"
 (
