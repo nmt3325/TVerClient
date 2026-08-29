@@ -1,0 +1,490 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26DFE41E5BF9011519303CBB /* Assets.xcassets */; };
+		8FB4F5C69927BE3AA196012B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C65634372978E5370261875 /* Models.swift */; };
+		CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */; };
+		D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */; };
+		ED0FE3115DE2C7F695B210BA /* TVerAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AC98889C8008622C1031D7 /* TVerAPIClient.swift */; };
+		EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */; };
+		F9891FBF03F1548A10B5C3EC /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 646EC583681606D172A307BB /* RootTabView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		ADCCEB3C42820D4E269F8F20 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B18C6680605C489F35FFDC15 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA1680C54A37C2F2BC2DB534;
+			remoteInfo = TVerClient;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerClientApp.swift; sourceTree = "<group>"; };
+		26DFE41E5BF9011519303CBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		4C65634372978E5370261875 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		5FA5AB808FC8BDEA8AE7509A /* TVerClientTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TVerClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		646EC583681606D172A307BB /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
+		75AC98889C8008622C1031D7 /* TVerAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIClient.swift; sourceTree = "<group>"; };
+		812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackController.swift; sourceTree = "<group>"; };
+		C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
+		FB028B37C45A52314CECCF58 /* TVerClient.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TVerClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		15B87DD210FC3254F6BAF457 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FB028B37C45A52314CECCF58 /* TVerClient.app */,
+				5FA5AB808FC8BDEA8AE7509A /* TVerClientTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3C4E7CCAC2DB499306303BD6 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				75AC98889C8008622C1031D7 /* TVerAPIClient.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		3CC6392B0D896C1052D82142 /* Playback */ = {
+			isa = PBXGroup;
+			children = (
+				812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */,
+			);
+			path = Playback;
+			sourceTree = "<group>";
+		};
+		4E4A6D2A223D58F818610BAF = {
+			isa = PBXGroup;
+			children = (
+				CF6473D667BD94B9D1688EBD /* TVerClient */,
+				506EE39FC99278D1DA88A0C2 /* TVerClientTests */,
+				15B87DD210FC3254F6BAF457 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		506EE39FC99278D1DA88A0C2 /* TVerClientTests */ = {
+			isa = PBXGroup;
+			children = (
+				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
+			);
+			path = TVerClientTests;
+			sourceTree = "<group>";
+		};
+		8364A63E1B4AF64FF6471E94 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				646EC583681606D172A307BB /* RootTabView.swift */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		88C740EF60282AEDA6B2B606 /* Contracts */ = {
+			isa = PBXGroup;
+			children = (
+				4C65634372978E5370261875 /* Models.swift */,
+			);
+			path = Contracts;
+			sourceTree = "<group>";
+		};
+		A852B85A63DED680716132EE /* App */ = {
+			isa = PBXGroup;
+			children = (
+				03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		BF2B1D1D660E4F0A98F37DA8 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				26DFE41E5BF9011519303CBB /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		CF6473D667BD94B9D1688EBD /* TVerClient */ = {
+			isa = PBXGroup;
+			children = (
+				A852B85A63DED680716132EE /* App */,
+				88C740EF60282AEDA6B2B606 /* Contracts */,
+				8364A63E1B4AF64FF6471E94 /* Features */,
+				3CC6392B0D896C1052D82142 /* Playback */,
+				BF2B1D1D660E4F0A98F37DA8 /* Resources */,
+				3C4E7CCAC2DB499306303BD6 /* Services */,
+			);
+			path = TVerClient;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AA1680C54A37C2F2BC2DB534 /* TVerClient */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0BCE350FFFB0D743A7D7BE8A /* Build configuration list for PBXNativeTarget "TVerClient" */;
+			buildPhases = (
+				62150A6724229507D9F1ECAB /* Sources */,
+				705ED5C8AEDF659EB96D750C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TVerClient;
+			packageProductDependencies = (
+			);
+			productName = TVerClient;
+			productReference = FB028B37C45A52314CECCF58 /* TVerClient.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B2425493FA13F9CC532D99F0 /* TVerClientTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A0A064EC4DC3F0D999446580 /* Build configuration list for PBXNativeTarget "TVerClientTests" */;
+			buildPhases = (
+				340C96CD896DE12BEECFE4E9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F9BF3CDB91C57E739616F40C /* PBXTargetDependency */,
+			);
+			name = TVerClientTests;
+			packageProductDependencies = (
+			);
+			productName = TVerClientTests;
+			productReference = 5FA5AB808FC8BDEA8AE7509A /* TVerClientTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B18C6680605C489F35FFDC15 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					AA1680C54A37C2F2BC2DB534 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					B2425493FA13F9CC532D99F0 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 24F77AA1B08FB676DD17AE2F /* Build configuration list for PBXProject "TVerClient" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4E4A6D2A223D58F818610BAF;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 15B87DD210FC3254F6BAF457 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AA1680C54A37C2F2BC2DB534 /* TVerClient */,
+				B2425493FA13F9CC532D99F0 /* TVerClientTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		705ED5C8AEDF659EB96D750C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		340C96CD896DE12BEECFE4E9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		62150A6724229507D9F1ECAB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8FB4F5C69927BE3AA196012B /* Models.swift in Sources */,
+				CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */,
+				F9891FBF03F1548A10B5C3EC /* RootTabView.swift in Sources */,
+				ED0FE3115DE2C7F695B210BA /* TVerAPIClient.swift in Sources */,
+				D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		F9BF3CDB91C57E739616F40C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA1680C54A37C2F2BC2DB534 /* TVerClient */;
+			targetProxy = ADCCEB3C42820D4E269F8F20 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		4DDC1AF0F5FD7B0F0871A526 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		50B565C9112F302B57B6298A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		5A3668AE14140A80DA4B046D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "TVer Client";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoadsInWebContent = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.nmt3325.TVerClient;
+				PRODUCT_NAME = TVerClient;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		8DFE2373CAD4A4FAC6C304D8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.nmt3325.TVerClientTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TVerClient.app/TVerClient";
+			};
+			name = Release;
+		};
+		A6E3807C76202DF1126C81A9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.nmt3325.TVerClientTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TVerClient.app/TVerClient";
+			};
+			name = Debug;
+		};
+		E19A132856E3EF8050338886 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "TVer Client";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoadsInWebContent = YES;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.nmt3325.TVerClient;
+				PRODUCT_NAME = TVerClient;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0BCE350FFFB0D743A7D7BE8A /* Build configuration list for PBXNativeTarget "TVerClient" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A3668AE14140A80DA4B046D /* Debug */,
+				E19A132856E3EF8050338886 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		24F77AA1B08FB676DD17AE2F /* Build configuration list for PBXProject "TVerClient" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4DDC1AF0F5FD7B0F0871A526 /* Debug */,
+				50B565C9112F302B57B6298A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A0A064EC4DC3F0D999446580 /* Build configuration list for PBXNativeTarget "TVerClientTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A6E3807C76202DF1126C81A9 /* Debug */,
+				8DFE2373CAD4A4FAC6C304D8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B18C6680605C489F35FFDC15 /* Project object */;
+}
