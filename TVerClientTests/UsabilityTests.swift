@@ -27,6 +27,85 @@ final class UsabilityTests: XCTestCase {
     }
 
     @MainActor
+    func testRecentHistoryExpiresWithoutRemovingFavorites() throws {
+        let suiteName = "UsabilityTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var currentDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let program = makeProgram(id: "retained-favorite", title: "保存対象")
+
+        let store = ProgramLibraryStore(
+            defaults: defaults,
+            storageKey: "expiry",
+            recentRetention: 7 * 24 * 60 * 60,
+            now: { currentDate }
+        )
+        store.toggleFavorite(program)
+        store.recordRecentlyViewed(program)
+        currentDate.addTimeInterval(8 * 24 * 60 * 60)
+
+        let restored = ProgramLibraryStore(
+            defaults: defaults,
+            storageKey: "expiry",
+            recentRetention: 7 * 24 * 60 * 60,
+            now: { currentDate }
+        )
+
+        XCTAssertTrue(restored.isFavorite(program))
+        XCTAssertEqual(restored.favoritePrograms.map(\.id), [program.id])
+        XCTAssertTrue(restored.recentPrograms.isEmpty)
+    }
+
+    @MainActor
+    func testLegacyRecentHistoryMigratesWithTimestampsAndThenExpires() throws {
+        struct LegacySnapshot: Encodable {
+            let favoriteProgramIDs: Set<String>
+            let favoritePrograms: [TVerProgram]
+            let recentPrograms: [TVerProgram]
+        }
+
+        let suiteName = "UsabilityTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "legacy"
+        let program = makeProgram(id: "legacy-program", title: "旧履歴")
+        let legacySnapshot = LegacySnapshot(
+            favoriteProgramIDs: [program.id],
+            favoritePrograms: [program],
+            recentPrograms: [program]
+        )
+        defaults.set(try JSONEncoder().encode(legacySnapshot), forKey: key)
+        var currentDate = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let migrated = ProgramLibraryStore(
+            defaults: defaults,
+            storageKey: key,
+            recentRetention: 24 * 60 * 60,
+            now: { currentDate }
+        )
+        XCTAssertEqual(migrated.recentPrograms.map(\.id), [program.id])
+        XCTAssertTrue(migrated.isFavorite(program))
+
+        let migratedData = try XCTUnwrap(defaults.data(forKey: key))
+        let migratedJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: migratedData) as? [String: Any]
+        )
+        let timestamps = try XCTUnwrap(migratedJSON["recentViewedAt"] as? [String: Any])
+        XCTAssertNotNil(timestamps[program.id])
+
+        currentDate.addTimeInterval(2 * 24 * 60 * 60)
+        let expired = ProgramLibraryStore(
+            defaults: defaults,
+            storageKey: key,
+            recentRetention: 24 * 60 * 60,
+            now: { currentDate }
+        )
+        XCTAssertTrue(expired.recentPrograms.isEmpty)
+        XCTAssertTrue(expired.isFavorite(program))
+        XCTAssertEqual(expired.favoritePrograms.map(\.id), [program.id])
+    }
+
+    @MainActor
     func testLibraryRemovalAndClearOperationsKeepVisibleCollectionsInSync() throws {
         let suiteName = "UsabilityTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
