@@ -5,6 +5,7 @@ import SwiftUI
 struct RootTabView: View {
     @StateObject private var playbackController = PlaybackController()
     @StateObject private var libraryStore = ProgramLibraryStore()
+    @StateObject private var diagnosticLogStore = DiagnosticLogStore.shared
 
     var body: some View {
         TabView {
@@ -40,6 +41,11 @@ struct RootTabView: View {
             .tabItem {
                 Label("ライブ", systemImage: "dot.radiowaves.left.and.right")
             }
+
+            DiagnosticsView(logStore: diagnosticLogStore)
+                .tabItem {
+                    Label("診断", systemImage: "stethoscope")
+                }
         }
         .tint(.blue)
     }
@@ -84,6 +90,12 @@ final class ScheduleViewModel: ObservableObject {
             hasLoaded = true
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            DiagnosticLogStore.shared.record(
+                .error,
+                category: "catalog",
+                message: "Schedule loading failed",
+                metadata: ["error": error.localizedDescription]
+            )
         }
 
         isLoading = false
@@ -443,6 +455,12 @@ final class LiveViewModel: ObservableObject {
             hasLoaded = true
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            DiagnosticLogStore.shared.record(
+                .error,
+                category: "live-catalog",
+                message: "Live channel loading failed",
+                metadata: ["error": error.localizedDescription]
+            )
         }
         isLoading = false
     }

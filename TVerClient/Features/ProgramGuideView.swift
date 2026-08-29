@@ -45,6 +45,12 @@ final class ProgramGuideViewModel: ObservableObject {
             hasLoaded = true
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            DiagnosticLogStore.shared.record(
+                .error,
+                category: "program-guide",
+                message: "Program guide loading failed",
+                metadata: ["error": error.localizedDescription]
+            )
         }
         isLoading = false
     }

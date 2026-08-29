@@ -148,6 +148,11 @@ final class PlaybackController: ObservableObject {
         player.replaceCurrentItem(with: nil)
         transition(to: .resolving)
         configureRemoteCommandsForCurrentItem()
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: liveChannel == nil ? "VOD playback request started" : "Live playback request started"
+        )
     }
 
     private func start(url: URL, generation: Int) async throws {
@@ -195,6 +200,7 @@ final class PlaybackController: ObservableObject {
         let normalized = TVerClientError.normalized(from: sourceError, playback: true)
         error = normalized
         transition(to: .failed(normalized))
+        recordPlaybackFailure(normalized, phase: "stream-resolution")
     }
 
     private func applyPlaybackFailure(_ sourceError: Error) {
@@ -203,6 +209,21 @@ final class PlaybackController: ObservableObject {
         player.pause()
         error = normalized
         transition(to: .failed(normalized))
+        recordPlaybackFailure(normalized, phase: "player")
+    }
+
+    private func recordPlaybackFailure(_ error: TVerClientError, phase: String) {
+        DiagnosticLogStore.shared.record(
+            .error,
+            category: "playback",
+            message: "Playback failed",
+            metadata: [
+                "phase": phase,
+                "category": error.presentation.category.rawValue,
+                "error": error.localizedDescription,
+                "contentType": isLive ? "live" : "vod",
+            ]
+        )
     }
 
     private func transition(to newState: PlaybackState, updateNowPlaying: Bool = true) {
