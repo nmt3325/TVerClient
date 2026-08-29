@@ -236,6 +236,22 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         state = .failed(failure)
     }
 
+    func handleDidStart() {
+        lastFailure = nil
+        state = .active
+    }
+
+    func handleDidStop() {
+        lastFailure = nil
+        state = .inactive
+        refreshAvailability()
+    }
+
+    func handleFailedToStart(_ error: Error) {
+        fail(with: .failedToStart(error))
+        refreshAvailability()
+    }
+
     private func installApplicationObservers() {
         notificationTokens.append(notificationCenter.addObserver(
             forName: UIApplication.willResignActiveNotification,
@@ -272,16 +288,14 @@ extension PictureInPictureCoordinator: @preconcurrency AVPictureInPictureControl
     func pictureInPictureControllerDidStartPictureInPicture(
         _: AVPictureInPictureController
     ) {
-        lastFailure = nil
-        state = .active
+        handleDidStart()
     }
 
     func pictureInPictureController(
         _: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
-        fail(with: .failedToStart(error))
-        refreshAvailability()
+        handleFailedToStart(error)
     }
 
     func pictureInPictureControllerWillStopPictureInPicture(
@@ -293,9 +307,7 @@ extension PictureInPictureCoordinator: @preconcurrency AVPictureInPictureControl
     func pictureInPictureControllerDidStopPictureInPicture(
         _: AVPictureInPictureController
     ) {
-        lastFailure = nil
-        state = .inactive
-        refreshAvailability()
+        handleDidStop()
     }
 
     func pictureInPictureController(

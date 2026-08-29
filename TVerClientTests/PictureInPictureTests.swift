@@ -125,10 +125,14 @@ final class PictureInPictureTests: XCTestCase {
     private func makeCoordinator(
         driver: FakePictureInPictureDriver
     ) -> PictureInPictureCoordinator {
-        PictureInPictureCoordinator(
+        let coordinator = PictureInPictureCoordinator(
             isSupported: { true },
             driverFactory: { _ in driver }
         )
+        driver.didStart = { [weak coordinator] in coordinator?.handleDidStart() }
+        driver.didStop = { [weak coordinator] in coordinator?.handleDidStop() }
+        driver.didFail = { [weak coordinator] error in coordinator?.handleFailedToStart(error) }
+        return coordinator
     }
 }
 
@@ -139,6 +143,9 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
     var isPictureInPictureActive = false
     var canStartPictureInPictureAutomaticallyFromInline = false
     var possibilityDidChange: ((Bool) -> Void)?
+    var didStart: (() -> Void)?
+    var didStop: (() -> Void)?
+    var didFail: ((Error) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
@@ -157,25 +164,15 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
 
     func simulateDidStart() {
         isPictureInPictureActive = true
-        delegate?.pictureInPictureControllerDidStartPictureInPicture?(makeSystemController())
+        didStart?()
     }
 
     func simulateDidStop() {
         isPictureInPictureActive = false
-        delegate?.pictureInPictureControllerDidStopPictureInPicture?(makeSystemController())
+        didStop?()
     }
 
     func simulateFailure(_ error: Error) {
-        delegate?.pictureInPictureController?(
-            makeSystemController(),
-            failedToStartPictureInPictureWithError: error
-        )
-    }
-
-    private func makeSystemController() -> AVPictureInPictureController {
-        guard let controller = AVPictureInPictureController(playerLayer: AVPlayerLayer()) else {
-            preconditionFailure("Test Picture in Picture controller could not be created")
-        }
-        return controller
+        didFail?(error)
     }
 }
