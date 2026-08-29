@@ -45,7 +45,7 @@ jobs:
                       print(device["udid"])
                       raise SystemExit(0)
           raise SystemExit("No available iPhone simulator found")
-          ')
+          ')"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
 
       - name: Run simulator tests
