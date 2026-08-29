@@ -1,0 +1,40 @@
+{
+  "name": "TVer Client",
+  "subtitle": "TVer ClientのAltStore・SideStore・LiveContainer対応ソース",
+  "description": "非公式TVer iOSクライアントのUnsigned IPA配布ソースです。",
+  "iconURL": "https://nmt3325.github.io/TVerClient/icon.png",
+  "website": "https://nmt3325.github.io/TVerClient/",
+  "tintColor": "#2589FF",
+  "nsfw": false,
+  "featuredApps": [
+    "dev.nmt3325.TVerClient"
+  ],
+  "apps": [
+    {
+      "name": "TVer Client",
+      "bundleIdentifier": "dev.nmt3325.TVerClient",
+      "developerName": "TVerClient Contributors",
+      "subtitle": "番組表・見逃し・ライブ再生に対応した非公式クライアント",
+      "localizedDescription": "新聞型番組表、サムネイル、見逃し再生、ライブテレビ、バックグラウンド音声、プライバシー保護付き診断ログを備えます。",
+      "iconURL": "https://nmt3325.github.io/TVerClient/icon.png",
+      "tintColor": "#2589FF",
+      "category": "entertainment",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "buildVersion": "1",
+          "date": "2026-08-29",
+          "localizedDescription": "診断ログ書き出し、番組表、見逃し・ライブ再生を含むUnsigned IPAです。 Build a38c9d6.",
+          "downloadURL": "https://github.com/nmt3325/TVerClient/releases/latest/download/TVerClient-unsigned.ipa",
+          "size": 1085240,
+          "minOSVersion": "16.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {}
+      }
+    }
+  ],
+  "news": []
+}

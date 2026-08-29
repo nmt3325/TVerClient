@@ -91,6 +91,18 @@ xcodegen generate
 3. 実行結果の **Artifacts** から `TVerClient-unsigned` をダウンロードします。
 4. `main` への push と手動実行では、同じ IPA が最新の GitHub Release にも添付されます。
 
+## AltStore・SideStore・LiveContainerソース
+
+ソースページ: <https://nmt3325.github.io/TVerClient/>
+
+ソースURL:
+
+```text
+https://nmt3325.github.io/TVerClient/apps.json
+```
+
+ページの「AltStore / SideStoreに追加」または「LiveContainerに追加」から登録できます。各成功ビルドで、最新版Unsigned IPAのバージョン・ファイルサイズ・ダウンロードURLを含むソースJSONを自動生成します。
+
 ## SideStore などで署名して導入する
 
 1. GitHub Actions またはローカルビルドから `TVerClient-unsigned.ipa` を取得します。

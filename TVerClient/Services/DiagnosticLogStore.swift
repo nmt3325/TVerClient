@@ -59,8 +59,10 @@ final class DiagnosticLogStore: ObservableObject {
         message: String,
         metadata: [String: String] = [:]
     ) {
-        let sanitizedMetadata = Dictionary(uniqueKeysWithValues: metadata.map {
-            (Self.sanitize($0.key), Self.sanitize($0.value))
+        let sanitizedMetadata = Dictionary(uniqueKeysWithValues: metadata.map { key, value in
+            let sanitizedKey = Self.sanitize(key)
+            let sanitizedValue = Self.isSensitiveMetadataKey(key) ? "<redacted>" : Self.sanitize(value)
+            return (sanitizedKey, sanitizedValue)
         })
         entries.append(DiagnosticLogEntry(
             id: UUID(),
@@ -165,6 +167,12 @@ final class DiagnosticLogStore: ObservableObject {
         } catch {
             // Diagnostics must never prevent the app from continuing to run.
         }
+    }
+
+    private static func isSensitiveMetadataKey(_ key: String) -> Bool {
+        let normalized = key.lowercased().replacingOccurrences(of: "_", with: "-")
+        return ["authorization", "cookie", "platform-token", "platform-uid", "x-streaks-api-key", "api-key"]
+            .contains { normalized.contains($0) }
     }
 
     private static func replacing(pattern: String, in value: String, with template: String) -> String {

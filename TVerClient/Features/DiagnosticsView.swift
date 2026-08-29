@@ -32,7 +32,7 @@ struct DiagnosticsView: View {
     @State private var showsClearConfirmation = false
 
     init(
-        logStore: DiagnosticLogStore = .shared,
+        logStore: DiagnosticLogStore,
         networkService: NetworkDiagnosticsService = NetworkDiagnosticsService()
     ) {
         self.logStore = logStore
