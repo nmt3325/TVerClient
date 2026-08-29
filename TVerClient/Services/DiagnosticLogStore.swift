@@ -29,6 +29,10 @@ final class DiagnosticLogStore: ObservableObject {
     private let now: () -> Date
     private let maximumEntryCount: Int
     private let retentionInterval: TimeInterval
+    private let persistenceQueue = DispatchQueue(
+        label: "dev.nmt3325.TVerClient.diagnostics-persistence",
+        qos: .utility
+    )
 
     init(
         directoryURL: URL? = nil,
@@ -78,8 +82,13 @@ final class DiagnosticLogStore: ObservableObject {
 
     func clear() {
         entries.removeAll()
-        try? FileManager.default.removeItem(at: fileURL)
         record(.info, category: "diagnostics", message: "Diagnostic log cleared")
+    }
+
+    /// Waits for queued file writes. Intended for tests and explicit shutdown
+    /// coordination; normal logging never blocks the main actor.
+    func flushPendingWrites() {
+        persistenceQueue.sync {}
     }
 
     func exportText() -> String {
@@ -158,14 +167,19 @@ final class DiagnosticLogStore: ObservableObject {
     }
 
     private func persist() {
-        do {
-            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            try encoder.encode(entries).write(to: fileURL, options: .atomic)
-        } catch {
-            // Diagnostics must never prevent the app from continuing to run.
+        let snapshot = entries
+        let directoryURL = directoryURL
+        let fileURL = fileURL
+        persistenceQueue.async {
+            do {
+                try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                try encoder.encode(snapshot).write(to: fileURL, options: .atomic)
+            } catch {
+                // Diagnostics must never prevent the app from continuing to run.
+            }
         }
     }
 
@@ -182,8 +196,7 @@ final class DiagnosticLogStore: ObservableObject {
     }
 
     private static var runtimeLabel: String {
-        Bundle.main.bundlePath.localizedCaseInsensitiveContains("LiveContainer")
-            ? "LiveContainer detected" : "standard/unknown container"
+        AppRuntimeEnvironment.label
     }
 
     private static let timestampFormatter: ISO8601DateFormatter = {

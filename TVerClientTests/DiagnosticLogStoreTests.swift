@@ -24,6 +24,7 @@ final class DiagnosticLogStoreTests: XCTestCase {
         XCTAssertFalse(report.contains("platform_token"))
         XCTAssertTrue(report.contains("https://example.com/<redacted>"))
         XCTAssertTrue(report.contains("<redacted>"))
+        store.flushPendingWrites()
     }
 
     func testPersistsEntriesAndPrunesOldAndExcessRecords() throws {
@@ -45,6 +46,7 @@ final class DiagnosticLogStoreTests: XCTestCase {
         first.record(.error, category: "test", message: "three")
         XCTAssertEqual(first.entries.count, 3)
 
+        first.flushPendingWrites()
         current.addTimeInterval(120)
         let second = DiagnosticLogStore(
             directoryURL: directory,
@@ -54,5 +56,21 @@ final class DiagnosticLogStoreTests: XCTestCase {
         )
         XCTAssertEqual(second.entries.count, 1)
         XCTAssertEqual(second.entries.first?.message, "Application session started")
+        second.flushPendingWrites()
+    }
+
+    func testDetectsLiveContainerEnvironmentVariables() {
+        XCTAssertTrue(AppRuntimeEnvironment.isLiveContainer(
+            environment: ["LC_HOME_PATH": "/private/var/mobile/Containers/Data/Application/host"],
+            bundlePath: "/private/var/containers/Bundle/Application/guest/TVerClient.app"
+        ))
+        XCTAssertTrue(AppRuntimeEnvironment.isLiveContainer(
+            environment: ["LP_HOME_PATH": "/private/var/mobile/Containers/Data/Application/host"],
+            bundlePath: "/private/var/containers/Bundle/Application/guest/TVerClient.app"
+        ))
+        XCTAssertFalse(AppRuntimeEnvironment.isLiveContainer(
+            environment: [:],
+            bundlePath: "/private/var/containers/Bundle/Application/native/TVerClient.app"
+        ))
     }
 }

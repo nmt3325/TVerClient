@@ -784,6 +784,11 @@ private struct ProgramGuideDetailSheet: View {
                             if requestedPlayback, playbackController.player.currentItem != nil {
                                 playbackController.togglePlayback()
                             } else {
+                                DiagnosticLogStore.shared.record(
+                                    .info,
+                                    category: "playback",
+                                    message: "Guide live playback selected"
+                                )
                                 requestedPlayback = true
                                 Task { await playbackController.playLive(playbackChannel) }
                             }

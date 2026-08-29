@@ -61,7 +61,9 @@ final class PlaybackController: ObservableObject {
         beginRequest(program: program, liveChannel: nil)
         let generation = requestGeneration
         do {
-            try await start(url: resolver.resolveStream(for: program), generation: generation)
+            let url = try await resolver.resolveStream(for: program)
+            recordPlaybackCheckpoint("VOD stream resolved")
+            try await start(url: url, generation: generation)
         } catch {
             finishWithError(error, generation: generation)
         }
@@ -75,7 +77,9 @@ final class PlaybackController: ObservableObject {
             return
         }
         do {
-            try await start(url: liveResolver.resolveLiveStream(for: channel), generation: generation)
+            let url = try await liveResolver.resolveLiveStream(for: channel)
+            recordPlaybackCheckpoint("Live stream resolved")
+            try await start(url: url, generation: generation)
         } catch {
             finishWithError(error, generation: generation)
         }
@@ -138,6 +142,11 @@ final class PlaybackController: ObservableObject {
 
     private func beginRequest(program: TVerProgram?, liveChannel: TVerLiveChannel?) {
         requestGeneration += 1
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: liveChannel == nil ? "VOD playback request started" : "Live playback request started"
+        )
         wantsPlayback = true
         currentProgram = program
         currentLiveChannel = liveChannel
@@ -148,19 +157,17 @@ final class PlaybackController: ObservableObject {
         player.replaceCurrentItem(with: nil)
         transition(to: .resolving)
         configureRemoteCommandsForCurrentItem()
-        DiagnosticLogStore.shared.record(
-            .info,
-            category: "playback",
-            message: liveChannel == nil ? "VOD playback request started" : "Live playback request started"
-        )
     }
 
     private func start(url: URL, generation: Int) async throws {
         guard generation == requestGeneration else { return }
+        recordPlaybackCheckpoint("Audio session activation started")
         try activateAudioSession()
+        recordPlaybackCheckpoint("Audio session activated")
         let item = AVPlayerItem(url: url)
         observeStatus(of: item, generation: generation)
         player.replaceCurrentItem(with: item)
+        recordPlaybackCheckpoint("Player item attached")
         player.play()
         transition(to: .resolving)
     }
@@ -174,6 +181,7 @@ final class PlaybackController: ObservableObject {
                       item === self.player.currentItem else { return }
                 switch item.status {
                 case .readyToPlay:
+                    self.recordPlaybackCheckpoint("Player item ready")
                     if self.wantsPlayback {
                         self.player.play()
                         self.transition(to: .playing)
@@ -210,6 +218,15 @@ final class PlaybackController: ObservableObject {
         error = normalized
         transition(to: .failed(normalized))
         recordPlaybackFailure(normalized, phase: "player")
+    }
+
+    private func recordPlaybackCheckpoint(_ message: String) {
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: message,
+            metadata: ["contentType": isLive ? "live" : "vod"]
+        )
     }
 
     private func recordPlaybackFailure(_ error: TVerClientError, phase: String) {

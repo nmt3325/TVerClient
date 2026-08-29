@@ -24,10 +24,21 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> PlayerLayerContainerView {
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: "Video surface creation started",
+            metadata: ["pictureInPicture": AppRuntimeEnvironment.isLiveContainer ? "disabled-livecontainer" : "enabled"]
+        )
         let view = PlayerLayerContainerView()
         configure(view)
         context.coordinator.attachedLayer = view.playerLayer
         pictureInPicture.attach(to: view.playerLayer)
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: "Video surface created"
+        )
         return view
     }
 

@@ -368,6 +368,11 @@ private struct ScheduleView: View {
 
     private func programCard(_ program: TVerProgram) -> some View {
         ProgramCard(program: program, libraryStore: libraryStore) {
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: "VOD playback selected"
+            )
             selectedProgram = program
         }
     }
@@ -497,7 +502,14 @@ private struct LiveView: View {
                     ScrollView {
                         LazyVStack(spacing: 14) {
                             ForEach(viewModel.channels) { channel in
-                                LiveChannelCard(channel: channel) { selectedChannel = channel }
+                                LiveChannelCard(channel: channel) {
+                                    DiagnosticLogStore.shared.record(
+                                        .info,
+                                        category: "playback",
+                                        message: "Live playback selected"
+                                    )
+                                    selectedChannel = channel
+                                }
                             }
                         }
                         .padding(16)
@@ -988,7 +1000,14 @@ private struct LibraryView: View {
                 } else {
                     List {
                         ForEach(programs) { program in
-                            LibraryProgramRow(program: program) { selectedProgram = program }
+                            LibraryProgramRow(program: program) {
+                                DiagnosticLogStore.shared.record(
+                                    .info,
+                                    category: "playback",
+                                    message: "Library playback selected"
+                                )
+                                selectedProgram = program
+                            }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button(role: .destructive) { remove(program) } label: {
                                         Label("削除", systemImage: "trash")

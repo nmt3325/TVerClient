@@ -136,7 +136,8 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         startsAutomaticallyFromInline: Bool = true,
         notificationCenter: NotificationCenter = .default,
         isSupported: @escaping () -> Bool = {
-            AVPictureInPictureController.isPictureInPictureSupported()
+            !AppRuntimeEnvironment.isLiveContainer
+                && AVPictureInPictureController.isPictureInPictureSupported()
         },
         driverFactory: @escaping DriverFactory = {
             AVPictureInPictureControllerDriver(playerLayer: $0)
