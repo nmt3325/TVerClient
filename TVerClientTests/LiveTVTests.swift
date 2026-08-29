@@ -84,51 +84,137 @@ final class LiveTVTests: XCTestCase {
         XCTAssertEqual(channel.currentProgram?.title, "配信休止")
     }
 
-    func testLiveResolverUsesProjectKeyAndOmitsEmptyATI() async throws {
+    func testLiveResolverUsesOfficialPlaybackThenSSAIFLow() async throws {
+        var order: [String] = []
+        var observedSessionBody: Data?
         LiveStubURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
             if path.hasSuffix("streaks_info_v2.json") {
-                return Self.response(#"{"tver-simul-ntv":{"api_key":{"key01":"old-key","key02":"current-key"},"ad_template_id":{"ios":"","pc":""}}}"#)
+                order.append("info")
+                return Self.response(#"{"tver-simul-ntv":{"api_key":{"key01":"old-key","key02":"current-key"},"ad_template_id":{"ios":"must-not-be-sent"}}}"#)
             }
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"), "current-key")
-            XCTAssertEqual(request.url?.host, "playback.api.streaks.jp")
-            XCTAssertNil(try URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
-            return Self.response(#"{"sources":[{"src":"https://official.example/live/master.m3u8","type":"application/x-mpegURL"}]}"#)
+            if request.url?.host == "playback.api.streaks.jp" {
+                order.append("playback")
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"), "current-key")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "*/*")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://tver.jp")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Referer"), "https://tver.jp/")
+                XCTAssertNil(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.query)
+                XCTAssertFalse(request.url!.absoluteString.contains("ati"))
+                return Self.response(#"{"project":"response-project","mediaId":"response-media","ssai":{"trackingType":"auto"},"ad_fields":{"custom01":"wire-value","video_id":"wire-video"},"sources":[{"id":"dash","src":"https://official.example/manifest.mpd","type":"application/dash+xml","ssai":{"trackingType":"auto"}},{"id":"drm","src":"https://official.example/drm.m3u8","type":"application/x-mpegURL","key_systems":{"fairplay":{}},"ssai":{"trackingType":"auto"}},{"id":"hls-main","src":"https://official.example/live/master.m3u8?existing=1","type":"application/x-mpegURL","key_systems":{},"ssai":{"trackingType":"auto"}},{"id":"hls-backup","src":"https://official.example/live/backup.m3u8","type":"application/vnd.apple.mpegurl","ssai":{"trackingType":"auto"}}]}"#)
+            }
+            XCTAssertEqual(request.url?.host, "ssai.api.streaks.jp")
+            order.append("session")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(path, "/v1/projects/response-project/medias/response-media/ssai/session")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "*/*")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://tver.jp")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Referer"), "https://tver.jp/")
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Streaks-Api-Key"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            return Self.response(#"[{"id":"hls-backup","query":"token=backup"},{"id":"hls-main","query":"token=abc%2Fdef&pdt=-7413&session=opaque-session"}]"#)        }
+
+        let resolver = LiveStreamResolver(
+            session: session,
+            dateProvider: { Date(timeIntervalSince1970: 1_788_001_620) },
+            requestObserver: { request in
+                if request.httpMethod == "POST" { observedSessionBody = request.httpBody }
+            }
+        )
+        let url = try await resolver.resolveLiveStream(for: Self.channel())
+        XCTAssertEqual(order, ["info", "playback", "session"])
+        XCTAssertEqual(url.absoluteString, "https://official.example/live/master.m3u8?existing=1&token=abc%2Fdef&pdt=-7413&session=opaque-session")
+
+        let body = try XCTUnwrap(observedSessionBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["id"] as? String, "hls-main,hls-backup")
+        let ads = try XCTUnwrap(json["ads_params"] as? [String: Any])
+        XCTAssertEqual(ads["delivery_type"] as? String, "simul")
+        XCTAssertEqual(ads["is_dvr"] as? String, "0")
+        XCTAssertEqual(ads["video_id"] as? String, "wire-video")
+        XCTAssertEqual(ads["vr_uuid"] as? String, "")
+        XCTAssertEqual(ads["personalIsLat"] as? String, "0")
+        XCTAssertEqual(ads["custom01"] as? String, "wire-value")
+        XCTAssertEqual(ads["device"] as? String, "pc")
+    }
+
+    func testLiveResolverUsesSourceSSAIFlagAndQuestionSeparator() async throws {
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true {
+                return Self.infoResponse
+            }
+            if request.url?.host == "playback.api.streaks.jp" {
+                return Self.response(#"{"projectId":"p","id":"m","sources":[{"id":"hls","src":"https://official.example/live.m3u8","type":"application/x-mpegURL","ssai":true}]}"#)
+            }
+            return Self.response(#"[{"id":"hls","query":"session=s&token=t"}]"#)
         }
-        let channel = TVerLiveChannel(
+        let url = try await resolver().resolveLiveStream(for: Self.channel())
+        XCTAssertEqual(url.absoluteString, "https://official.example/live.m3u8?session=s&token=t")
+    }
+
+    func testLiveResolverKeepsNonSSAISourceFallback() async throws {
+        var didPost = false
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            if request.url?.host == "playback.api.streaks.jp" {
+                return Self.response(#"{"sources":[{"src":"https://official.example/plain.m3u8","type":"application/x-mpegURL"}]}"#)
+            }
+            didPost = true
+            throw URLError(.badServerResponse)
+        }
+        let url = try await resolver().resolveLiveStream(for: Self.channel())
+        XCTAssertEqual(url.absoluteString, "https://official.example/plain.m3u8")
+        XCTAssertFalse(didPost)
+    }
+
+    func testLiveResolverDoesNotRepostAlreadySessionizedSource() async throws {
+        var didPost = false
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            if request.url?.host == "playback.api.streaks.jp" {
+                return Self.response(#"{"ssai":true,"sources":[{"id":"hls","src":"https://official.example/live.m3u8?session=existing&token=t","type":"application/x-mpegURL"}]}"#)
+            }
+            didPost = true
+            throw URLError(.badServerResponse)
+        }
+        let url = try await resolver().resolveLiveStream(for: Self.channel())
+        XCTAssertEqual(url.absoluteString, "https://official.example/live.m3u8?session=existing&token=t")
+        XCTAssertFalse(didPost)
+    }
+
+    func testLiveResolverFailsClosedWhenSSAIsessionFails() async throws {
+        LiveStubURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("streaks_info_v2.json") == true { return Self.infoResponse }
+            if request.url?.host == "playback.api.streaks.jp" {
+                return Self.response(#"{"project":"p","mediaId":"m","ssai":true,"sources":[{"id":"hls","src":"https://official.example/raw.m3u8","type":"application/x-mpegURL"}]}"#)
+            }
+            return Self.response(#"[]"#, statusCode: 503)
+        }
+        do {
+            _ = try await resolver().resolveLiveStream(for: Self.channel())
+            XCTFail("Raw SSAI source must not be returned after a failed session request")
+        } catch let error as TVerClientError {
+            XCTAssertEqual(error, .noPlayableStream)
+        }
+    }
+
+    private func resolver() -> LiveStreamResolver {
+        LiveStreamResolver(session: session, dateProvider: { Date(timeIntervalSince1970: 1_788_001_620) })
+    }
+
+    private static func channel() -> TVerLiveChannel {
+        TVerLiveChannel(
             id: "ntv", name: "日テレ", iconURL: nil,
             projectID: "tver-simul-ntv", mediaID: "ref:simul-ntv", apiKey: "ntv",
             currentProgram: nil, state: .onAir
         )
-        let august2026 = Date(timeIntervalSince1970: 1_788_001_620)
-        let resolver = LiveStreamResolver(session: session, dateProvider: { august2026 })
-        let url = try await resolver.resolveLiveStream(for: channel)
-        XCTAssertEqual(url.absoluteString, "https://official.example/live/master.m3u8")
     }
 
-    func testLiveResolverIncludesProjectATIWhenPublished() async throws {
-        LiveStubURLProtocol.handler = { request in
-            let path = request.url?.path ?? ""
-            if path.hasSuffix("streaks_info_v2.json") {
-                return Self.response(#"{"tver-splive-cx":{"api_key":{"key02":"current-key"},"ad_template_id":{"ios":"ios-template","pc":"pc-template"}}}"#)
-            }
-            let components = try URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            XCTAssertEqual(components?.queryItems?.first(where: { $0.name == "ati" })?.value, "ios-template")
-            return Self.response(#"{"sources":[{"src":"https://official.example/special/master.m3u8","type":"application/vnd.apple.mpegurl"}]}"#)
-        }
-        let channel = TVerLiveChannel(
-            id: "special", name: "Special Live", iconURL: nil,
-            projectID: "tver-splive-cx", mediaID: "ref:special", apiKey: "special",
-            currentProgram: nil, state: .onAir
-        )
-        let august2026 = Date(timeIntervalSince1970: 1_788_001_620)
-        let resolver = LiveStreamResolver(session: session, dateProvider: { august2026 })
-        let url = try await resolver.resolveLiveStream(for: channel)
-        XCTAssertEqual(url.absoluteString, "https://official.example/special/master.m3u8")
-    }
-
-    private static func response(_ json: String) -> (HTTPURLResponse, Data) {
-        let response = HTTPURLResponse(url: URL(string: "https://example.test")!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+    private static let infoResponse = response(#"{"tver-simul-ntv":{"api_key":{"key02":"current-key"}}}"#)
+    private static func response(_ json: String, statusCode: Int = 200) -> (HTTPURLResponse, Data) {
+        let response = HTTPURLResponse(url: URL(string: "https://example.test")!, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
         return (response, Data(json.utf8))
     }
 }
