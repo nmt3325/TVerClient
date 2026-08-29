@@ -10,6 +10,7 @@
 		0C09E8151A45E665FE8CC551 /* PlayerLayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DF009DC4BD0B9E186B1461E /* PlayerLayerView.swift */; };
 		10F35AAD9989DA4237AA1D05 /* ProgramGuideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C62F312991CBB58C678574C /* ProgramGuideTests.swift */; };
 		2081C1FB6DBB34719DB46A27 /* LiveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56076CA99E17730103B2AA70 /* LiveStreamResolver.swift */; };
+		2A1D9966C0F46D86A110248E /* NetworkDiagnosticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB0C90A6A540D1394D4F821D /* NetworkDiagnosticsService.swift */; };
 		4BA044543ED44CF87A37EE5E /* PictureInPictureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */; };
 		593A1116BD21A802A4B02FDA /* PreviewFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */; };
 		5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26DFE41E5BF9011519303CBB /* Assets.xcassets */; };
@@ -23,6 +24,7 @@
 		D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */; };
 		DF63189119EBBED42C1235AB /* UsabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36207CBF65F4346306A8B03C /* UsabilityTests.swift */; };
 		E128732BF26ECBCE412CC806 /* UsabilityModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B694A98CF622006290A9BB2 /* UsabilityModels.swift */; };
+		E8144F8465B6938C94CFB212 /* NetworkDiagnosticsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */; };
 		ED0FE3115DE2C7F695B210BA /* TVerAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AC98889C8008622C1031D7 /* TVerAPIClient.swift */; };
 		EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */; };
 		EEBC37723CA91878772FB161 /* ProgramLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */; };
@@ -60,9 +62,11 @@
 		98541A0DE8DC22D472A22948 /* LiveTVTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVTests.swift; sourceTree = "<group>"; };
 		9B694A98CF622006290A9BB2 /* UsabilityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityModels.swift; sourceTree = "<group>"; };
 		9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerResponseCache.swift; sourceTree = "<group>"; };
+		B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnosticsServiceTests.swift; sourceTree = "<group>"; };
 		C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixture.swift; sourceTree = "<group>"; };
 		CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureInPictureTests.swift; sourceTree = "<group>"; };
+		DB0C90A6A540D1394D4F821D /* NetworkDiagnosticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnosticsService.swift; sourceTree = "<group>"; };
 		FB028B37C45A52314CECCF58 /* TVerClient.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TVerClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -79,6 +83,7 @@
 		3C4E7CCAC2DB499306303BD6 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				DB0C90A6A540D1394D4F821D /* NetworkDiagnosticsService.swift */,
 				3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */,
 				75AC98889C8008622C1031D7 /* TVerAPIClient.swift */,
 				9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */,
@@ -112,6 +117,7 @@
 			children = (
 				98541A0DE8DC22D472A22948 /* LiveTVTests.swift */,
 				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
+				B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */,
 				CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */,
 				7C62F312991CBB58C678574C /* ProgramGuideTests.swift */,
 				8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */,
@@ -264,6 +270,7 @@
 			files = (
 				76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */,
 				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
+				E8144F8465B6938C94CFB212 /* NetworkDiagnosticsServiceTests.swift in Sources */,
 				4BA044543ED44CF87A37EE5E /* PictureInPictureTests.swift in Sources */,
 				10F35AAD9989DA4237AA1D05 /* ProgramGuideTests.swift in Sources */,
 				6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */,
@@ -278,6 +285,7 @@
 				5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */,
 				2081C1FB6DBB34719DB46A27 /* LiveStreamResolver.swift in Sources */,
 				8FB4F5C69927BE3AA196012B /* Models.swift in Sources */,
+				2A1D9966C0F46D86A110248E /* NetworkDiagnosticsService.swift in Sources */,
 				BEFDCA83E0968C4C675DC611 /* PictureInPictureCoordinator.swift in Sources */,
 				CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */,
 				0C09E8151A45E665FE8CC551 /* PlayerLayerView.swift in Sources */,
