@@ -528,7 +528,13 @@ private struct ProgramGuideBlock: View {
             .buttonStyle(.plain)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(stationName)、\(program.timeLabel)、\(program.seriesTitle)、\(program.title)\(isOnAir ? "、放送中" : "")")
+        .accessibilityLabel(
+            TVerAccessibilityText.guideProgram(
+                stationName: stationName,
+                program: program,
+                isOnAir: isOnAir
+            )
+        )
         .accessibilityHint("ダブルタップして番組詳細を開きます")
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
     }
@@ -580,6 +586,9 @@ private struct ProgramGuideDetailSheet: View {
         )
     }
 
+    private var shareItem: ProgramShareItem { ProgramShareItem(channel: playbackChannel) }
+    private var isCurrent: Bool { playbackController.currentLiveChannel?.id == selection.channel.id }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -612,55 +621,62 @@ private struct ProgramGuideDetailSheet: View {
                         Text(selection.channel.name)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(selection.program.seriesTitle)
-                            .font(.title2.bold())
+                        Text(selection.program.seriesTitle).font(.title2.bold())
                         if selection.program.title != selection.program.seriesTitle {
-                            Text(selection.program.title)
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
+                            Text(selection.program.title).font(.headline).foregroundStyle(.secondary)
                         }
                         Label(selection.program.timeLabel, systemImage: "clock")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(.subheadline).foregroundStyle(.secondary)
                         Text(selection.program.description.isEmpty ? "この番組の詳しい説明はありません。" : selection.program.description)
                             .font(.body)
                             .foregroundStyle(selection.program.description.isEmpty ? .secondary : .primary)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        TVerAccessibilityText.guideProgram(
+                            stationName: selection.channel.name,
+                            program: selection.program,
+                            isOnAir: canPlay
+                        )
+                    )
 
-                    if requestedPlayback,
-                       playbackController.currentLiveChannel?.id == selection.channel.id,
-                       let message = playbackController.errorMessage
-                    {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .font(.subheadline)
-                            .foregroundStyle(.orange)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    Button {
-                        if requestedPlayback, playbackController.player.currentItem != nil {
-                            playbackController.togglePlayback()
-                        } else {
-                            requestedPlayback = true
+                    if requestedPlayback, isCurrent, let presentation = playbackController.errorPresentation {
+                        PlaybackFailureView(presentation: presentation, officialURL: selection.channel.webURL) {
                             Task { await playbackController.playLive(playbackChannel) }
                         }
-                    } label: {
-                        Label(playButtonTitle, systemImage: playButtonIcon)
-                            .frame(maxWidth: .infinity, minHeight: 44)
+                    } else {
+                        Button {
+                            if requestedPlayback, playbackController.player.currentItem != nil {
+                                playbackController.togglePlayback()
+                            } else {
+                                requestedPlayback = true
+                                Task { await playbackController.playLive(playbackChannel) }
+                            }
+                        } label: {
+                            Label(playButtonTitle, systemImage: playButtonIcon)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(!canPlay || (requestedPlayback && playbackController.state == .resolving))
+                        .accessibilityHint(canPlay ? "現在放送中の番組を再生します" : "放送中のみ再生できます")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(!canPlay)
-                    .accessibilityHint(canPlay ? "現在放送中の番組を再生します" : "放送中のみ再生できます")
 
-                    Button { openURL(selection.channel.webURL) } label: {
-                        Label("TVer公式ライブページで開く", systemImage: "safari")
+                    ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
+                        Label("番組を共有", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
+
+                    if !(requestedPlayback && isCurrent && playbackController.errorPresentation != nil) {
+                        Button { openURL(selection.channel.webURL) } label: {
+                            Label("TVer公式ライブページで開く", systemImage: "safari")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                    }
                 }
                 .padding(20)
             }
@@ -669,8 +685,7 @@ private struct ProgramGuideDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") { dismiss() }
-                        .frame(minWidth: 44, minHeight: 44)
+                    Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44)
                 }
             }
         }
@@ -678,6 +693,7 @@ private struct ProgramGuideDetailSheet: View {
 
     private var playButtonTitle: String {
         guard canPlay else { return selection.program.startAt > Date() ? "放送開始後に再生" : "放送終了" }
+        if requestedPlayback, playbackController.state == .resolving { return "再生を準備中" }
         if requestedPlayback, playbackController.player.currentItem != nil {
             return playbackController.isPlaying ? "一時停止" : "再生"
         }

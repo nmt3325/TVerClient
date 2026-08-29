@@ -1,8 +1,10 @@
 import AVKit
 import SwiftUI
 
+@MainActor
 struct RootTabView: View {
     @StateObject private var playbackController = PlaybackController()
+    @StateObject private var libraryStore = ProgramLibraryStore()
 
     var body: some View {
         TabView {
@@ -16,10 +18,19 @@ struct RootTabView: View {
 
             ScheduleView(
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
-                playbackController: playbackController
+                playbackController: playbackController,
+                libraryStore: libraryStore
             )
             .tabItem {
                 Label("見逃し", systemImage: "play.rectangle.on.rectangle")
+            }
+
+            LibraryView(
+                libraryStore: libraryStore,
+                playbackController: playbackController
+            )
+            .tabItem {
+                Label("ライブラリ", systemImage: "books.vertical")
             }
 
             LiveView(
@@ -82,11 +93,17 @@ final class ScheduleViewModel: ObservableObject {
 private struct ScheduleView: View {
     @StateObject private var viewModel: ScheduleViewModel
     @ObservedObject private var playbackController: PlaybackController
+    @ObservedObject private var libraryStore: ProgramLibraryStore
     @State private var selectedProgram: TVerProgram?
 
-    init(viewModel: ScheduleViewModel, playbackController: PlaybackController) {
+    init(
+        viewModel: ScheduleViewModel,
+        playbackController: PlaybackController,
+        libraryStore: ProgramLibraryStore
+    ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.playbackController = playbackController
+        self.libraryStore = libraryStore
     }
 
     var body: some View {
@@ -134,7 +151,11 @@ private struct ScheduleView: View {
         }
         .task { await viewModel.loadIfNeeded() }
         .sheet(item: $selectedProgram) { program in
-            PlaybackView(program: program, playbackController: playbackController)
+            PlaybackView(
+                program: program,
+                playbackController: playbackController,
+                libraryStore: libraryStore
+            )
         }
     }
 
@@ -145,7 +166,7 @@ private struct ScheduleView: View {
                     Section {
                         LazyVStack(spacing: 12) {
                             ForEach(day.programs) { program in
-                                ProgramCard(program: program) {
+                                ProgramCard(program: program, libraryStore: libraryStore) {
                                     selectedProgram = program
                                 }
                             }
@@ -268,39 +289,59 @@ private struct LiveChannelCard: View {
     let channel: TVerLiveChannel
     let onWatch: () -> Void
 
+    private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
+
     var body: some View {
-        Button(action: onWatch) {
-            HStack(alignment: .top, spacing: 14) {
-                ProgramThumbnail(url: channel.currentProgram?.thumbnailURL ?? channel.iconURL)
-                    .frame(width: 136, height: 77)
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(channel.name).font(.headline).foregroundStyle(.primary)
-                        Spacer(minLength: 6)
-                        Text(channel.state.label)
-                            .font(.caption.bold())
-                            .foregroundStyle(channel.state == .onAir ? Color.red : Color.secondary)
+        VStack(spacing: 0) {
+            Button(action: onWatch) {
+                HStack(alignment: .top, spacing: 14) {
+                    ProgramThumbnail(url: channel.currentProgram?.thumbnailURL ?? channel.iconURL)
+                        .frame(width: 136, height: 77)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(channel.name).font(.headline).foregroundStyle(.primary)
+                            Spacer(minLength: 6)
+                            Text(channel.state.label)
+                                .font(.caption.bold())
+                                .foregroundStyle(channel.state == .onAir ? Color.red : Color.secondary)
+                        }
+                        Text(channel.currentProgram?.seriesTitle ?? "番組情報なし")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(2)
+                        if let program = channel.currentProgram {
+                            Text(program.timeLabel).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text(channel.currentProgram?.title ?? "現在の番組を取得できませんでした。")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }
-                    Text(channel.currentProgram?.seriesTitle ?? "番組情報なし")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(2)
-                    if let program = channel.currentProgram {
-                        Text(program.timeLabel).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(channel.currentProgram?.title ?? "現在の番組を取得できませんでした。")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color(uiColor: .separator).opacity(0.22)) }
+            .buttonStyle(CardButtonStyle())
+            .disabled(!channel.isPlayable)
+            .opacity(channel.isPlayable ? 1 : 0.72)
+            .accessibilityLabel(TVerAccessibilityText.live(channel: channel))
+            .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
+
+            Divider().padding(.leading, 12)
+            HStack(spacing: 8) {
+                ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
+                    Label("共有", systemImage: "square.and.arrow.up")
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                Spacer(minLength: 8)
+                Button(action: onWatch) {
+                    Label(channel.isPlayable ? "視聴" : "視聴不可", systemImage: "play.fill")
+                        .frame(minHeight: 44)
+                }
+                .disabled(!channel.isPlayable)
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 12)
         }
-        .buttonStyle(CardButtonStyle())
-        .disabled(!channel.isPlayable)
-        .opacity(channel.isPlayable ? 1 : 0.72)
-        .accessibilityLabel("\(channel.name)、\(channel.currentProgram?.seriesTitle ?? "番組情報なし")、\(channel.state.label)")
-        .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color(uiColor: .separator).opacity(0.22)) }
     }
 }
 
@@ -309,6 +350,9 @@ private struct LivePlaybackView: View {
     @ObservedObject var playbackController: PlaybackController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+
+    private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
+    private var isCurrent: Bool { playbackController.currentLiveChannel?.id == channel.id }
 
     var body: some View {
         NavigationStack {
@@ -330,41 +374,57 @@ private struct LivePlaybackView: View {
                         }
                     }
 
-                    if playbackController.currentLiveChannel?.id == channel.id,
-                       let message = playbackController.errorMessage
-                    {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("アプリ内で直接再生できません", systemImage: "exclamationmark.triangle")
-                                .font(.headline)
-                            Text(message).font(.subheadline).foregroundStyle(.secondary)
-                            Text("下のボタンからTVer公式ライブページを開いてください。")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }
-                        .padding(14).background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                    } else if playbackController.player.currentItem == nil {
-                        HStack { Spacer(); ProgressView("公式配信URLを確認中"); Spacer() }
-                    } else {
-                        Button { playbackController.togglePlayback() } label: {
-                            Label(playbackController.isPlaying ? "一時停止" : "再生", systemImage: playbackController.isPlaying ? "pause.fill" : "play.fill")
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                        }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                    }
+                    playbackStatus
 
-                    Button { openURL(channel.webURL) } label: {
-                        Label("TVer公式ライブページで開く", systemImage: "safari")
+                    ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
+                        Label("このライブ配信を共有", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
-                    .buttonStyle(.bordered).controlSize(.large)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+
+                    if !(isCurrent && playbackController.errorPresentation != nil) {
+                        Button { openURL(channel.webURL) } label: {
+                            Label("TVer公式ライブページで開く", systemImage: "safari")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered).controlSize(.large)
+                    }
                 }
                 .padding(20)
             }
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(channel.name)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44) } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44)
+                }
+            }
         }
         .task(id: channel.id) { await playbackController.playLive(channel) }
+    }
+
+    @ViewBuilder
+    private var playbackStatus: some View {
+        if isCurrent, let presentation = playbackController.errorPresentation {
+            PlaybackFailureView(presentation: presentation, officialURL: channel.webURL) {
+                Task { await playbackController.playLive(channel) }
+            }
+        } else if isCurrent, playbackController.state == .resolving {
+            HStack { Spacer(); ProgressView("公式配信URLを確認中"); Spacer() }
+                .frame(minHeight: 44)
+                .accessibilityLabel("ライブ配信を準備中")
+        } else {
+            Button { playbackController.togglePlayback() } label: {
+                Label(
+                    playbackController.isPlaying ? "一時停止" : "再生",
+                    systemImage: playbackController.isPlaying ? "pause.fill" : "play.fill"
+                )
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent).controlSize(.large)
+        }
     }
 }
 
@@ -387,34 +447,63 @@ private struct DayHeader: View {
 
 private struct ProgramCard: View {
     let program: TVerProgram
+    @ObservedObject var libraryStore: ProgramLibraryStore
     let onWatch: () -> Void
 
+    private var isFavorite: Bool { libraryStore.isFavorite(program) }
+    private var shareItem: ProgramShareItem { ProgramShareItem(program: program) }
+
     var body: some View {
-        Button(action: onWatch) {
-            ViewThatFits(in: .horizontal) {
-                horizontalContent
-                verticalContent
+        VStack(spacing: 0) {
+            Button(action: onWatch) {
+                ViewThatFits(in: .horizontal) {
+                    horizontalContent
+                    verticalContent
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color(uiColor: .separator).opacity(0.22), lineWidth: 1)
+            .buttonStyle(CardButtonStyle())
+            .accessibilityLabel(TVerAccessibilityText.program(program, isFavorite: isFavorite))
+            .accessibilityHint("ダブルタップして視聴画面を開きます")
+
+            Divider().padding(.leading, 12)
+            HStack(spacing: 6) {
+                Button { libraryStore.toggleFavorite(program) } label: {
+                    Image(systemName: isFavorite ? "heart.fill" : "heart")
+                        .foregroundStyle(isFavorite ? Color.red : Color.primary)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(isFavorite ? "お気に入りから削除" : "お気に入りに追加")
+
+                ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("番組を共有")
+
+                Spacer(minLength: 8)
+                Button(action: onWatch) {
+                    Label("視聴", systemImage: "play.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minHeight: 44)
+                }
             }
+            .padding(.horizontal, 8)
         }
-        .buttonStyle(CardButtonStyle())
-        .accessibilityLabel("\(program.seriesTitle)、\(program.title)、\(program.broadcastLabel)")
-        .accessibilityHint("ダブルタップして視聴画面を開きます")
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(uiColor: .separator).opacity(0.22), lineWidth: 1)
+        }
     }
 
     private var horizontalContent: some View {
         HStack(alignment: .top, spacing: 16) {
             ProgramThumbnail(url: program.thumbnailURL)
                 .frame(width: 152, height: 86)
-            details
-                .frame(maxWidth: .infinity, alignment: .leading)
+            details.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -437,16 +526,9 @@ private struct ProgramCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
-            HStack(alignment: .center, spacing: 8) {
-                Label(program.broadcastLabel, systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Label("視聴", systemImage: "play.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.blue)
-                    .frame(minHeight: 44)
-            }
+            Label(program.broadcastLabel, systemImage: "clock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -506,8 +588,13 @@ private struct CardButtonStyle: ButtonStyle {
 private struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
+    @ObservedObject var libraryStore: ProgramLibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+
+    private var isCurrent: Bool { playbackController.currentProgram?.id == program.id }
+    private var isFavorite: Bool { libraryStore.isFavorite(program) }
+    private var shareItem: ProgramShareItem { ProgramShareItem(program: program) }
 
     var body: some View {
         NavigationStack {
@@ -521,26 +608,45 @@ private struct PlaybackView: View {
                         .accessibilityLabel("\(program.seriesTitle)の動画プレイヤー")
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(program.seriesTitle)
-                            .font(.title2.bold())
-                        Text(program.title)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                        Text(program.seriesTitle).font(.title2.bold())
+                        Text(program.title).font(.body).foregroundStyle(.secondary)
                         Label(program.broadcastLabel, systemImage: "clock")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        if let availableUntil = program.availableUntil, !availableUntil.isEmpty {
+                            Label("配信期限 \(availableUntil)", systemImage: "calendar.badge.clock")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
                     }
 
-                    playbackControls
-
-                    Button {
-                        openURL(program.webURL)
-                    } label: {
-                        Label("TVer公式ページで開く", systemImage: "safari")
+                    HStack(spacing: 8) {
+                        Button { libraryStore.toggleFavorite(program) } label: {
+                            Label(
+                                isFavorite ? "お気に入りから削除" : "お気に入りに追加",
+                                systemImage: isFavorite ? "heart.fill" : "heart"
+                            )
                             .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(isFavorite ? .red : .accentColor)
+
+                        ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
+                            Label("共有", systemImage: "square.and.arrow.up")
+                                .frame(minWidth: 72, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                     .controlSize(.large)
+
+                    playbackStatus
+
+                    if !(isCurrent && playbackController.errorPresentation != nil) {
+                        Button { openURL(program.webURL) } label: {
+                            Label("TVer公式ページで開く", systemImage: "safari")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                    }
                 }
                 .padding(20)
             }
@@ -549,25 +655,42 @@ private struct PlaybackView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") { dismiss() }
-                        .frame(minWidth: 44, minHeight: 44)
+                    Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44)
                 }
             }
         }
         .task(id: program.id) {
+            libraryStore.recordRecentlyViewed(program)
             await playbackController.play(program)
+        }
+    }
+
+    @ViewBuilder
+    private var playbackStatus: some View {
+        if isCurrent, let presentation = playbackController.errorPresentation {
+            PlaybackFailureView(presentation: presentation, officialURL: program.webURL) {
+                libraryStore.recordRecentlyViewed(program)
+                Task { await playbackController.play(program) }
+            }
+        } else if isCurrent, playbackController.state == .resolving {
+            HStack { Spacer(); ProgressView("再生を準備中"); Spacer() }
+                .frame(minHeight: 44)
+                .accessibilityLabel("番組の再生を準備中")
+        } else {
+            PlaybackTimelineView(playbackController: playbackController)
+            playbackControls
+            if isCurrent, playbackController.state == .ended {
+                Label("再生が終了しました", systemImage: "checkmark.circle")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
     }
 
     private var playbackControls: some View {
         HStack(spacing: 20) {
-            playbackButton(title: "15秒戻す", systemImage: "gobackward.15") {
-                seek(by: -15)
-            }
-
-            Button {
-                playbackController.togglePlayback()
-            } label: {
+            playbackButton(title: "15秒戻す", systemImage: "gobackward.15", offset: -15)
+            Button { playbackController.togglePlayback() } label: {
                 Image(systemName: playbackController.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title2)
                     .frame(width: 56, height: 56)
@@ -575,20 +698,13 @@ private struct PlaybackView: View {
                     .foregroundStyle(.white)
             }
             .accessibilityLabel(playbackController.isPlaying ? "一時停止" : "再生")
-
-            playbackButton(title: "15秒送る", systemImage: "goforward.15") {
-                seek(by: 15)
-            }
+            playbackButton(title: "15秒送る", systemImage: "goforward.15", offset: 15)
         }
         .frame(maxWidth: .infinity)
     }
 
-    private func playbackButton(
-        title: String,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
+    private func playbackButton(title: String, systemImage: String, offset: TimeInterval) -> some View {
+        Button { playbackController.seek(by: offset) } label: {
             Image(systemName: systemImage)
                 .font(.title2)
                 .frame(width: 52, height: 52)
@@ -596,13 +712,133 @@ private struct PlaybackView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+        .accessibilityValue(
+            TVerAccessibilityText.playbackTime(
+                elapsed: playbackController.player.currentTime().seconds,
+                duration: playbackController.player.currentItem?.duration.seconds
+            )
+        )
+    }
+}
+
+private enum ProgramLibrarySection: String, CaseIterable, Identifiable {
+    case favorites = "お気に入り"
+    case recents = "最近見た"
+    var id: String { rawValue }
+}
+
+private struct LibraryView: View {
+    @ObservedObject var libraryStore: ProgramLibraryStore
+    @ObservedObject var playbackController: PlaybackController
+    @State private var section: ProgramLibrarySection = .favorites
+    @State private var selectedProgram: TVerProgram?
+    @State private var showsClearConfirmation = false
+
+    private var programs: [TVerProgram] {
+        section == .favorites ? libraryStore.favoritePrograms : libraryStore.recentPrograms
     }
 
-    private func seek(by seconds: Double) {
-        let currentSeconds = playbackController.player.currentTime().seconds
-        let safeCurrentSeconds = currentSeconds.isFinite ? currentSeconds : 0
-        let target = CMTime(seconds: max(0, safeCurrentSeconds + seconds), preferredTimescale: 600)
-        playbackController.player.seek(to: target)
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("ライブラリ表示", selection: $section) {
+                    ForEach(ProgramLibrarySection.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                if programs.isEmpty {
+                    ScheduleStatusView(
+                        title: section == .favorites ? "お気に入りはまだありません" : "最近見た番組はありません",
+                        message: section == .favorites
+                            ? "番組カードのハートを押すと、ここからすぐに視聴できます。"
+                            : "番組を再生すると、ここに履歴が表示されます。",
+                        systemImage: section == .favorites ? "heart" : "clock.arrow.circlepath"
+                    ) {
+                        EmptyView()
+                    }
+                } else {
+                    List {
+                        ForEach(programs) { program in
+                            LibraryProgramRow(program: program) { selectedProgram = program }
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) { remove(program) } label: {
+                                        Label("削除", systemImage: "trash")
+                                    }
+                                }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("ライブラリ")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("すべて消去", role: .destructive) { showsClearConfirmation = true }
+                        .frame(minHeight: 44)
+                        .disabled(programs.isEmpty)
+                }
+            }
+        }
+        .confirmationDialog(
+            "\(section.rawValue)をすべて消去しますか？",
+            isPresented: $showsClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("すべて消去", role: .destructive) { clearCurrentSection() }
+            Button("キャンセル", role: .cancel) {}
+        }
+        .sheet(item: $selectedProgram) { program in
+            PlaybackView(
+                program: program,
+                playbackController: playbackController,
+                libraryStore: libraryStore
+            )
+        }
+    }
+
+    private func remove(_ program: TVerProgram) {
+        if section == .favorites { libraryStore.removeFavorite(program) }
+        else { libraryStore.removeRecentProgram(program) }
+    }
+
+    private func clearCurrentSection() {
+        if section == .favorites { libraryStore.clearFavorites() }
+        else { libraryStore.clearRecentPrograms() }
+    }
+}
+
+private struct LibraryProgramRow: View {
+    let program: TVerProgram
+    let onWatch: () -> Void
+
+    var body: some View {
+        Button(action: onWatch) {
+            HStack(spacing: 12) {
+                ProgramThumbnail(url: program.thumbnailURL)
+                    .frame(width: 112, height: 63)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(program.seriesTitle).font(.headline).lineLimit(2)
+                    Text(program.title).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    Label(program.broadcastLabel, systemImage: "clock")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "play.circle.fill")
+                    .font(.title2).foregroundStyle(.blue)
+                    .frame(width: 44, height: 44)
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(TVerAccessibilityText.program(program))
+        .accessibilityHint("ダブルタップして再生します。左にスワイプすると削除できます")
     }
 }
 
