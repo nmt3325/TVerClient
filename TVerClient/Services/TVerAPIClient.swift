@@ -18,7 +18,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         responseCache: TVerResponseCache = TVerResponseCache(),
         cacheTTL: TimeInterval = 60,
         staleIfErrorTTL: TimeInterval = 15 * 60,
-        dateProvider: @escaping @Sendable () -> Date = Date.init
+        dateProvider: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.session = session
         self.responseCache = responseCache

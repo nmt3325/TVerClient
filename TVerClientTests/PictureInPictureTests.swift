@@ -157,12 +157,12 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
 
     func simulateDidStart() {
         isPictureInPictureActive = true
-        delegate?.pictureInPictureControllerDidStartPictureInPicture(makeSystemController())
+        delegate?.pictureInPictureControllerDidStartPictureInPicture?(makeSystemController())
     }
 
     func simulateDidStop() {
         isPictureInPictureActive = false
-        delegate?.pictureInPictureControllerDidStopPictureInPicture(makeSystemController())
+        delegate?.pictureInPictureControllerDidStopPictureInPicture?(makeSystemController())
     }
 
     func simulateFailure(_ error: Error) {
@@ -173,6 +173,9 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
     }
 
     private func makeSystemController() -> AVPictureInPictureController {
-        AVPictureInPictureController(playerLayer: AVPlayerLayer())
+        guard let controller = AVPictureInPictureController(playerLayer: AVPlayerLayer()) else {
+            preconditionFailure("Test Picture in Picture controller could not be created")
+        }
+        return controller
     }
 }
