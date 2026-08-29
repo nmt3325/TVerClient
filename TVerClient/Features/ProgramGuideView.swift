@@ -55,7 +55,23 @@ enum ProgramGuideMetrics {
     static let hourHeight: CGFloat = 112
     static let timeAxisWidth: CGFloat = 58
     static let stationHeaderHeight: CGFloat = 66
-    static let minimumProgramHeight: CGFloat = 44
+    static let minimumTapTarget: CGFloat = 44
+    static let minimumProgramHeight = minimumTapTarget
+
+    static func gridSize(channelCount: Int) -> CGSize {
+        CGSize(
+            width: CGFloat(max(0, channelCount)) * stationWidth,
+            height: 24 * hourHeight
+        )
+    }
+
+    static func xPosition(forColumn column: Int) -> CGFloat {
+        CGFloat(max(0, column)) * stationWidth
+    }
+
+    static func hourLabel(_ hour: Int) -> String {
+        String(format: "%02d:00", min(max(0, hour), 23))
+    }
 
     static var calendar: Calendar {
         var value = Calendar(identifier: .gregorian)
@@ -127,7 +143,7 @@ struct ProgramGuideView: View {
                         Button("再試行") { Task { await viewModel.load() } }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
-                            .frame(minHeight: 44)
+                            .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
                     }
                 } else if !viewModel.hasPrograms {
                     ProgramGuideStatusView(
@@ -138,7 +154,7 @@ struct ProgramGuideView: View {
                         Button("更新") { Task { await viewModel.load() } }
                             .buttonStyle(.bordered)
                             .controlSize(.large)
-                            .frame(minHeight: 44)
+                            .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
                     }
                 } else {
                     guideContent
@@ -151,9 +167,9 @@ struct ProgramGuideView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Task { await viewModel.load() } } label: {
                         if viewModel.isLoading {
-                            ProgressView().frame(width: 44, height: 44)
+                            ProgressView().frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
                         } else {
-                            Image(systemName: "arrow.clockwise").frame(width: 44, height: 44)
+                            Image(systemName: "arrow.clockwise").frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
                         }
                     }
                     .disabled(viewModel.isLoading)
@@ -283,7 +299,7 @@ private struct ProgramGuideDatePicker: View {
         formatter.locale = Locale(identifier: "ja_JP")
         formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
         formatter.dateFormat = "M月d日EEEE"
-        return "\(formatter.string(from: date))、\(relativeLabel(for: date))"
+        return TVerAccessibilityText.guideDate(date, relativeLabel: relativeLabel(for: date))
     }
 }
 
@@ -294,10 +310,7 @@ private struct ProgramGuideGrid: View {
     @State private var contentOffset = CGPoint.zero
 
     private var contentSize: CGSize {
-        CGSize(
-            width: CGFloat(guide.count) * ProgramGuideMetrics.stationWidth,
-            height: 24 * ProgramGuideMetrics.hourHeight
-        )
+        ProgramGuideMetrics.gridSize(channelCount: guide.count)
     }
 
     var body: some View {
@@ -380,7 +393,7 @@ private struct ProgramGuideGrid: View {
         ZStack(alignment: .topLeading) {
             Color(uiColor: .systemGroupedBackground)
             ForEach(0 ..< 24, id: \.self) { hour in
-                Text(String(format: "%02d:00", hour))
+                Text(ProgramGuideMetrics.hourLabel(hour))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: ProgramGuideMetrics.timeAxisWidth - 8, alignment: .trailing)
@@ -462,7 +475,7 @@ private struct ProgramGuideCanvas: View {
                 }
                 .frame(width: ProgramGuideMetrics.stationWidth - 6, height: programHeight)
                 .offset(
-                    x: CGFloat(column) * ProgramGuideMetrics.stationWidth + 3,
+                    x: ProgramGuideMetrics.xPosition(forColumn: column) + 3,
                     y: y
                 )
             }
@@ -528,14 +541,11 @@ private struct ProgramGuideBlock: View {
             .buttonStyle(.plain)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-            TVerAccessibilityText.guideProgram(
-                stationName: stationName,
-                program: program,
-                isOnAir: isOnAir
-            )
-        )
-        .accessibilityHint("ダブルタップして番組詳細を開きます")
+        .accessibilityLabel(TVerAccessibilityText.guideProgram(
+            stationName: stationName,
+            program: program,
+            isOnAir: isOnAir
+        ))        .accessibilityHint("ダブルタップして番組詳細を開きます")
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
     }
 
@@ -685,8 +695,8 @@ private struct ProgramGuideDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44)
-                }
+                    Button("閉じる") { dismiss() }
+                        .frame(minWidth: ProgramGuideMetrics.minimumTapTarget, minHeight: ProgramGuideMetrics.minimumTapTarget)                }
             }
         }
     }

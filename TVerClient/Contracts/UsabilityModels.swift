@@ -137,6 +137,31 @@ enum TVerAccessibilityText {
         return "\(spokenDuration(duration))中、\(elapsedText)まで再生"
     }
 
+    static func guideProgram(
+        stationName: String,
+        program: TVerLiveProgram,
+        isOnAir: Bool
+    ) -> String {
+        var components = [stationName, spokenTimeRange(from: program.startAt, to: program.endAt)]
+        func appendUnique(_ value: String) {
+            guard !value.isEmpty, !components.contains(value) else { return }
+            components.append(value)
+        }
+        appendUnique(program.seriesTitle)
+        appendUnique(program.title)
+        if program.isPause { appendUnique("配信休止") }
+        if isOnAir { appendUnique("放送中") }
+        return components.joined(separator: "、")
+    }
+
+    static func guideDate(_ date: Date, relativeLabel: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        formatter.dateFormat = "M月d日EEEE"
+        return "\(formatter.string(from: date))、\(relativeLabel)"
+    }
+
     private static func spokenTimeRange(from start: Date, to end: Date) -> String {
         "\(spokenTime(start))から\(spokenTime(end))まで"
     }
