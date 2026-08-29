@@ -13,6 +13,52 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
     var webURL: URL { URL(string: "https://tver.jp/episodes/\(id)")! }
 }
 
+enum TVerLiveState: String, Codable, Hashable, Sendable {
+    case onAir
+    case paused
+    case unavailable
+
+    var label: String {
+        switch self {
+        case .onAir: return "配信中"
+        case .paused: return "配信休止"
+        case .unavailable: return "情報なし"
+        }
+    }
+}
+
+struct TVerLiveProgram: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let title: String
+    let seriesTitle: String
+    let startAt: Date
+    let endAt: Date
+    let thumbnailURL: URL?
+    let isPause: Bool
+
+    var timeLabel: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        formatter.dateFormat = "H:mm"
+        return "\(formatter.string(from: startAt))〜\(formatter.string(from: endAt))"
+    }
+}
+
+struct TVerLiveChannel: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let iconURL: URL?
+    let projectID: String
+    let mediaID: String
+    let apiKey: String
+    let currentProgram: TVerLiveProgram?
+    let state: TVerLiveState
+
+    var webURL: URL { URL(string: "https://tver.jp/live/\(id)")! }
+    var isPlayable: Bool { state == .onAir }
+}
+
 struct ProgramDay: Identifiable, Hashable, Sendable {
     let date: Date
     var programs: [TVerProgram]
@@ -39,4 +85,12 @@ protocol TVerCatalogServicing: Sendable {
 
 protocol TVerStreamResolving: Sendable {
     func resolveStream(for program: TVerProgram) async throws -> URL
+}
+
+protocol TVerLiveServicing: Sendable {
+    func fetchLiveChannels() async throws -> [TVerLiveChannel]
+}
+
+protocol TVerLiveStreamResolving: Sendable {
+    func resolveLiveStream(for channel: TVerLiveChannel) async throws -> URL
 }
