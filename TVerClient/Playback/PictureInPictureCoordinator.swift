@@ -112,7 +112,7 @@ final class AVPictureInPictureControllerDriver: PictureInPictureControllerDrivin
 
 @MainActor
 final class PictureInPictureCoordinator: NSObject, ObservableObject {
-    typealias DriverFactory = (AVPlayerLayer) -> any PictureInPictureControllerDriving
+    typealias DriverFactory = @MainActor (AVPlayerLayer) -> any PictureInPictureControllerDriving
 
     @Published private(set) var availability: PictureInPictureAvailability
     @Published private(set) var state: PictureInPictureState = .inactive
@@ -258,7 +258,7 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     }
 }
 
-extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
+extension PictureInPictureCoordinator: @preconcurrency AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(
         _: AVPictureInPictureController
     ) {

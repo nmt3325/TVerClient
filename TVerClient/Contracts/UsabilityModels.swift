@@ -117,18 +117,6 @@ enum TVerAccessibilityText {
         return components.joined(separator: "、")
     }
 
-    static func guideProgram(
-        stationName: String,
-        program: TVerLiveProgram,
-        isOnAir: Bool
-    ) -> String {
-        var components = [stationName, program.timeLabel, program.seriesTitle, program.title]
-            .filter { !$0.isEmpty }
-        if isOnAir { components.append("放送中") }
-        if program.isPause { components.append("配信休止") }
-        return components.joined(separator: "、")
-    }
-
     static func playbackTime(elapsed: TimeInterval, duration: TimeInterval?) -> String {
         let elapsedText = spokenDuration(elapsed)
         guard let duration, duration.isFinite, duration > 0 else {
