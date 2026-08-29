@@ -129,6 +129,23 @@ final class ProgramSearchTests: XCTestCase {
         XCTAssertEqual(result.first?.stationName, "テスト局")
     }
 
+    func testVODSearchResultsMapBackToProgramsInResultOrder() {
+        let first = makeProgram(id: "first", title: "最初")
+        let second = makeProgram(id: "second", title: "次")
+        let days = [ProgramDay(date: makeDate(hour: 0), programs: [first, second])]
+        let entries = [
+            ProgramSearchEntry(id: "vod:second", sourceID: "second", source: .videoOnDemand, title: "次"),
+            ProgramSearchEntry(id: "guide:first", sourceID: "first", source: .programGuide, title: "最初"),
+            ProgramSearchEntry(id: "vod:missing", sourceID: "missing", source: .videoOnDemand, title: "なし"),
+            ProgramSearchEntry(id: "vod:first", sourceID: "first", source: .videoOnDemand, title: "最初"),
+        ]
+
+        XCTAssertEqual(
+            ProgramSearchResultMapping.videoOnDemandPrograms(entries, in: days).map(\.id),
+            ["second", "first"]
+        )
+    }
+
     @MainActor
     func testViewModelDebouncesAndCancelsSupersededQuery() async throws {
         let index = ProgramSearchIndex(entries: [
@@ -162,6 +179,19 @@ final class ProgramSearchTests: XCTestCase {
         XCTAssertTrue(text.contains("放送中のみ"))
         XCTAssertTrue(text.contains("お気に入りのみ"))
         XCTAssertTrue(text.contains("18時から24時"))
+    }
+
+    private func makeProgram(id: String, title: String) -> TVerProgram {
+        TVerProgram(
+            id: id,
+            seriesID: nil,
+            title: title,
+            seriesTitle: "シリーズ",
+            description: "説明",
+            broadcastLabel: "配信中",
+            availableUntil: nil,
+            thumbnailURL: nil
+        )
     }
 
     private func entry(

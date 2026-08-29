@@ -90,8 +90,10 @@ final class ScheduleViewModel: ObservableObject {
     }
 }
 
+@MainActor
 private struct ScheduleView: View {
     @StateObject private var viewModel: ScheduleViewModel
+    @StateObject private var searchViewModel: ProgramSearchViewModel
     @ObservedObject private var playbackController: PlaybackController
     @ObservedObject private var libraryStore: ProgramLibraryStore
     @State private var selectedProgram: TVerProgram?
@@ -102,6 +104,9 @@ private struct ScheduleView: View {
         libraryStore: ProgramLibraryStore
     ) {
         _viewModel = StateObject(wrappedValue: viewModel)
+        _searchViewModel = StateObject(
+            wrappedValue: ProgramSearchViewModel(index: .videoOnDemand([]))
+        )
         self.playbackController = playbackController
         self.libraryStore = libraryStore
     }
@@ -125,7 +130,10 @@ private struct ScheduleView: View {
                         systemImage: "wifi.exclamationmark"
                     ) {
                         Button("再試行") {
-                            Task { await viewModel.load() }
+                            Task {
+                                await viewModel.load()
+                                rebuildSearchIndex()
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -137,7 +145,10 @@ private struct ScheduleView: View {
                         systemImage: "tv.slash"
                     ) {
                         Button("更新") {
-                            Task { await viewModel.load() }
+                            Task {
+                                await viewModel.load()
+                                rebuildSearchIndex()
+                            }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
@@ -146,10 +157,22 @@ private struct ScheduleView: View {
                     scheduleList
                 }
             }
-            .navigationTitle("番組表")
+            .navigationTitle("見逃し")
             .background(Color(uiColor: .systemGroupedBackground))
+            .searchable(
+                text: $searchViewModel.query,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text(ProgramSearchAccessibilityText.fieldLabel)
+            )
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
         }
-        .task { await viewModel.loadIfNeeded() }
+        .task {
+            await viewModel.loadIfNeeded()
+            rebuildSearchIndex()
+        }
+        .onChange(of: viewModel.days) { _ in rebuildSearchIndex() }
+        .onChange(of: libraryStore.favoritePrograms) { _ in rebuildSearchIndex() }
         .sheet(item: $selectedProgram) { program in
             PlaybackView(
                 program: program,
@@ -162,24 +185,24 @@ private struct ScheduleView: View {
     private var scheduleList: some View {
         ScrollView {
             LazyVStack(spacing: 24, pinnedViews: [.sectionHeaders]) {
-                ForEach(viewModel.days.filter { !$0.programs.isEmpty }) { day in
-                    Section {
-                        LazyVStack(spacing: 12) {
-                            ForEach(day.programs) { program in
-                                ProgramCard(program: program, libraryStore: libraryStore) {
-                                    selectedProgram = program
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    } header: {
-                        DayHeader(date: day.date)
+                searchControls
+
+                if isSearchPresentationActive {
+                    if searchedPrograms.isEmpty && !searchViewModel.isFiltering {
+                        searchEmptyState
+                    } else {
+                        searchResults
                     }
+                } else {
+                    daySections
                 }
             }
             .padding(.bottom, 32)
         }
-        .refreshable { await viewModel.load() }
+        .refreshable {
+            await viewModel.load()
+            rebuildSearchIndex()
+        }
         .overlay(alignment: .top) {
             if viewModel.isLoading && !viewModel.days.isEmpty {
                 ProgressView()
@@ -188,6 +211,201 @@ private struct ScheduleView: View {
                     .padding(.top, 8)
                     .accessibilityLabel("更新中")
             }
+        }
+    }
+
+    private var searchControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("\(searchViewModel.results.count)件")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(searchViewModel.accessibilitySummary)
+                    .accessibilityAddTraits(.updatesFrequently)
+
+                if searchViewModel.isFiltering {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("検索中")
+                }
+
+                Spacer(minLength: 8)
+
+                Menu {
+                    Section("絞り込み") {
+                        Toggle("お気に入りのみ", isOn: favoritesOnlyBinding)
+                    }
+
+                    Picker("並び順", selection: $searchViewModel.sort) {
+                        ForEach(ProgramSearchSort.allCases, id: \.self) { sort in
+                            Text(sort.scheduleLabel).tag(sort)
+                        }
+                    }
+
+                    if searchViewModel.filters != .none || searchViewModel.sort != .sourceOrder {
+                        Divider()
+                        Button("絞り込みと並び順をリセット", role: .destructive) {
+                            resetFiltersAndSort()
+                        }
+                    }
+                } label: {
+                    Label("絞り込みと並び順", systemImage: activeControlCount > 0
+                        ? "line.3.horizontal.decrease.circle.fill"
+                        : "line.3.horizontal.decrease.circle")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityValue(activeControlCount == 0 ? "条件なし" : "\(activeControlCount)個の条件を適用中")
+            }
+
+            if searchViewModel.filters.onlyFavorites || searchViewModel.sort != .sourceOrder {
+                HStack(spacing: 8) {
+                    if searchViewModel.filters.onlyFavorites {
+                        searchChip(title: "お気に入り", systemImage: "heart.fill") {
+                            var filters = searchViewModel.filters
+                            filters.onlyFavorites = false
+                            searchViewModel.filters = filters
+                        }
+                    }
+                    if searchViewModel.sort != .sourceOrder {
+                        searchChip(title: searchViewModel.sort.scheduleLabel, systemImage: "arrow.up.arrow.down") {
+                            searchViewModel.sort = .sourceOrder
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+    }
+
+    private var daySections: some View {
+        ForEach(viewModel.days.filter { !$0.programs.isEmpty }) { day in
+            Section {
+                LazyVStack(spacing: 12) {
+                    ForEach(day.programs) { program in
+                        programCard(program)
+                    }
+                }
+                .padding(.horizontal, 16)
+            } header: {
+                DayHeader(date: day.date)
+            }
+        }
+    }
+
+    private var searchResults: some View {
+        LazyVStack(spacing: 12) {
+            ForEach(searchedPrograms) { program in
+                programCard(program)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var searchEmptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 38, weight: .regular))
+                .foregroundStyle(.blue)
+                .accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Text("条件に合う番組がありません")
+                    .font(.title3.bold())
+                Text("検索語や絞り込み条件を変えて、もう一度お試しください。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            Button("検索条件をすべてリセット") { resetSearch() }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, minHeight: 320)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var searchedPrograms: [TVerProgram] {
+        ProgramSearchResultMapping.videoOnDemandPrograms(
+            searchViewModel.results,
+            in: viewModel.days
+        )
+    }
+
+    private var isSearchPresentationActive: Bool {
+        !searchViewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || searchViewModel.filters != .none
+            || searchViewModel.sort != .sourceOrder
+    }
+
+    private var activeControlCount: Int {
+        (searchViewModel.filters.onlyFavorites ? 1 : 0)
+            + (searchViewModel.sort == .sourceOrder ? 0 : 1)
+    }
+
+    private var favoritesOnlyBinding: Binding<Bool> {
+        Binding(
+            get: { searchViewModel.filters.onlyFavorites },
+            set: { newValue in
+                var filters = searchViewModel.filters
+                filters.onlyFavorites = newValue
+                searchViewModel.filters = filters
+            }
+        )
+    }
+
+    private func programCard(_ program: TVerProgram) -> some View {
+        ProgramCard(program: program, libraryStore: libraryStore) {
+            selectedProgram = program
+        }
+    }
+
+    private func searchChip(
+        title: String,
+        systemImage: String,
+        onRemove: @escaping () -> Void
+    ) -> some View {
+        Button(action: onRemove) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .padding(.leading, 12)
+                .padding(.trailing, 8)
+                .frame(minHeight: 36)
+                .background(Color.blue.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title)を解除")
+    }
+
+    private func rebuildSearchIndex() {
+        searchViewModel.replaceIndex(
+            .videoOnDemand(
+                viewModel.days,
+                favoriteProgramIDs: Set(libraryStore.favoritePrograms.map(\.id))
+            )
+        )
+    }
+
+    private func resetFiltersAndSort() {
+        searchViewModel.filters = .none
+        searchViewModel.sort = .sourceOrder
+        searchViewModel.searchNow()
+    }
+
+    private func resetSearch() {
+        searchViewModel.query = ""
+        searchViewModel.filters = .none
+        searchViewModel.sort = .sourceOrder
+        searchViewModel.searchNow()
+    }
+}
+
+private extension ProgramSearchSort {
+    var scheduleLabel: String {
+        switch self {
+        case .sourceOrder: return "配信順"
+        case .startTime: return "配信日が早い順"
+        case .title: return "タイトル順"
         }
     }
 }

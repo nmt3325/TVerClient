@@ -112,6 +112,23 @@ enum ProgramSearchSort: String, CaseIterable, Sendable {
     case title
 }
 
+enum ProgramSearchResultMapping {
+    static func videoOnDemandPrograms(
+        _ entries: [ProgramSearchEntry],
+        in days: [ProgramDay]
+    ) -> [TVerProgram] {
+        var programsByID: [String: TVerProgram] = [:]
+        for program in days.flatMap(\.programs) where programsByID[program.id] == nil {
+            programsByID[program.id] = program
+        }
+
+        return entries.compactMap { entry in
+            guard entry.source == .videoOnDemand else { return nil }
+            return programsByID[entry.sourceID]
+        }
+    }
+}
+
 struct ProgramSearchIndex: Sendable {
     private struct IndexedEntry: Sendable {
         let entry: ProgramSearchEntry
