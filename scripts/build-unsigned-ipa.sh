@@ -13,6 +13,8 @@ Options:
   -o, --output PATH        output IPA path
       --project PATH       Xcode project path (default: TVerClient.xcodeproj)
       --scheme NAME        scheme name (default: TVerClient)
+      --timeout-seconds N   xcodebuild timeout (default: 1200)
+      --log-dir PATH        build log/result bundle directory
       --                   pass remaining arguments to xcodebuild
   -h, --help               show this help
 EOF
@@ -24,6 +26,9 @@ DERIVED_DATA="${TMPDIR:-/tmp}/TVerClient-DerivedData"
 OUTPUT="$REPO_ROOT/TVerClient-unsigned.ipa"
 PROJECT="$REPO_ROOT/TVerClient.xcodeproj"
 SCHEME="TVerClient"
+TIMEOUT_SECONDS=1200
+LOG_DIR=""
+TIMEOUT_RUNNER="$SCRIPT_DIR/run-with-timeout.sh"
 
 while (($#)); do
   case "$1" in
@@ -47,6 +52,16 @@ while (($#)); do
       SCHEME="$2"
       shift 2
       ;;
+    --timeout-seconds)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      TIMEOUT_SECONDS="$2"
+      shift 2
+      ;;
+    --log-dir)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      LOG_DIR="$2"
+      shift 2
+      ;;
     --)
       shift
       break
@@ -63,28 +78,46 @@ while (($#)); do
   esac
 done
 
+[[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid timeout: $TIMEOUT_SECONDS" >&2; exit 2; }
+[[ -x "$TIMEOUT_RUNNER" ]] || { echo "Timeout runner not executable: $TIMEOUT_RUNNER" >&2; exit 1; }
 mkdir -p "$DERIVED_DATA" "$(dirname "$OUTPUT")"
 DERIVED_DATA="$(cd "$DERIVED_DATA" && pwd)"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT")" && pwd)"
 OUTPUT="$OUTPUT_DIR/$(basename "$OUTPUT")"
+if [[ -z "$LOG_DIR" ]]; then LOG_DIR="$DERIVED_DATA/logs"; fi
+mkdir -p "$LOG_DIR"
+LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+BUILD_LOG="$LOG_DIR/unsigned-ipa-build.log"
+RESULT_BUNDLE="$LOG_DIR/unsigned-ipa-build.xcresult"
+rm -rf "$RESULT_BUNDLE"
 
 if [[ "$PROJECT" != /* ]]; then
   PROJECT="$REPO_ROOT/$PROJECT"
 fi
 [[ -d "$PROJECT" ]] || { echo "Xcode project not found: $PROJECT" >&2; exit 1; }
 
-xcodebuild \
+set +e
+NSUnbufferedIO=YES "$TIMEOUT_RUNNER" "$TIMEOUT_SECONDS" \
+  xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
   -configuration Release \
   -destination 'generic/platform=iOS' \
   -sdk iphoneos \
   -derivedDataPath "$DERIVED_DATA" \
+  -resultBundlePath "$RESULT_BUNDLE" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY='' \
   "$@" \
-  build
+  build 2>&1 | tee "$BUILD_LOG"
+build_status=${PIPESTATUS[0]}
+set -e
+if [[ "$build_status" -ne 0 ]]; then
+  echo "Unsigned IPA build failed with exit $build_status. Log: $BUILD_LOG" >&2
+  tail -n 200 "$BUILD_LOG" >&2 || true
+  exit "$build_status"
+fi
 
 APP_PATH="$DERIVED_DATA/Build/Products/Release-iphoneos/${SCHEME}.app"
 [[ -d "$APP_PATH" ]] || { echo "Built app not found: $APP_PATH" >&2; exit 1; }
@@ -114,4 +147,11 @@ rm -f "$OUTPUT"
   exit 1
 }
 
+CHECKSUM="$OUTPUT.sha256"
+(
+  cd "$(dirname "$OUTPUT")"
+  shasum -a 256 "$(basename "$OUTPUT")" > "$(basename "$CHECKSUM")"
+)
+
 echo "Unsigned IPA: $OUTPUT"
+echo "SHA-256: $CHECKSUM"

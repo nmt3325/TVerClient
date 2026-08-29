@@ -10,28 +10,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: unsigned-ipa-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: unsigned-ipa-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: Build, test, and package
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        timeout-minutes: 2
 
       - name: Install XcodeGen
         run: brew install xcodegen
+        timeout-minutes: 5
 
       - name: Generate Xcode project
         run: xcodegen generate
+        timeout-minutes: 2
 
       - name: Select an available iPhone simulator
         id: simulator
         shell: bash
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           udid="$({ xcrun simctl list devices available -j; } | python3 -c '
@@ -48,28 +52,41 @@ jobs:
           ')"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
 
-      - name: Run simulator tests
+      - name: Run simulator tests with recovery
+        timeout-minutes: 18
         run: |
-          set -o pipefail
-          xcodebuild \
-            -project TVerClient.xcodeproj \
-            -scheme TVerClient \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData-simulator" \
-            test
+          ./scripts/run-simulator-tests.sh \
+            --udid "${{ steps.simulator.outputs.udid }}" \
+            --derived-data "$RUNNER_TEMP/DerivedData-simulator" \
+            --log-dir "$RUNNER_TEMP/ci-logs/simulator" \
+            --timeout-seconds 900 \
+            --attempts 3
 
       - name: Build unsigned IPA
+        timeout-minutes: 17
         run: |
           ./scripts/build-unsigned-ipa.sh \
             --derived-data "$RUNNER_TEMP/DerivedData-device" \
-            --output "$RUNNER_TEMP/TVerClient-unsigned.ipa"
+            --output "$RUNNER_TEMP/TVerClient-unsigned.ipa" \
+            --log-dir "$RUNNER_TEMP/ci-logs/device" \
+            --timeout-seconds 900
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVerClient-build-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-logs
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: TVerClient-unsigned
-          path: ${{ runner.temp }}/TVerClient-unsigned.ipa
+          path: |
+            ${{ runner.temp }}/TVerClient-unsigned.ipa
+            ${{ runner.temp }}/TVerClient-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -85,29 +102,37 @@ jobs:
     steps:
       - name: Download unsigned IPA artifact
         uses: actions/download-artifact@v4
+        timeout-minutes: 3
         with:
           name: TVerClient-unsigned
           path: release-assets
+
+      - name: Verify unsigned IPA checksum
+        working-directory: release-assets
+        run: sha256sum --check TVerClient-unsigned.ipa.sha256
+        timeout-minutes: 1
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           tag="unsigned-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           asset="release-assets/TVerClient-unsigned.ipa"
+          checksum="${asset}.sha256"
           title="Unsigned build #${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          notes="Unsigned TVerClient IPA built from ${GITHUB_SHA}. Sign it with your own Apple ID before installation."
+          notes="Unsigned TVerClient IPA built from ${GITHUB_SHA}. SHA-256 is attached. Sign it with your own Apple ID before installation."
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
-          elif ! gh release create "$tag" "$asset" \
+            gh release upload "$tag" "$asset" "$checksum" --clobber
+          elif ! gh release create "$tag" "$asset" "$checksum" \
             --target "$GITHUB_SHA" \
             --title "$title" \
             --notes "$notes" \
             --latest; then
             # A retried or concurrent publisher may have created the tag first.
-            gh release upload "$tag" "$asset" --clobber
+            gh release upload "$tag" "$asset" "$checksum" --clobber
           fi
