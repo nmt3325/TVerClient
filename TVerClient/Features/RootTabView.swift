@@ -11,16 +11,9 @@ struct RootTabView: View {
     @StateObject private var areaStore = AreaStore(service: TVerAPIClient())
 
     var body: some View {
+        // Ordered by how often the tabs are actually used: catch-up first,
+        // then the guide, live, saved content and finally diagnostics.
         TabView {
-            ProgramGuideView(
-                viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
-                playbackController: playbackController,
-                libraryStore: libraryStore
-            )
-            .tabItem {
-                Label("番組表", systemImage: "rectangle.grid.3x2")
-            }
-
             ScheduleView(
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
@@ -30,12 +23,13 @@ struct RootTabView: View {
                 Label("見逃し", systemImage: "play.rectangle.on.rectangle")
             }
 
-            LibraryView(
-                libraryStore: libraryStore,
-                playbackController: playbackController
+            ProgramGuideView(
+                viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
+                playbackController: playbackController,
+                libraryStore: libraryStore
             )
             .tabItem {
-                Label("ライブラリ", systemImage: "books.vertical")
+                Label("番組表", systemImage: "calendar.day.timeline.left")
             }
 
             LiveView(
@@ -46,12 +40,20 @@ struct RootTabView: View {
                 Label("ライブ", systemImage: "dot.radiowaves.left.and.right")
             }
 
+            LibraryView(
+                libraryStore: libraryStore,
+                playbackController: playbackController
+            )
+            .tabItem {
+                Label("ライブラリ", systemImage: "arrow.down.circle")
+            }
+
             DiagnosticsView(logStore: diagnosticLogStore)
                 .tabItem {
                     Label("診断", systemImage: "stethoscope")
                 }
         }
-        .tint(.blue)
+        .tint(DS.Palette.catchUp)
         .environmentObject(downloadCenter)
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)

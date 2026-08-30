@@ -38,12 +38,17 @@ enum MediaBadgeKind: String, Equatable, Hashable, Sendable {
         switch self {
         case .live: return DS.Palette.live
         case .catchUp: return DS.Palette.catchUp
-        case .catchUpChecking: return .secondary
-        case .noCatchUp: return .secondary
+        case .catchUpChecking: return DS.Palette.inactive
+        case .noCatchUp: return DS.Palette.inactive
         case .downloaded: return DS.Palette.downloaded
         case .downloading: return DS.Palette.catchUp
         case .expiringSoon: return DS.Palette.warning
         }
+    }
+
+    /// Muted states stay readable without competing with the real status pills.
+    var isLowEmphasis: Bool {
+        self == .catchUpChecking || self == .noCatchUp
     }
 }
 
@@ -63,13 +68,16 @@ struct MediaBadge: View, Equatable, Hashable {
         HStack(spacing: DS.Spacing.xxs) {
             Image(systemName: kind.systemImage)
                 .imageScale(.small)
+                .symbolRenderingMode(.hierarchical)
             Text(label)
+                .lineLimit(1)
         }
-        .font(.caption2.weight(.semibold))
+        .font(DS.Typography.badge)
         .padding(.horizontal, DS.Spacing.s)
         .padding(.vertical, DS.Spacing.xxs)
         .foregroundStyle(kind.tint)
-        .background(kind.tint.opacity(0.14), in: Capsule())
+        .background(kind.tint.opacity(kind.isLowEmphasis ? 0.10 : 0.14), in: Capsule())
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel(label)
     }
 
