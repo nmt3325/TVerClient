@@ -375,6 +375,10 @@ final class DownloadCenter: ObservableObject {
     private var wifiOnlyKey: String { settingsKey + ".wifiOnly" }
     private var deleteAfterWatchingKey: String { settingsKey + ".deleteAfterWatching" }
     private var metadataURL: URL { directory.appendingPathComponent("metadata.json") }
+    /// 番組と結び付けられなかった実体の置き場。消す代わりにここへ移す。
+    private var quarantineDirectory: URL {
+        directory.appendingPathComponent(Self.quarantineFolderName, isDirectory: true)
+    }
 
     init(
         directory: URL? = nil,
@@ -707,8 +711,9 @@ final class DownloadCenter: ObservableObject {
         notices = []
 
         guard let data = try? Data(contentsOf: metadataURL) else {
-            records = []
-            reportReclaimed(reclaimOrphanedFiles())
+            // 索引を読めないだけで実体を消してはいけない。掎除は索引を読めた
+            // ときだけに限り、ここでは残っている実体から一覧を組み直す。
+            rebuildFromStoredFiles(reason: .unreadable)
             refreshStorage()
             return
         }
@@ -716,15 +721,8 @@ final class DownloadCenter: ObservableObject {
         guard let stored = try? JSONDecoder().decode([DownloadPersistedRecord].self, from: data)
         else {
             // 索引が壊れているときに、実体だけ残して黙るのが一番たちが悪い。
-            records = []
-            let reclaimed = reclaimOrphanedFiles()
-            post(DownloadNotice(
-                id: "download.restore.metadata",
-                kind: .warning,
-                message: "\(Vocabulary.Library.downloads)の管理情報を読み取れなかったため、一覧を作り直しました。",
-                recovery: "見たい番組は、もう一度\(Vocabulary.Download.action)してください。"
-            ))
-            reportReclaimed(reclaimed)
+            // かといって消すのはもっと悪い。実体から拾える分を拾って一覧に戻す。
+            rebuildFromStoredFiles(reason: .undecodable)
             refreshStorage()
             return
         }
@@ -764,7 +762,7 @@ final class DownloadCenter: ObservableObject {
         records = restored
         persistRecords()
 
-        let reclaimed = reclaimOrphanedFiles()
+        let quarantined = quarantineOrphanedFiles()
         if !missingTitles.isEmpty {
             post(DownloadNotice(
                 id: "download.restore.missing",
@@ -773,7 +771,7 @@ final class DownloadCenter: ObservableObject {
                 recovery: "\(Self.joined(missingTitles))。もう一度\(Vocabulary.Download.action)してください。"
             ))
         }
-        reportReclaimed(reclaimed)
+        reportQuarantined(quarantined)
         refreshStorage()
 
         // 拾い直しは非同期。拾えたものは進め、拾えなかったものはそう告げる。
@@ -836,37 +834,166 @@ final class DownloadCenter: ObservableObject {
         ))
     }
 
-    /// どの記録にも紐づかない実体を片付け、戻った容量を返す。
+    /// 索引を失った理由。文面を変えるためだけに持つ。
+    private enum IndexLoss {
+        case unreadable
+        case undecodable
+
+        var cause: String {
+            switch self {
+            case .unreadable:
+                return "\(Vocabulary.Library.downloads)の管理情報を読み取れませんでした。"
+            case .undecodable:
+                return "\(Vocabulary.Library.downloads)の管理情報が壊れていました。"
+            }
+        }
+    }
+
+    /// 退避した量。件数を持たないと「0件を退避しました」と告知してしまう。
+    private struct QuarantineOutcome {
+        var count = 0
+        var bytes: Int64 = 0
+
+        static var empty: QuarantineOutcome { QuarantineOutcome() }
+    }
+
+    /// 索引を失ったときに、端末に残っている実体から一覧を組み直す。
+    ///
+    /// 以前はこの経路で孤立ファイルの掎除を呼んでいたため、索引を読めない
+    /// 起動が一度あるだけで保存済みの番組が丸ごと消えていた。実体は消さず、
+    /// ファイル名から番組IDを取り戻せた分は一覧に戻し、結び付けられなかった
+    /// 分は退避して、何が起きたのかを必ず伝える。
+    private func rebuildFromStoredFiles(reason: IndexLoss) {
+        records = []
+        assetURLs = [:]
+        bookmarks = [:]
+        let manager = FileManager.default
+
+        // 壊れた索引もいきなり上書きしない。後で見直せるよう退避しておく。
+        if manager.fileExists(atPath: metadataURL.path) {
+            try? manager.createDirectory(
+                at: quarantineDirectory,
+                withIntermediateDirectories: true
+            )
+            try? manager.moveItem(
+                at: metadataURL,
+                to: unusedQuarantineURL(for: "metadata.json")
+            )
+        }
+
+        let entries = (try? manager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )) ?? []
+
+        var rebuilt: [DownloadRecord] = []
+        var unlinked: [URL] = []
+        for entry in entries {
+            let path = entry.standardizedFileURL.path
+            if path == metadataURL.standardizedFileURL.path { continue }
+            if path == quarantineDirectory.standardizedFileURL.path { continue }
+            guard let programID = Self.recoveredProgramID(from: entry) else {
+                unlinked.append(entry)
+                continue
+            }
+            assetURLs[programID] = entry
+            bookmarks[programID] = try? entry.bookmarkData()
+            rebuilt.append(DownloadRecord(
+                program: Self.placeholderProgram(
+                    id: programID,
+                    fileName: entry.lastPathComponent
+                ),
+                state: .downloaded(bytes: Self.directorySize(at: entry))
+            ))
+        }
+        records = rebuilt.sorted { left, right in left.program.title < right.program.title }
+        persistRecords()
+
+        let quarantined = quarantine(unlinked)
+        guard !records.isEmpty || quarantined.count > 0 else { return }
+
+        let restored = records.count
+        post(DownloadNotice(
+            id: "download.restore.index",
+            kind: .warning,
+            message: restored > 0
+                ? "\(reason.cause)端末に残っていた\(restored)件を一覧に戻しました。"
+                : reason.cause,
+            recovery: restored > 0
+                ? "番組名までは復元できないため、保存時のファイル名で表示しています。見分けがつかないものは、もう一度\(Vocabulary.Download.action)してください。"
+                : "端末に残っているファイルは消していません。見たい番組は、もう一度\(Vocabulary.Download.action)してください。"
+        ))
+        reportQuarantined(quarantined)
+    }
+
+    /// どの記録にも紐づかない実体を退避し、動かした量を返す。
+    ///
+    /// 以前はここで削除していた。索引の取り違えが一度あるだけで利用者の
+    /// 保存済みが消えるので、消さずに退避用のフォルダへ移すだけにする。
     @discardableResult
-    private func reclaimOrphanedFiles() -> Int64 {
+    private func quarantineOrphanedFiles() -> QuarantineOutcome {
         let manager = FileManager.default
         guard let entries = try? manager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil
-        ) else { return 0 }
+        ) else { return .empty }
 
         let keep = Set(assetURLs.values.map { url in url.standardizedFileURL.path })
-        let metadataPath = metadataURL.standardizedFileURL.path
-        var reclaimed: Int64 = 0
+        let reserved: Set<String> = [
+            metadataURL.standardizedFileURL.path,
+            quarantineDirectory.standardizedFileURL.path
+        ]
+        var targets: [URL] = []
         for entry in entries {
             let path = entry.standardizedFileURL.path
-            if path == metadataPath || keep.contains(path) { continue }
-            // 残すべき実体を内側に抱えている入れ物は消さない。
+            if reserved.contains(path) || keep.contains(path) { continue }
+            // 残すべき実体を内側に抱えている入れ物は動かさない。
             if keep.contains(where: { kept in kept.hasPrefix(path + "/") }) { continue }
-            let size = Self.directorySize(at: entry)
-            guard (try? manager.removeItem(at: entry)) != nil else { continue }
-            reclaimed += size
+            targets.append(entry)
         }
-        return reclaimed
+        return quarantine(targets)
     }
 
-    private func reportReclaimed(_ bytes: Int64) {
-        guard bytes > 0 else { return }
+    /// 実体を退避用フォルダへ移す。移せなかったものはその場に残す（消さない）。
+    private func quarantine(_ urls: [URL]) -> QuarantineOutcome {
+        guard !urls.isEmpty else { return .empty }
+        let manager = FileManager.default
+        try? manager.createDirectory(at: quarantineDirectory, withIntermediateDirectories: true)
+        var outcome = QuarantineOutcome.empty
+        for url in urls {
+            let size = Self.directorySize(at: url)
+            let destination = unusedQuarantineURL(for: url.lastPathComponent)
+            guard (try? manager.moveItem(at: url, to: destination)) != nil else { continue }
+            outcome.count += 1
+            outcome.bytes += size
+        }
+        return outcome
+    }
+
+    /// 退避先で名前がぶつかっても上書きしない。番号を付けて両方残す。
+    private func unusedQuarantineURL(for name: String) -> URL {
+        let manager = FileManager.default
+        var candidate = quarantineDirectory.appendingPathComponent(name)
+        let base = (name as NSString).deletingPathExtension
+        let extension_ = (name as NSString).pathExtension
+        var suffix = 2
+        while manager.fileExists(atPath: candidate.path) {
+            let numbered = extension_.isEmpty
+                ? "\(base)-\(suffix)"
+                : "\(base)-\(suffix).\(extension_)"
+            candidate = quarantineDirectory.appendingPathComponent(numbered)
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private func reportQuarantined(_ outcome: QuarantineOutcome) {
+        guard outcome.count > 0 else { return }
         post(DownloadNotice(
-            id: "download.restore.reclaimed",
+            id: "download.restore.quarantined",
             kind: .info,
-            message: "どの番組にも紐づかないファイル\(Self.formattedBytes(bytes))分を削除し、空き容量に戻しました。",
-            recovery: nil
+            message: "どの番組にも紐づかないファイル\(outcome.count)件（\(Self.formattedBytes(outcome.bytes))）を「\(Self.quarantineFolderName)」フォルダへ退避しました。",
+            recovery: "削除はしていないため、使用容量にはそのまま含まれています。不要なときは端末の設定からこのアプリの使用容量をご確認ください。"
         ))
     }
 
@@ -1043,6 +1170,45 @@ final class DownloadCenter: ObservableObject {
 
     nonisolated static func failureNoticeID(_ programID: String) -> String {
         "download.failed.\(programID)"
+    }
+
+    /// 退避用フォルダの名前。利用者にもそのまま見せる。
+    nonisolated static var quarantineFolderName: String { "Quarantine" }
+
+    /// ファイル名から番組IDを取り戻す。
+    ///
+    /// 保存名は `<番組ID>.movpkg` の形で作られる。動画として扱える拡張子で、
+    /// 拡張子を落とした部分が番組IDとして通る形のときだけ復元とみなす。
+    nonisolated static func recoveredProgramID(from url: URL) -> String? {
+        let assetExtensions: Set<String> = ["movpkg", "mp4", "m4v", "mov", "ts"]
+        guard assetExtensions.contains(url.pathExtension.lowercased()) else { return nil }
+        let base = (url.lastPathComponent as NSString).deletingPathExtension
+        let decoded = base.removingPercentEncoding ?? base
+        guard !decoded.isEmpty, decoded.count <= 128 else { return nil }
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        )
+        guard decoded.unicodeScalars.allSatisfy({ scalar in allowed.contains(scalar) }) else {
+            return nil
+        }
+        return decoded
+    }
+
+    /// 索引を失った実体を一覧に戻すための、名前だけ分かる番組。
+    ///
+    /// 番組名までは復元できない。ファイル名をそのまま出して、利用者が自分で
+    /// 見分けられるようにする。
+    nonisolated static func placeholderProgram(id: String, fileName: String) -> TVerProgram {
+        TVerProgram(
+            id: id,
+            seriesID: nil,
+            title: fileName,
+            seriesTitle: "",
+            description: "管理情報が失われたため、番組名を復元できませんでした。",
+            broadcastLabel: "",
+            availableUntil: nil,
+            thumbnailURL: nil
+        )
     }
 
     nonisolated static func joined(_ titles: [String]) -> String {
