@@ -21,15 +21,21 @@ final class LiveViewModel: ObservableObject {
     /// エリア対応の実装を持っているサービスならこちらを使う。init のシグネチャは
     /// 契約で固定なので、ここでキャストして拾う。
     private let areaService: (any TVerAreaAwareServicing)?
+    /// 鮮度付きで返せるサービスならこちらを使う。キャッシュ代替表示を
+    /// 「最新の情報です」と言わないために、取得元と取得時刻ごと受け取る。
+    private let snapshotProvider: (any TVerLiveSnapshotProviding)?
     private let usesPreviewFallback: Bool
     private var hasLoaded = false
     private var currentArea: TVerArea?
     /// 最後に取得できた時刻。更新に失敗したとき「いつの内容か」を言うために持つ。
     private var lastSuccessAt: Date?
+    /// 走っている取得。エリアを切り替えるときはこれを畳んでから始める。
+    private var loadTask: Task<Bool, Never>?
 
     init(service: any TVerLiveServicing, usesPreviewFallback: Bool = true) {
         self.service = service
         areaService = service as? any TVerAreaAwareServicing
+        snapshotProvider = service as? any TVerLiveSnapshotProviding
         self.usesPreviewFallback = usesPreviewFallback
     }
 
@@ -64,8 +70,26 @@ final class LiveViewModel: ObservableObject {
         _ = await load(area: currentArea, forceRefresh: true)
     }
 
+    /// 取得を1本ずつに直列化する。
+    ///
+    /// 以前は実行中なら false を返していたが、呼び出し側（エリア切替）は false を
+    /// 一律に取得失敗と読むため、何も失敗していないのに選択が巻き戻り、誤った
+    /// 警告まで出ていた。走っている取得を畳んでから始めれば、戻り値は本当の成否だけを表す。
     private func load(area: TVerArea?, forceRefresh: Bool) async -> Bool {
-        guard !isLoading else { return false }
+        let running = loadTask
+        running?.cancel()
+        _ = await running?.value
+
+        let task = Task { @MainActor in
+            await self.performLoad(area: area, forceRefresh: forceRefresh)
+        }
+        loadTask = task
+        let succeeded = await task.value
+        if loadTask == task { loadTask = nil }
+        return succeeded
+    }
+
+    private func performLoad(area: TVerArea?, forceRefresh: Bool) async -> Bool {
         currentArea = area
         isLoading = true
         errorMessage = nil
@@ -73,24 +97,26 @@ final class LiveViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
-            let response: [TVerLiveChannel]
-            if let areaService {
-                response = try await areaService.fetchLiveChannels(area: area, forceRefresh: forceRefresh)
-            } else {
-                response = try await service.fetchLiveChannels(forceRefresh: forceRefresh)
-            }
+            let snapshot = try await liveSnapshot(area: area, forceRefresh: forceRefresh)
+            // 取り消された取得の結果は画面に出さない。新しいエリアの取得が続いている。
+            if Task.isCancelled { return false }
             #if DEBUG
-                channels = response.isEmpty && usesPreviewFallback ? PreviewFixture.liveChannels : response
+                let resolved = snapshot.channels.isEmpty && usesPreviewFallback
+                    ? PreviewFixture.liveChannels
+                    : snapshot.channels
             #else
-                channels = response
+                let resolved = snapshot.channels
             #endif
+            channels = resolved
             hasLoaded = true
             loadedArea = area
-            let completedAt = Date()
-            lastSuccessAt = completedAt
-            freshness = .fresh(at: completedAt)
+            // キャッシュで凪いだときは成功時刻を更新しない。
+            if case let .fresh(at) = snapshot.freshness { lastSuccessAt = at }
+            // 取得元と取得時刻をそのまま画面へ渡す。代替表示を最新扱いにしない。
+            freshness = snapshot.freshness
             return true
         } catch {
+            if Task.isCancelled { return false }
             let normalized = TVerClientError.normalized(from: error)
             let presentation = normalized.presentation
             errorMessage = normalized.errorDescription ?? error.localizedDescription
@@ -109,6 +135,24 @@ final class LiveViewModel: ObservableObject {
             )
             return false
         }
+    }
+
+    /// 鮮度付きで返せるサービスならそのまま使い、そうでなければ取得できた時点を
+    /// 取得時刻として包む。
+    private func liveSnapshot(area: TVerArea?, forceRefresh: Bool) async throws -> LiveChannelsSnapshot {
+        if let snapshotProvider {
+            return try await snapshotProvider.fetchLiveChannelsSnapshot(
+                area: area,
+                forceRefresh: forceRefresh
+            )
+        }
+        let response: [TVerLiveChannel]
+        if let areaService {
+            response = try await areaService.fetchLiveChannels(area: area, forceRefresh: forceRefresh)
+        } else {
+            response = try await service.fetchLiveChannels(forceRefresh: forceRefresh)
+        }
+        return LiveChannelsSnapshot(channels: response, freshness: .fresh(at: Date()))
     }
 }
 
