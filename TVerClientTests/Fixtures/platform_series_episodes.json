@@ -1,0 +1,37 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "episode",
+        "content": {
+          "id": "ep000010",
+          "version": 1,
+          "seriesID": "sr000001",
+          "title": "第10話 プレースホルダー",
+          "seriesTitle": "サンプル番組A",
+          "description": "サンプルの説明文です。",
+          "broadcastDateLabel": "2月1日(日)放送分",
+          "startAt": 1896048000,
+          "endAt": 1896652800,
+          "thumbnailPath": "/images/placeholder/ep000010.jpg"
+        }
+      },
+      {
+        "type": "episode",
+        "content": {
+          "id": "ep000011",
+          "version": 1,
+          "seriesID": "sr000001",
+          "title": "第11話 プレースホルダー",
+          "seriesTitle": "サンプル番組A",
+          "description": "サンプルの説明文です。",
+          "broadcastDateLabel": "2月8日(日)放送分",
+          "startAt": 1896652800,
+          "endAt": 1897257600,
+          "thumbnailPath": "/images/placeholder/ep000011.jpg"
+        }
+      }
+    ]
+  }
+}

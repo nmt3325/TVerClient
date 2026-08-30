@@ -1,0 +1,41 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "episode",
+        "content": {
+          "id": "ep000020",
+          "version": 4,
+          "seriesID": "sr000005",
+          "title": "第5話 プレースホルダー",
+          "seriesTitle": "サンプル検索番組",
+          "broadcastDateLabel": "3月10日(火)放送分",
+          "endAt": 1899417600,
+          "thumbnailPath": "/images/placeholder/ep000020.jpg"
+        }
+      },
+      {
+        "type": "series",
+        "content": {
+          "id": "sr000005",
+          "version": 4,
+          "title": "サンプル検索番組"
+        }
+      },
+      {
+        "type": "episode",
+        "content": {
+          "id": "ep000021",
+          "version": 4,
+          "seriesID": "sr000005",
+          "title": "第6話 プレースホルダー",
+          "seriesTitle": "サンプル検索番組",
+          "broadcastDateLabel": "3月17日(火)放送分",
+          "endAt": 1900022400,
+          "thumbnailPath": "/images/placeholder/ep000021.jpg"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "ranking",
+        "label": "placeholder series ranking",
+        "contents": [
+          {
+            "type": "series",
+            "rank": 1,
+            "content": {
+              "id": "sr000001",
+              "version": 2,
+              "title": "サンプル番組A",
+              "broadcasterName": "プレースホルダー放送"
+            }
+          },
+          {
+            "type": "series",
+            "rank": 2,
+            "content": {
+              "id": "sr000002",
+              "version": 5,
+              "title": "サンプル番組B",
+              "broadcasterName": "プレースホルダー放送"
+            }
+          },
+          {
+            "type": "series",
+            "rank": 3,
+            "content": {
+              "id": "sr000003",
+              "version": 1,
+              "title": "サンプル番組C",
+              "broadcasterName": "プレースホルダー放送"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
