@@ -835,3 +835,387 @@ private struct LiveTimelineContent: Decodable {
     let endAt: Int?
     let thumbnailPath: String?
 }
+
+// MARK: - Catch-up (見逃し配信) lookup
+
+/// A single episode returned by TVer's keyword search, reduced to the fields the
+/// catch-up matcher needs. Kept separate from the decoding types so the matching
+/// logic stays a pure, network-free function that can be unit tested.
+struct CatchUpEpisodeCandidate: Equatable, Sendable {
+    let id: String
+    let seriesID: String?
+    let title: String
+    let seriesTitle: String
+    let broadcastDateLabel: String?
+    let endAt: Int?
+}
+
+/// Strips the decorations broadcasters add to programme-guide titles
+/// (【無料】, [字], (再), …) so guide entries can be compared with catalogue entries.
+enum CatchUpTitleNormalizer {
+    private static let bracketPairs: [(Character, Character)] = [
+        ("【", "】"), ("[", "]"), ("［", "］"), ("(", ")"), ("（", "）"),
+        ("<", ">"), ("＜", "＞"), ("〔", "〕"), ("《", "》"),
+    ]
+
+    private static let noiseTokens: Set<String> = [
+        "無料", "有料", "字", "再", "新", "終", "解", "多", "デ", "S", "SS", "生", "初",
+        "PR", "字幕", "見逃し", "見逃し配信", "見逃し配信中", "最終回", "デジタル",
+        "データ放送", "二", "副", "HD", "4K", "独占", "配信中", "最新話", "無料配信",
+    ]
+
+    private static let noiseCharacters: Set<Character> = [
+        "字", "再", "新", "終", "解", "多", "デ", "S", "生", "初", "無", "料", "二", "副", "独",
+    ]
+
+    private static let droppedCharacters = CharacterSet(
+        charactersIn: "！!？?、。，,．.・:：;；「」『』（）()[]【】<>《》\"'‘’“”　 \t\n〜~～#＃&＆+＋*＊/／\\―─—"
+    )
+
+    /// Full normalisation used for comparison. Not suitable for sending to the API.
+    static func normalize(_ value: String) -> String {
+        var text = removeBracketedNoise(value)
+        text = text.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? text
+        text = text.lowercased()
+        text = text.components(separatedBy: droppedCharacters).joined()
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Light cleanup that keeps the title human-readable so it can be used as a
+    /// search keyword against TVer's API.
+    static func cleanedForSearch(_ value: String) -> String {
+        removeBracketedNoise(value)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func removeBracketedNoise(_ value: String) -> String {
+        var result = value
+        for (open, close) in bracketPairs {
+            result = stripGroups(in: result, open: open, close: close)
+        }
+        return result
+    }
+
+    private static func stripGroups(in value: String, open: Character, close: Character) -> String {
+        var output = ""
+        var buffer = ""
+        var depth = 0
+
+        for character in value {
+            if character == open {
+                depth += 1
+                if depth == 1 {
+                    buffer = ""
+                    continue
+                }
+            } else if character == close, depth > 0 {
+                depth -= 1
+                if depth == 0 {
+                    if !isNoise(buffer) { output.append(buffer) }
+                    buffer = ""
+                    continue
+                }
+            }
+
+            if depth > 0 {
+                buffer.append(character)
+            } else {
+                output.append(character)
+            }
+        }
+
+        if depth > 0 { output.append(buffer) }
+        return output
+    }
+
+    private static func isNoise(_ inner: String) -> Bool {
+        let trimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        if noiseTokens.contains(trimmed) { return true }
+
+        let separators = CharacterSet(charactersIn: "・,、/／ 　")
+        let parts = trimmed.components(separatedBy: separators).filter { !$0.isEmpty }
+        if parts.count > 1, parts.allSatisfy({ noiseTokens.contains($0) }) { return true }
+
+        if trimmed.count <= 2, trimmed.allSatisfy({ noiseCharacters.contains($0) }) { return true }
+        return false
+    }
+}
+
+/// Pure scoring used to pick the catch-up episode that corresponds to a
+/// programme-guide entry. Deliberately free of networking so it is unit testable.
+enum CatchUpMatcher {
+    static let minimumScore = 0.55
+
+    static func searchKeywords(seriesTitle: String, title: String) -> [String] {
+        var keywords: [String] = []
+        for raw in [seriesTitle, title] {
+            let cleaned = CatchUpTitleNormalizer.cleanedForSearch(raw)
+            guard !cleaned.isEmpty, !CatchUpTitleNormalizer.normalize(cleaned).isEmpty else { continue }
+            keywords.append(cleaned)
+        }
+        var seen = Set<String>()
+        return keywords.filter { seen.insert($0).inserted }
+    }
+
+    static func similarity(_ lhs: String, _ rhs: String) -> Double {
+        if lhs.isEmpty || rhs.isEmpty { return 0 }
+        if lhs == rhs { return 1 }
+        let left = bigrams(lhs)
+        let right = bigrams(rhs)
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        let shared = left.intersection(right).count
+        return 2.0 * Double(shared) / Double(left.count + right.count)
+    }
+
+    private static func bigrams(_ value: String) -> Set<String> {
+        let characters = Array(value)
+        guard characters.count > 1 else { return [] }
+        var result = Set<String>()
+        for index in 0 ..< (characters.count - 1) {
+            result.insert(String(characters[index ... index + 1]))
+        }
+        return result
+    }
+
+    static func broadcastDay(from label: String) -> (month: Int, day: Int)? {
+        let pattern = #"(\d{1,2})月(\d{1,2})日"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                  in: label,
+                  range: NSRange(label.startIndex..., in: label)
+              ),
+              let monthRange = Range(match.range(at: 1), in: label),
+              let dayRange = Range(match.range(at: 2), in: label),
+              let month = Int(label[monthRange]),
+              let day = Int(label[dayRange])
+        else {
+            return nil
+        }
+        return (month, day)
+    }
+
+    static func score(
+        candidate: CatchUpEpisodeCandidate,
+        seriesTitle: String,
+        episodeTitle: String,
+        broadcastDate: Date?
+    ) -> Double {
+        let targetSeries = CatchUpTitleNormalizer.normalize(seriesTitle)
+        let candidateSeries = CatchUpTitleNormalizer.normalize(candidate.seriesTitle)
+        var seriesScore = similarity(targetSeries, candidateSeries)
+        if !targetSeries.isEmpty, !candidateSeries.isEmpty,
+           targetSeries.contains(candidateSeries) || candidateSeries.contains(targetSeries)
+        {
+            seriesScore = max(seriesScore, 0.9)
+        }
+
+        let targetTitle = CatchUpTitleNormalizer.normalize(episodeTitle)
+        let candidateTitle = CatchUpTitleNormalizer.normalize(candidate.title)
+        var titleScore = similarity(targetTitle, candidateTitle)
+        if !targetTitle.isEmpty, !candidateTitle.isEmpty,
+           targetTitle.contains(candidateTitle) || candidateTitle.contains(targetTitle)
+        {
+            titleScore = max(titleScore, 0.85)
+        }
+        // Guide entries frequently repeat the series name in the episode title.
+        titleScore = max(titleScore, similarity(targetTitle, candidateSeries))
+
+        var total = seriesScore * 0.7 + titleScore * 0.3
+
+        if let broadcastDate, let label = candidate.broadcastDateLabel,
+           let day = broadcastDay(from: label)
+        {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+            let components = calendar.dateComponents([.month, .day], from: broadcastDate)
+            if components.month == day.month, components.day == day.day {
+                total += 0.2
+            } else {
+                total -= 0.1
+            }
+        }
+
+        return min(max(total, 0), 1)
+    }
+
+    /// Candidates that clear `minimumScore`, best first.
+    static func rankedMatches(
+        among candidates: [CatchUpEpisodeCandidate],
+        seriesTitle: String,
+        episodeTitle: String,
+        broadcastDate: Date?
+    ) -> [CatchUpEpisodeCandidate] {
+        candidates
+            .map { candidate in
+                (
+                    candidate: candidate,
+                    value: score(
+                        candidate: candidate,
+                        seriesTitle: seriesTitle,
+                        episodeTitle: episodeTitle,
+                        broadcastDate: broadcastDate
+                    )
+                )
+            }
+            .filter { $0.value >= minimumScore }
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value > rhs.value }
+                if (lhs.candidate.endAt ?? 0) != (rhs.candidate.endAt ?? 0) {
+                    return (lhs.candidate.endAt ?? 0) > (rhs.candidate.endAt ?? 0)
+                }
+                return lhs.candidate.id < rhs.candidate.id
+            }
+            .map { $0.candidate }
+    }
+
+    static func bestMatch(
+        among candidates: [CatchUpEpisodeCandidate],
+        seriesTitle: String,
+        episodeTitle: String,
+        broadcastDate: Date?
+    ) -> CatchUpEpisodeCandidate? {
+        rankedMatches(
+            among: candidates,
+            seriesTitle: seriesTitle,
+            episodeTitle: episodeTitle,
+            broadcastDate: broadcastDate
+        ).first
+    }
+}
+
+/// Satisfies `TVerCatchUpLookupServicing`. The conformance itself is declared in
+/// `FeatureContracts.swift`; only the witness lives here.
+extension TVerAPIClient {
+    func findCatchUpProgram(channelID: String, program: TVerLiveProgram) async throws -> TVerProgram? {
+        let keywords = CatchUpMatcher.searchKeywords(
+            seriesTitle: program.seriesTitle,
+            title: program.title
+        )
+        guard !keywords.isEmpty else { return nil }
+
+        let credentials = try await createBrowserCredentials()
+
+        var candidates: [CatchUpEpisodeCandidate] = []
+        var seen = Set<String>()
+        for keyword in keywords {
+            let found = (try? await searchCatchUpEpisodes(keyword: keyword, credentials: credentials)) ?? []
+            for candidate in found where seen.insert(candidate.id).inserted {
+                candidates.append(candidate)
+            }
+            if candidates.count >= 60 { break }
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        let ranked = CatchUpMatcher.rankedMatches(
+            among: candidates,
+            seriesTitle: program.seriesTitle,
+            episodeTitle: program.title,
+            broadcastDate: program.startAt
+        )
+        guard !ranked.isEmpty else { return nil }
+
+        // Confirm the broadcaster where TVer exposes it, so a same-named show from
+        // another station is never offered for this channel.
+        for candidate in ranked.prefix(3) {
+            guard let provider = await broadcastProviderID(forEpisode: candidate.id) else {
+                return makeCatchUpProgram(from: candidate)
+            }
+            if provider.caseInsensitiveCompare(channelID) == .orderedSame {
+                return makeCatchUpProgram(from: candidate)
+            }
+        }
+        return nil
+    }
+
+    private func searchCatchUpEpisodes(
+        keyword: String,
+        credentials: Credentials
+    ) async throws -> [CatchUpEpisodeCandidate] {
+        guard var components = URLComponents(
+            url: Self.serviceBaseURL.appendingPathComponent("callKeywordSearch"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw TVerClientError.invalidResponse
+        }
+        components.queryItems = [
+            URLQueryItem(name: "platform_uid", value: credentials.uid),
+            URLQueryItem(name: "platform_token", value: credentials.token),
+            URLQueryItem(name: "keyword", value: keyword),
+        ]
+        guard let url = components.url else { throw TVerClientError.invalidResponse }
+
+        var request = URLRequest(url: url)
+        request.setValue("web", forHTTPHeaderField: "x-tver-platform-type")
+        request.setValue("https://tver.jp/", forHTTPHeaderField: "Referer")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Deliberately uncached: the shared response cache keys on host+path only,
+        // so two different keywords would otherwise collide on one entry.
+        let data = try await performUncached(request)
+        let response: KeywordSearchResponse = try decode(data)
+        try validateAPIResponse(code: response.code, message: response.message)
+
+        return (response.result?.contents ?? []).compactMap { item in
+            guard item.type == "episode",
+                  let content = item.content,
+                  let id = content.id,
+                  !id.isEmpty
+            else {
+                return nil
+            }
+            return CatchUpEpisodeCandidate(
+                id: id,
+                seriesID: content.seriesID,
+                title: content.title ?? "",
+                seriesTitle: content.seriesTitle ?? "",
+                broadcastDateLabel: content.broadcastDateLabel,
+                endAt: content.endAt
+            )
+        }
+    }
+
+    private func broadcastProviderID(forEpisode episodeID: String) async -> String? {
+        guard let encoded = episodeID.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+              let url = URL(string: "https://statics.tver.jp/content/episode/\(encoded).json")
+        else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("https://tver.jp/", forHTTPHeaderField: "Referer")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        guard let data = try? await performUncached(request),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = json["broadcastProviderID"] as? String
+        else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func makeCatchUpProgram(from candidate: CatchUpEpisodeCandidate) -> TVerProgram {
+        TVerProgram(
+            id: candidate.id,
+            seriesID: candidate.seriesID,
+            title: candidate.title,
+            seriesTitle: candidate.seriesTitle,
+            description: "",
+            broadcastLabel: candidate.broadcastDateLabel ?? "",
+            availableUntil: availableUntilLabel(epochSeconds: candidate.endAt),
+            thumbnailURL: thumbnailURL(path: nil, episodeID: candidate.id)
+        )
+    }
+}
+
+private struct KeywordSearchResponse: Decodable {
+    let code: Int?
+    let message: String?
+    let result: KeywordSearchResult?
+}
+
+private struct KeywordSearchResult: Decodable {
+    let contents: [EpisodeItem]?
+}
