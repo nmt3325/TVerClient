@@ -10,6 +10,7 @@ import SwiftUI
 struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
+    @EnvironmentObject private var downloadCenter: DownloadCenter
     @ObservedObject var libraryStore: ProgramLibraryStore
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @StateObject private var chrome = PlayerChromeModel()
@@ -59,6 +60,9 @@ struct PlaybackView: View {
             .navigationTitle("視聴")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    DownloadButton(program: program)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("閉じる") { dismiss() }.frame(minWidth: 44, minHeight: 44)
                 }
@@ -68,6 +72,12 @@ struct PlaybackView: View {
         .task(id: program.id) {
             libraryStore.recordRecentlyViewed(program)
             await playbackController.play(program)
+        }
+        // Finishing an episode retires its download so the library can offer to
+        // free the space back up.
+        .onChange(of: playbackController.state) { state in
+            guard isCurrent, state == .ended else { return }
+            downloadCenter.markWatched(program.id)
         }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
             FullScreenPlaybackView(

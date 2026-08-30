@@ -15,7 +15,7 @@ struct TVerArea: Identifiable, Codable, Hashable, Sendable {
         self.name = name
     }
 
-    static let tokyo = TVerArea(code: "23", name: "東京")
+    static let tokyo = TVerArea(code: "13", name: "東京")  // JIS X 0401: 13 = 東京都
 }
 
 /// Area-aware catalog access.

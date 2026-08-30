@@ -135,7 +135,11 @@ final class GuideZoomMetricsTests: XCTestCase {
 
     func testAnchoredOffsetKeepsTheSameMinuteUnderTheFingers() {
         let viewport: CGFloat = 600
-        let focalY: CGFloat = 220
+        // At the smallest zoom a whole day is only 720pt tall, so the focal
+        // point has to sit close enough to the top for the anchored offset to
+        // stay inside the content at every stop. Clamping at the edges is
+        // covered by testAnchoredOffsetStaysInsideTheContent.
+        let focalY: CGFloat = 150
         let before = GuideZoom.defaultPointsPerMinute
         let anchorMinutes = ProgramGuideMetrics.minutes(atOffsetY: 500 + focalY, pointsPerMinute: before)
         for after in GuideZoom.stops {

@@ -341,23 +341,30 @@ struct ScheduleView: View {
 
     private func programRow(_ program: TVerProgram) -> some View {
         let isFavorite = libraryStore.isFavorite(program)
-        return Button {
-            open(program)
-        } label: {
-            MediaRow(
-                title: displayTitle(for: program),
-                subtitle: program.title,
-                detail: detailText(for: program),
-                thumbnailURL: program.thumbnailURL,
-                badges: badges(for: program)
-            )
+        // The download control is a sibling rather than a nested button: a
+        // button inside another button's label does not get its own tap
+        // target in a List row.
+        return HStack(spacing: DS.Spacing.s) {
+            Button {
+                open(program)
+            } label: {
+                MediaRow(
+                    title: displayTitle(for: program),
+                    subtitle: program.title,
+                    detail: detailText(for: program),
+                    thumbnailURL: program.thumbnailURL,
+                    badges: badges(for: program)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(accessibilityLabel(for: program))
+            .accessibilityHint("ダブルタップして視聴画面を開きます")
+
+            DownloadButton(program: program)
         }
-        .buttonStyle(.plain)
         .listRowInsets(
             EdgeInsets(top: 0, leading: DS.Spacing.l, bottom: 0, trailing: DS.Spacing.l)
         )
-        .accessibilityLabel(accessibilityLabel(for: program))
-        .accessibilityHint("ダブルタップして視聴画面を開きます")
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button {
                 libraryStore.toggleFavorite(program)
