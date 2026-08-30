@@ -141,6 +141,12 @@ final class PlaybackController: ObservableObject {
         pictureInPicture = coordinator
     }
 
+    /// 預かっていたものを返す。すでに別の画面のものへ差し替わっているときは何もしない。
+    func unbindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
+        guard pictureInPicture === coordinator else { return }
+        pictureInPicture = nil
+    }
+
     func play(_ program: TVerProgram) async {
         beginRequest(program: program, liveChannel: nil)
         let generation = requestGeneration
