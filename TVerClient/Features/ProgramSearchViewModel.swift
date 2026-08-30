@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SwiftUI
 
 @MainActor
 final class ProgramSearchViewModel: ObservableObject {
@@ -75,6 +76,64 @@ final class ProgramSearchViewModel: ObservableObject {
             query: appliedQuery,
             filters: appliedFilters
         )
+    }
+
+    /// 検索結果欄がいまどの状態なのか。
+    ///
+    /// 「入力中」「0件」「結果あり」を呼び出し側が取り違えないよう、判定をここに集める。
+    /// 入力中と 0 件を同じ見た目にすると、打っている途中で「見つからない」と誤解される。
+    var status: ProgramSearchStatus {
+        if isFiltering { return .searching }
+        if !results.isEmpty { return .results(results.count) }
+        return hasActiveCriteria ? .empty : .idle
+    }
+
+    /// 検索語か絞り込みが効いているか。どちらも無いときは検索結果欄を出さない。
+    var hasActiveCriteria: Bool {
+        !appliedTerms.isEmpty || appliedFilters != .none
+    }
+
+    /// いまの結果に効いている検索語。デバウンス中は打ちかけではなく適用済みの語。
+    var appliedSearchTerm: String {
+        appliedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// いま効いている絞り込みを短くまとめた文。無ければ nil。
+    var activeFilterSummary: String? {
+        var parts: [String] = []
+        if appliedFilters.onlyOnAir { parts.append("放送中のみ") }
+        if appliedFilters.onlyFavorites { parts.append("お気に入りのみ") }
+        if appliedFilters.timeSlot != .all { parts.append(appliedFilters.timeSlot.displayName) }
+        return parts.isEmpty ? nil : parts.joined(separator: "・")
+    }
+
+    /// 0 件表示の見出し。何で探した結果なのかを必ず含める。
+    var emptyResultTitle: String {
+        let term = appliedSearchTerm
+        return term.isEmpty ? "条件に合う番組がありません" : "「\(term)」に一致する番組がありません"
+    }
+
+    /// 0 件表示の本文。効いている絞り込みと、次に何をすればよいかを書く。
+    var emptyResultMessage: String {
+        var lines: [String] = []
+        if let activeFilterSummary {
+            lines.append("絞り込み中: \(activeFilterSummary)")
+            lines.append(
+                appliedSearchTerm.isEmpty
+                    ? "絞り込みを外すと、番組表の全件が表示されます。"
+                    : "絞り込みを外すか、番組名を短くしてお試しください。"
+            )
+        } else {
+            lines.append("番組名を短くするか、ひらがな・カタカナを変えてお試しください。")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 検索語と絞り込みをまとめて解除する。表示中の結果もその場で作り直す。
+    func resetSearch() {
+        query = ""
+        filters = .none
+        searchNow()
     }
 
     func replaceIndex(_ index: ProgramSearchIndex) {
@@ -177,5 +236,85 @@ enum ProgramSearchAccessibilityText {
             components.append(filters.timeSlot.accessibilityLabel)
         }
         return components.joined(separator: "。") + "。"
+    }
+}
+
+
+/// 検索結果欄の状態。
+enum ProgramSearchStatus: Equatable, Sendable {
+    /// 検索語も絞り込みも無い。検索結果欄自体を出さない。
+    case idle
+    /// 入力中（デバウンス待ち）。「0 件」とは別の見た目にする。
+    case searching
+    /// 条件は効いているが一件も見つからない。
+    case empty
+    /// 件数ぶんの結果がある。
+    case results(Int)
+}
+
+/// 検索結果欄の状態表示。`ContentStatusView` に寄せて描き分ける。
+///
+/// 0 件のときは検索語といま効いている絞り込みを本文に出すので、
+/// 「何で探した結果が 0 件なのか」が画面だけで分かる。結果があるときは何も描かない。
+@MainActor
+struct ProgramSearchStatusView: View {
+    @ObservedObject var viewModel: ProgramSearchViewModel
+    /// 「検索条件をリセット」を押したときの処理。省くと検索語と絞り込みを外す。
+    var onReset: (() -> Void)?
+
+    var body: some View {
+        switch viewModel.status {
+        case .searching:
+            ContentStatusView(.loading("番組を検索しています"))
+        case .empty:
+            ContentStatusView(
+                .empty(
+                    title: viewModel.emptyResultTitle,
+                    message: viewModel.emptyResultMessage,
+                    systemImage: "magnifyingglass"
+                ),
+                retryTitle: "検索条件をリセット",
+                retry: {
+                    if let onReset {
+                        onReset()
+                    } else {
+                        viewModel.resetSearch()
+                    }
+                }
+            )
+        case .idle, .results:
+            EmptyView()
+        }
+    }
+}
+
+/// いま効いている絞り込みを常時見せる帯。
+///
+/// 絞り込みは検索欄から離れたところで設定するので、「思ったより結果が少ない」
+/// 原因が絞り込みだと気づけない。効いているときだけ帯で出し、その場で外せるようにする。
+@MainActor
+struct ProgramSearchFilterSummaryBar: View {
+    @ObservedObject var viewModel: ProgramSearchViewModel
+
+    var body: some View {
+        if let summary = viewModel.activeFilterSummary {
+            HStack(spacing: DS.Spacing.s) {
+                Label("絞り込み中: \(summary)", systemImage: "line.3.horizontal.decrease.circle.fill")
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button("すべて解除") {
+                    viewModel.filters = .none
+                }
+                .font(.footnote.weight(.semibold))
+                .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+                .accessibilityLabel("絞り込みをすべて解除")
+                .accessibilityHint("放送中のみやお気に入りのみなどの絞り込みを外します")
+            }
+            .padding(.horizontal, DS.Spacing.l)
+            .padding(.vertical, DS.Spacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+        }
     }
 }

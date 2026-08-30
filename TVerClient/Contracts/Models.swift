@@ -7,8 +7,37 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
     let seriesTitle: String
     let description: String
     let broadcastLabel: String
+    /// 画面に出す配信期限の文言。年を含まない。
     let availableUntil: String?
+    /// 配信期限そのもの。
+    ///
+    /// `availableUntil` は "3月17日(月) 23:59まで" のように年が落ちた文字列で、
+    /// これを解析し直すと残り日数が負になり、視聴できる番組に「配信終了」が
+    /// 出る。API から得た絶対時刻をここに保持し、期限判定は必ずこちらを使う。
+    let availableUntilAt: Date?
     let thumbnailURL: URL?
+
+    init(
+        id: String,
+        seriesID: String?,
+        title: String,
+        seriesTitle: String,
+        description: String,
+        broadcastLabel: String,
+        availableUntil: String?,
+        availableUntilAt: Date? = nil,
+        thumbnailURL: URL?
+    ) {
+        self.id = id
+        self.seriesID = seriesID
+        self.title = title
+        self.seriesTitle = seriesTitle
+        self.description = description
+        self.broadcastLabel = broadcastLabel
+        self.availableUntil = availableUntil
+        self.availableUntilAt = availableUntilAt
+        self.thumbnailURL = thumbnailURL
+    }
 
     var webURL: URL {
         URL(string: "https://tver.jp/episodes/\(id)")!

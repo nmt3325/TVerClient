@@ -33,6 +33,7 @@ struct DiagnosticsView: View {
     @State private var exportError: String?
     @State private var showsClearConfirmation = false
     @State private var copyConfirmation: String?
+    @State private var isGlossaryExpanded = false
 
     init(
         logStore: DiagnosticLogStore,
@@ -52,9 +53,15 @@ struct DiagnosticsView: View {
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("使い方")
+                } footer: {
+                    Text("不具合を伝えるときは「通信診断を実行」→「ログを共有」の順に押してください。見慣れない言葉は一番下の「用語の説明」にまとめてあります。")
                 }
 
                 Section("通信診断") {
+                    Text("この端末から TVer と配信基盤（Streaks）につながるかを、実際に接続して確かめます。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button {
                         Task { await runDiagnostics() }
                     } label: {
@@ -76,6 +83,10 @@ struct DiagnosticsView: View {
                 }
 
                 Section("起動セルフチェック") {
+                    Text("アプリの起動に必要な問い合わせを一通り試して、どこで止まるかを調べます。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button {
                         Task { await runSelfCheck() }
                     } label: {
@@ -120,6 +131,10 @@ struct DiagnosticsView: View {
                 }
 
                 Section("エンドポイント別サマリ") {
+                    Text("エンドポイントは、番組表や配信URLを取りに行く問い合わせ先のことです。先別に成否の回数を数えています。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if healthSummaries.isEmpty {
                         Text("まだ計測結果がありません")
                             .foregroundStyle(.secondary)
@@ -151,6 +166,10 @@ struct DiagnosticsView: View {
                 }
 
                 Section("最近の失敗・フォールバック") {
+                    Text("フォールバックは、本来の取得に失敗したため別の手段で表示したという意味です。表示できていても内容が古いことがあります。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if recentProblems.isEmpty {
                         Text("失敗やフォールバックは記録されていません")
                             .foregroundStyle(.secondary)
@@ -174,6 +193,13 @@ struct DiagnosticsView: View {
                                     .textSelection(.enabled)
                             }
                             .accessibilityElement(children: .combine)
+                            .contextMenu {
+                                Button {
+                                    copyToPasteboard(EndpointHealthStore.describe(event), label: "この記録")
+                                } label: {
+                                    Label("この記録をコピー", systemImage: "doc.on.doc")
+                                }
+                            }
                         }
                     }
                 }
@@ -194,6 +220,16 @@ struct DiagnosticsView: View {
                     }
                     .accessibilityHint("個人情報を除去したテキストログをクリップボードへコピーします")
 
+                    // ファイル保存を経由せず、メールやメッセージにそのまま渡せるようにする。
+                    ShareLink(
+                        item: logStore.exportText(),
+                        subject: Text("TVer Client 診断ログ"),
+                        message: Text("個人情報を除いた診断ログです。")
+                    ) {
+                        Label("ログを共有", systemImage: "square.and.arrow.up.on.square")
+                    }
+                    .accessibilityHint("他のアプリへ診断ログをそのまま渡します")
+
                     if let copyConfirmation {
                         Label(copyConfirmation, systemImage: "checkmark.circle.fill")
                             .font(.footnote)
@@ -204,13 +240,37 @@ struct DiagnosticsView: View {
                         showsClearConfirmation = true
                     } label: {
                         Label("ログを消去", systemImage: "trash")
+                            .frame(minHeight: DS.Size.minimumTapTarget)
                     }
+                    .accessibilityLabel("診断ログをすべて消去")
+                    .accessibilityHint("確認してから削除します。消去後は元に戻せません")
 
                     if let exportError {
                         Text(exportError)
                             .font(.footnote)
                             .foregroundStyle(DS.Palette.live)
                     }
+                }
+
+                Section {
+                    DisclosureGroup(isExpanded: $isGlossaryExpanded) {
+                        ForEach(DiagnosticsGlossary.terms) { term in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(term.name)
+                                    .font(.caption.bold())
+                                Text(term.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.vertical, 2)
+                            .accessibilityElement(children: .combine)
+                        }
+                    } label: {
+                        Label("用語の説明", systemImage: "text.book.closed")
+                            .frame(minHeight: DS.Size.minimumTapTarget)
+                    }
+                    .accessibilityHint("この画面に出てくる言葉の意味を開きます")
                 }
 
                 Section("最近のログ（\(logStore.entries.count)件）") {
@@ -237,6 +297,16 @@ struct DiagnosticsView: View {
                                     .textSelection(.enabled)
                             }
                             .accessibilityElement(children: .combine)
+                            .contextMenu {
+                                Button {
+                                    copyToPasteboard(
+                                        "[\(entry.level.rawValue)] \(entry.category) \(entry.message)",
+                                        label: "この行"
+                                    )
+                                } label: {
+                                    Label("この行をコピー", systemImage: "doc.on.doc")
+                                }
+                            }
                         }
                     }
                 }
@@ -263,7 +333,7 @@ struct DiagnosticsView: View {
             Button("消去", role: .destructive) { logStore.clear() }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("保存済みの診断ログを削除します。")
+            Text("記録済みのログとエンドポイントの集計をすべて削除します。元には戻せません。必要なら先に「ログを共有」か「ログを書き出す」で保存してください。")
         }
     }
 
@@ -416,4 +486,59 @@ private extension DiagnosticLogLevel {
         case .error: return DS.Palette.live
         }
     }
+}
+
+/// 診断画面に出てくる専門用語の短い説明。
+///
+/// この画面は不具合を伝えるためのものなので、読む人が開発者とは限らない。
+/// 用語を残したまま、意味をその場で引けるようにする。
+enum DiagnosticsGlossary {
+    struct Term: Identifiable {
+        let id: String
+        let name: String
+        let summary: String
+    }
+
+    static let terms: [Term] = [
+        Term(
+            id: "network-diagnostics",
+            name: "通信診断",
+            summary: "この端末から TVer と配信基盤につながるかを、実際に接続して確かめる操作です。"
+        ),
+        Term(
+            id: "self-check",
+            name: "セルフチェック",
+            summary: "アプリの起動に必要な問い合わせを一通り試して、どこで止まるかを調べる操作です。"
+        ),
+        Term(
+            id: "endpoint",
+            name: "エンドポイント",
+            summary: "アプリが番組表や配信URLを取りに行く、問い合わせ先のことです。"
+        ),
+        Term(
+            id: "fallback",
+            name: "フォールバック",
+            summary: "本来の取得に失敗したため、別の手段で表示したという意味です。表示できていても内容が古いことがあります。"
+        ),
+        Term(
+            id: "degraded",
+            name: "劣化",
+            summary: "表示はできたものの、一部の情報が取れなかった状態です。"
+        ),
+        Term(
+            id: "dns",
+            name: "DNS",
+            summary: "tver.jp のような名前を、通信に使う番号に変換する仕組みです。ここで失敗すると接続先が見つかりません。"
+        ),
+        Term(
+            id: "tls",
+            name: "TLS",
+            summary: "通信を暗号化する仕組みです。ここで失敗するときは、端末の日付設定やネットワーク機器が原因のことがあります。"
+        ),
+        Term(
+            id: "http-status",
+            name: "HTTP ステータス",
+            summary: "問い合わせ先からの返事の種類を表す 3 桁の番号です。200 は成功、403 や 404 は拒否や不在を意味します。"
+        ),
+    ]
 }

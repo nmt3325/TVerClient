@@ -44,6 +44,36 @@ struct ProgramNotificationRequest: Equatable, Sendable {
 struct ProgramNotificationPendingRequest: Equatable, Sendable {
     let identifier: String
     let fireDate: Date
+    /// 予約一覧で見せるための中身。取得できない経路もあるので既定値付き。
+    let title: String
+    let body: String
+    let userInfo: [String: String]
+
+    init(
+        identifier: String,
+        fireDate: Date,
+        title: String = "",
+        body: String = "",
+        userInfo: [String: String] = [:]
+    ) {
+        self.identifier = identifier
+        self.fireDate = fireDate
+        self.title = title
+        self.body = body
+        self.userInfo = userInfo
+    }
+}
+
+/// アプリ内の「予約済み一覧」に並べる1件。
+struct ProgramNotificationReservation: Identifiable, Equatable, Sendable {
+    let identifier: String
+    let fireDate: Date
+    let title: String
+    let body: String
+    let channelID: String
+    let programID: String
+
+    var id: String { identifier }
 }
 
 protocol ProgramNotificationCenter: Sendable {
@@ -117,7 +147,10 @@ final class UserNotificationProgramNotificationCenter: ProgramNotificationCenter
             else { return nil }
             return ProgramNotificationPendingRequest(
                 identifier: pending.identifier,
-                fireDate: fireDate
+                fireDate: fireDate,
+                title: pending.content.title,
+                body: pending.content.body,
+                userInfo: Self.stringUserInfo(pending.content.userInfo)
             )
         }
     }
@@ -138,6 +171,13 @@ final class UserNotificationProgramNotificationCenter: ProgramNotificationCenter
             return .ephemeral
         @unknown default:
             return .denied
+        }
+    }
+
+    private static func stringUserInfo(_ userInfo: [AnyHashable: Any]) -> [String: String] {
+        userInfo.reduce(into: [String: String]()) { result, entry in
+            guard let key = entry.key as? String, let value = entry.value as? String else { return }
+            result[key] = value
         }
     }
 
@@ -173,6 +213,10 @@ actor ProgramNotificationScheduler {
     /// iOS keeps only this many pending local notifications per app and
     /// silently discards anything past it.
     static let maximumPendingNotifications = 64
+
+    /// このアプリが番組開始通知に使う識別子の頭。他の通知を巻き込んで
+    /// 消さないよう、一覧と一括解除は必ずこれで絞る。
+    static let identifierPrefix = "tver.program-start."
 
     private let center: any ProgramNotificationCenter
 
@@ -228,6 +272,11 @@ actor ProgramNotificationScheduler {
         return request
     }
 
+    /// 開始時刻が変わった番組の通知を取り直す。
+    ///
+    /// 取り直せなかったときは古い開始時刻の予約を解除してから throw する。
+    /// 黙って消さないため、呼び出し側は isScheduled(programID:channelID:) で
+    /// 実態を見直し、解除されたことを画面と読み上げに出すこと。
     @discardableResult
     func update(
         program: TVerLiveProgram,
@@ -242,9 +291,42 @@ actor ProgramNotificationScheduler {
         do {
             return try await schedule(program: program, channel: channel, leadTime: leadTime, now: now)
         } catch {
+            // 取り直せなかったのに古い予約を残すと、実際の放送とずれた時刻に通知が鳴る。
+            // 時刻切れでも許可切れでも上限超えでも危うさは同じなので、失敗した経路では必ず解除する。
+            // 解除したこと自体は、呼び出し側が予約状態を見直して利用者に伝える。
             await cancel(programID: program.id, channelID: channel.id)
             throw error
         }
+    }
+
+    /// 予約済みの番組通知を送信の早い順に返す。
+    func reservations() async -> [ProgramNotificationReservation] {
+        await center.pendingRequests()
+            .filter { $0.identifier.hasPrefix(Self.identifierPrefix) }
+            .sorted { $0.fireDate < $1.fireDate }
+            .map(Self.reservation(from:))
+    }
+
+    /// この番組の通知が実際に予約されているか。画面の表示を
+    /// 実態に合わせ直すために使う。
+    func isScheduled(programID: String, channelID: String) async -> Bool {
+        let identifier = Self.identifier(channelID: channelID, programID: programID)
+        return await center.pendingRequests().contains { $0.identifier == identifier }
+    }
+
+    func cancel(identifier: String) async {
+        await center.removePendingRequests(withIdentifiers: [identifier])
+    }
+
+    /// 番組開始通知をすべて解除する。戻り値は解除した件数。
+    @discardableResult
+    func cancelAll() async -> Int {
+        let identifiers = await center.pendingRequests()
+            .map(\.identifier)
+            .filter { $0.hasPrefix(Self.identifierPrefix) }
+        guard !identifiers.isEmpty else { return 0 }
+        await center.removePendingRequests(withIdentifiers: identifiers)
+        return identifiers.count
     }
 
     func cancel(programID: String, channelID: String) async {
@@ -272,7 +354,20 @@ actor ProgramNotificationScheduler {
     }
 
     nonisolated static func identifier(channelID: String, programID: String) -> String {
-        "tver.program-start.\(stableComponent(channelID)).\(stableComponent(programID))"
+        "\(identifierPrefix)\(stableComponent(channelID)).\(stableComponent(programID))"
+    }
+
+    private nonisolated static func reservation(
+        from pending: ProgramNotificationPendingRequest
+    ) -> ProgramNotificationReservation {
+        ProgramNotificationReservation(
+            identifier: pending.identifier,
+            fireDate: pending.fireDate,
+            title: pending.title,
+            body: pending.body,
+            channelID: pending.userInfo["channelID"] ?? "",
+            programID: pending.userInfo["programID"] ?? ""
+        )
     }
 
     private nonisolated static func stableComponent(_ value: String) -> String {

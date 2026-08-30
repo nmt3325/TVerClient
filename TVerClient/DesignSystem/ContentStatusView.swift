@@ -68,6 +68,9 @@ struct ContentStatusView<Accessory: View>: View {
         case loading(String)
         case empty(title: String, message: String, systemImage: String)
         case failure(title: String, message: String)
+        /// 失敗に「次に何をすればよいか」を添えた版。生の
+        /// `localizedDescription` を貼るだけの行き止まりを作らないために使う。
+        case recoverableFailure(title: String, message: String, recovery: String)
     }
 
     let kind: Kind
@@ -102,6 +105,19 @@ struct ContentStatusView<Accessory: View>: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+            case let .recoverableFailure(title, message, recovery):
+                icon("exclamationmark.triangle.fill", tint: DS.Palette.warning)
+                Text(title).font(.headline)
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                if !recovery.isEmpty {
+                    Text(recovery)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
             }
             accessory()
         }

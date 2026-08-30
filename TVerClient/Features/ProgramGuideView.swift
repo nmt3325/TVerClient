@@ -15,7 +15,14 @@ final class ProgramGuideViewModel: ObservableObject {
     /// fresh response. Stale data is never presented silently.
     @Published private(set) var isShowingCachedData = false
 
+    /// いま出している内容の鮮度。契約 LoadFreshness を publish して、
+    /// 更新の失敗を黙って飲み込まないようにする。
+    @Published private(set) var freshness: LoadFreshness = .fresh(at: Date())
+
     private let service: any TVerProgramGuideServicing
+    /// 鮮度付きで返せるサービスならこちらを使う。キャッシュ代替表示を
+    /// 「最新の情報です」と言わないために、取得元と取得時刻ごと受け取る。
+    private let snapshotProvider: (any TVerProgramGuideSnapshotProviding)?
     private let usesPreviewFallback: Bool
     private let snapshotStore: ProgramGuideSnapshotStore?
     private let now: () -> Date
@@ -29,6 +36,7 @@ final class ProgramGuideViewModel: ObservableObject {
         now: @escaping () -> Date = Date.init
     ) {
         self.service = service
+        snapshotProvider = service as? any TVerProgramGuideSnapshotProviding
         self.usesPreviewFallback = usesPreviewFallback
         self.snapshotStore = snapshotStore
         self.now = now
@@ -65,6 +73,7 @@ final class ProgramGuideViewModel: ObservableObject {
         guide = snapshot.guide
         lastUpdatedAt = snapshot.savedAt
         isShowingCachedData = true
+        freshness = .cached(at: snapshot.savedAt, reason: .offline)
     }
 
     func load() async {
@@ -72,7 +81,8 @@ final class ProgramGuideViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         do {
-            let response = try await service.fetchProgramGuide(forceRefresh: hasLoaded)
+            let snapshot = try await guideSnapshot(forceRefresh: hasLoaded)
+            let response = snapshot.channels
             #if DEBUG
                 let resolved = response.contains(where: { !$0.programs.isEmpty }) || !usesPreviewFallback
                     ? response : PreviewFixture.programGuide
@@ -81,17 +91,33 @@ final class ProgramGuideViewModel: ObservableObject {
             #endif
             guide = resolved
             hasLoaded = true
-            let updatedAt = now()
-            lastUpdatedAt = updatedAt
-            isShowingCachedData = false
-            if let snapshotStore, resolved.contains(where: { !$0.programs.isEmpty }) {
-                await snapshotStore.save(resolved, at: updatedAt)
+            // 取得元と取得時刻をそのまま反映する。キャッシュ代替を最新扱いにしない。
+            freshness = snapshot.freshness
+            switch snapshot.freshness {
+            case let .fresh(at):
+                lastUpdatedAt = at
+                isShowingCachedData = false
+                // 最新を取れたときだけ控えを取り直す。古い内容で上書きしない。
+                if let snapshotStore, resolved.contains(where: { !$0.programs.isEmpty }) {
+                    await snapshotStore.save(resolved, at: at)
+                }
+            case let .cached(at, _):
+                lastUpdatedAt = at
+                isShowingCachedData = true
+            case let .refreshFailed(lastGoodAt, _, _):
+                lastUpdatedAt = lastGoodAt ?? lastUpdatedAt
+                isShowingCachedData = !resolved.isEmpty
             }
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             // Whatever is still on screen came from an earlier fetch, so label
             // it instead of letting stale rows pass for live ones.
             isShowingCachedData = !guide.isEmpty
+            freshness = .refreshFailed(
+                lastGoodAt: lastUpdatedAt,
+                message: errorMessage ?? "",
+                recovery: StaleReason.offline.recovery
+            )
             DiagnosticLogStore.shared.record(
                 .error,
                 category: "program-guide",
@@ -101,6 +127,16 @@ final class ProgramGuideViewModel: ObservableObject {
         }
         isLoading = false
     }
+
+    /// 鮮度付きで返せるサービスならそのまま使い、そうでなければ取得できた時点を
+    /// 取得時刻として包む。
+    private func guideSnapshot(forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
+        if let snapshotProvider {
+            return try await snapshotProvider.fetchProgramGuideSnapshot(forceRefresh: forceRefresh)
+        }
+        let response = try await service.fetchProgramGuide(forceRefresh: forceRefresh)
+        return GuideChannelsSnapshot(channels: response, freshness: .fresh(at: now()))
+    }
 }
 
 struct ProgramGuideView: View {
@@ -108,8 +144,11 @@ struct ProgramGuideView: View {
     @ObservedObject private var playbackController: PlaybackController
     @ObservedObject private var libraryStore: ProgramLibraryStore
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var selectedDate = ProgramGuideMetrics.calendar.startOfDay(for: Date())
+    /// VoiceOver 中に格子を渡すと読み上げ順が追えず操作できないので、線形リストに切り替える。
+    @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
+    @State private var selectedDate = GuideBroadcastAxis.dayStart(containing: Date())
     @State private var selectedProgram: ProgramGuideSelection?
+    @State private var isShowingNotificationList = false
     @State private var scrollToNowToken = 0
     /// Persisted so the grid reopens at the density the user chose.
     @AppStorage("guide.pointsPerMinute") private var storedPointsPerMinute = Double(GuideZoom.defaultPointsPerMinute)
@@ -170,7 +209,7 @@ struct ProgramGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: ToolbarCompat.leading) {
                     Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
                         Image(systemName: "minus.magnifyingglass")
                             .frame(
@@ -181,7 +220,7 @@ struct ProgramGuideView: View {
                     .disabled(!canZoomOut)
                     .accessibilityLabel("番組表を縮小")
                 }
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: ToolbarCompat.leading) {
                     Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
                         Image(systemName: "plus.magnifyingglass")
                             .frame(
@@ -192,8 +231,9 @@ struct ProgramGuideView: View {
                     .disabled(!canZoomIn)
                     .accessibilityLabel("番組表を拡大")
                 }
-                ToolbarItem(placement: .topBarTrailing) { channelFilterMenu }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: ToolbarCompat.trailing) { channelFilterMenu }
+                ToolbarItem(placement: ToolbarCompat.trailing) { notificationListButton }
+                ToolbarItem(placement: ToolbarCompat.trailing) {
                     Button { Task { await viewModel.load() } } label: {
                         if viewModel.isLoading {
                             ProgressView().frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
@@ -208,12 +248,15 @@ struct ProgramGuideView: View {
         }
         .task { await viewModel.loadIfNeeded() }
         .onChange(of: viewModel.guide) { guide in
-            let dates = ProgramGuideMetrics.dates(in: guide)
-            if !dates.contains(where: { ProgramGuideMetrics.isSameDay($0, selectedDate) }),
-               let preferred = ProgramGuideMetrics.preferredDate(in: dates)
+            let dates = GuideBroadcastAxis.dates(in: guide)
+            if !dates.contains(where: { GuideBroadcastAxis.isSameDay($0, selectedDate) }),
+               let preferred = GuideBroadcastAxis.preferredDate(in: dates)
             {
                 selectedDate = preferred
             }
+        }
+        .sheet(isPresented: $isShowingNotificationList) {
+            ProgramNotificationListView(scheduler: notificationScheduler)
         }
         .sheet(item: $selectedProgram) { selection in
             ProgramGuideDetailSheet(
@@ -229,17 +272,20 @@ struct ProgramGuideView: View {
 
     private var guideContent: some View {
         VStack(spacing: 0) {
-            if let notice = viewModel.offlineNotice {
-                ProgramGuideOfflineBanner(message: notice)
+            if viewModel.freshness.isDegraded {
+                FreshnessBanner(freshness: viewModel.freshness) {
+                    Task { await viewModel.load() }
+                }
+                .accessibilityIdentifier(GuideAccessibilityIdentifier.offlineBanner)
                 Divider()
             }
             ProgramGuideDatePicker(
-                dates: ProgramGuideMetrics.dates(in: viewModel.guide),
+                dates: GuideBroadcastAxis.dates(in: viewModel.guide),
                 selectedDate: $selectedDate
             )
             Divider()
             Group {
-                if dynamicTypeSize.isAccessibilitySize {
+                if usesAccessibleList {
                     ProgramGuideAccessibleList(
                         guide: visibleGuide,
                         selectedDate: selectedDate,
@@ -344,6 +390,24 @@ struct ProgramGuideView: View {
         .accessibilityLabel("チャンネルを絞り込む")
     }
 
+    /// 格子は VoiceOver でも特大文字でも成立しないので、そのときは線形リストにする。
+    private var usesAccessibleList: Bool {
+        isVoiceOverRunning || dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// 予約済みの通知を見て解除するための入り口。
+    private var notificationListButton: some View {
+        Button { isShowingNotificationList = true } label: {
+            Image(systemName: "bell")
+                .frame(
+                    width: ProgramGuideMetrics.minimumTapTarget,
+                    height: ProgramGuideMetrics.minimumTapTarget
+                )
+        }
+        .accessibilityLabel("通知の予約一覧")
+        .accessibilityHint("予約した放送開始通知を確認して解除します")
+    }
+
     private func zoom(to value: CGFloat) {
         withAnimation(.easeInOut(duration: 0.18)) {
             storedPointsPerMinute = Double(GuideZoom.clamp(value))
@@ -363,17 +427,26 @@ struct ProgramGuideView: View {
     /// Jumps to the live edge, switching to today first when the user is
     /// looking at another day.
     private func jumpToNow() {
-        let today = ProgramGuideMetrics.dates(in: viewModel.guide)
-            .first { ProgramGuideMetrics.calendar.isDateInToday($0) }
-        if let today, !ProgramGuideMetrics.isSameDay(today, selectedDate) {
+        let now = Date()
+        let today = GuideBroadcastAxis.dates(in: viewModel.guide)
+            .first { GuideBroadcastAxis.isSameDay($0, now) }
+        if let today, !GuideBroadcastAxis.isSameDay(today, selectedDate) {
             selectedDate = today
         } else {
             scrollToNowToken += 1
         }
     }
 
-    private func selectProgram(channel: TVerLiveChannel, program: TVerLiveProgram) {
-        selectedProgram = ProgramGuideSelection(channel: channel, program: program)
+    private func selectProgram(
+        channel: TVerLiveChannel,
+        program: TVerLiveProgram,
+        availability: CatchUpAvailability
+    ) {
+        selectedProgram = ProgramGuideSelection(
+            channel: channel,
+            program: program,
+            availability: availability
+        )
     }
 }
 
@@ -465,14 +538,14 @@ private struct ProgramGuideDatePicker: View {
 private struct ProgramGuideAccessibleList: View {
     let guide: [TVerGuideChannel]
     let selectedDate: Date
-    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
+    let onSelect: (TVerLiveChannel, TVerLiveProgram, CatchUpAvailability) -> Void
     @EnvironmentObject private var availabilityStore: CatchUpAvailabilityStore
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 ForEach(guide) { item in
-                    let programs = ProgramGuideMetrics.programs(item.programs, on: selectedDate)
+                    let programs = GuideBroadcastAxis.programs(item.programs, on: selectedDate)
                         .sorted { $0.startAt < $1.startAt }
                     if !programs.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
@@ -498,11 +571,11 @@ private struct ProgramGuideAccessibleList: View {
                                 let hasNothingToPlay = GuideAvailabilityPresentation
                                     .hasNothingToPlay(isOnAir: isOnAir, availability: availability)
                                 Button {
-                                    onSelect(item.channel, program)
+                                    onSelect(item.channel, program, availability)
                                 } label: {
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack(alignment: .firstTextBaseline) {
-                                            Text(program.timeLabel)
+                                            Text(GuideBroadcastAxis.timeRangeLabel(for: program))
                                                 .font(.subheadline.monospacedDigit().weight(.semibold))
                                             if isOnAir {
                                                 Text("放送中")
@@ -532,8 +605,8 @@ private struct ProgramGuideAccessibleList: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(hasNothingToPlay)
-                                .opacity(hasNothingToPlay ? 0.45 : 1)
+                                // 見逃しが無くても詳細の閲覧と通知予約は使えるので、押せなくしない。
+                                .opacity(hasNothingToPlay ? 0.72 : 1)
                                 .accessibilityElement(children: .ignore)
                                 .accessibilityLabel(
                                     GuideAvailabilityPresentation.accessibilityLabel(
@@ -553,7 +626,6 @@ private struct ProgramGuideAccessibleList: View {
                                     )
                                 )
                                 .accessibilityAddTraits(isOnAir ? .isSelected : [])
-                                .accessibilityRemoveTraits(hasNothingToPlay ? .isButton : [])
                             }
                         }
                     }
@@ -568,6 +640,18 @@ private struct ProgramGuideAccessibleList: View {
 struct ProgramGuideSelection: Identifiable {
     let channel: TVerLiveChannel
     let program: TVerLiveProgram
+    /// 見逃し配信の状態。再生だけを止めるために詳細まで持ち回す。
+    let availability: CatchUpAvailability
+
+    init(
+        channel: TVerLiveChannel,
+        program: TVerLiveProgram,
+        availability: CatchUpAvailability = .unknown
+    ) {
+        self.channel = channel
+        self.program = program
+        self.availability = availability
+    }
 
     var id: String {
         "\(channel.id)-\(program.id)-\(program.startAt.timeIntervalSince1970)"
@@ -591,6 +675,7 @@ private struct ProgramGuideDetailSheet: View {
     @State private var isUpdatingNotification = false
     @State private var notificationStatus: String?
     @State private var notificationStatusIsError = false
+    @State private var isConfirmingCancel = false
 
     init(
         selection: ProgramGuideSelection,
@@ -687,6 +772,13 @@ private struct ProgramGuideDetailSheet: View {
                         notificationControls
                     }
 
+                    if hasNothingToPlay {
+                        Label(Vocabulary.CatchUp.none, systemImage: "play.slash")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("この番組の見逃し配信はありません")
+                    }
+
                     if requestedPlayback, isCurrent, let presentation = playbackController.errorPresentation {
                         PlaybackFailureView(presentation: presentation, officialURL: selection.channel.webURL) {
                             Task { await playbackController.playLive(playbackChannel) }
@@ -762,7 +854,7 @@ private struct ProgramGuideDetailSheet: View {
             .navigationTitle("番組詳細")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: ToolbarCompat.trailing) {
                     Button("閉じる") { dismiss() }
                         .frame(
                             minWidth: ProgramGuideMetrics.minimumTapTarget,
@@ -778,6 +870,14 @@ private struct ProgramGuideDetailSheet: View {
                 libraryStore: libraryStore
             )
         }
+    }
+
+    /// 再生できるものが無い状態。再生以外の導線は残す。
+    private var hasNothingToPlay: Bool {
+        GuideAvailabilityPresentation.hasNothingToPlay(
+            isOnAir: canPlay,
+            availability: selection.availability
+        )
     }
 
     private var isFutureProgram: Bool {
@@ -841,7 +941,7 @@ private struct ProgramGuideDetailSheet: View {
 
             if isNotificationScheduled {
                 Button(role: .destructive) {
-                    cancelNotification()
+                    isConfirmingCancel = true
                 } label: {
                     Label("通知を解除", systemImage: "bell.slash")
                         .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
@@ -866,6 +966,25 @@ private struct ProgramGuideDetailSheet: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .contain)
+        .task { await refreshNotificationState() }
+        .confirmationDialog(
+            "この番組の通知を解除しますか？",
+            isPresented: $isConfirmingCancel,
+            titleVisibility: .visible
+        ) {
+            Button("解除", role: .destructive) { cancelNotification() }
+            Button("やめる", role: .cancel) {}
+        } message: {
+            Text("\(selection.program.seriesTitle)の放送開始通知は届かなくなります。")
+        }
+    }
+
+    /// 予約が実際に残っているかを見て、画面の表示を実態に合わせる。
+    private func refreshNotificationState() async {
+        isNotificationScheduled = await notificationScheduler.isScheduled(
+            programID: selection.program.id,
+            channelID: selection.channel.id
+        )
     }
 
     private func notificationLeadTimeLabel(_ leadTime: ProgramNotificationLeadTime) -> String {
@@ -902,8 +1021,19 @@ private struct ProgramGuideDetailSheet: View {
                 notificationStatusIsError = false
                 notificationStatus = "\(notificationLeadTimeLabel(selectedLeadTime))に通知します。"
             } catch {
+                // 失敗したのに「予約済み」の表示が残ると嘘になる。実際に残っている
+                // 予約を見直してから、どちらの状態なのかを言葉にして伝える。
+                let stillScheduled = await notificationScheduler.isScheduled(
+                    programID: selection.program.id,
+                    channelID: selection.channel.id
+                )
+                isNotificationScheduled = stillScheduled
                 notificationStatusIsError = true
-                notificationStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let followUp = stillScheduled
+                    ? "これまでの予約はそのまま残っています。"
+                    : "予約は解除されました。"
+                notificationStatus = reason + followUp
             }
             isUpdatingNotification = false
             UIAccessibility.post(notification: .announcement, argument: notificationStatus)
@@ -1174,27 +1304,6 @@ enum ProgramGuideOfflineNotice {
         // A bare clock time would be misleading once the copy is a day old.
         formatter.dateFormat = calendar.isDate(lastUpdatedAt, inSameDayAs: now) ? "HH:mm" : "M/d HH:mm"
         return prefix + formatter.string(from: lastUpdatedAt)
-    }
-}
-
-private struct ProgramGuideOfflineBanner: View {
-    let message: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wifi.slash")
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.footnote)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.18))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(message)
-        .accessibilityIdentifier(GuideAccessibilityIdentifier.offlineBanner)
     }
 }
 

@@ -47,7 +47,10 @@ enum TVerNetworking {
     }
 }
 
-final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramGuideServicing, @unchecked Sendable {
+final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramGuideServicing,
+    TVerScheduleSnapshotProviding, TVerLiveSnapshotProviding, TVerProgramGuideSnapshotProviding,
+    @unchecked Sendable
+{
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
     private static let staticsBaseURL = URL(string: "https://statics.tver.jp")!
@@ -58,6 +61,9 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private let responseCache: TVerResponseCache
     private let cacheTTL: TimeInterval
     private let staleIfErrorTTL: TimeInterval
+    /// 取得そのものが失敗したときに、保存済み応答をどこまで遡って使うか。
+    /// 電波の無い場所では「古くても出る」ほうが「何も出ない」より役に立つ。
+    private let offlineFallbackTTL: TimeInterval
     private let dateProvider: @Sendable () -> Date
     private let healthReporter: EndpointHealthReporting
     /// エリア別のデコード済み結果。HTTP 層のキャッシュキーは host + path だけなので
@@ -69,6 +75,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         responseCache: TVerResponseCache = TVerResponseCache(),
         cacheTTL: TimeInterval = 60,
         staleIfErrorTTL: TimeInterval = 15 * 60,
+        offlineFallbackTTL: TimeInterval = TVerResponseCache.defaultMaximumAge,
         dateProvider: @escaping @Sendable () -> Date = { Date() },
         healthReporter: EndpointHealthReporting = NoopEndpointHealthReporter.shared,
         areaCacheTTL: TimeInterval = 60
@@ -77,6 +84,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         self.responseCache = responseCache
         self.cacheTTL = max(0, cacheTTL)
         self.staleIfErrorTTL = max(0, staleIfErrorTTL)
+        self.offlineFallbackTTL = max(0, offlineFallbackTTL)
         self.dateProvider = dateProvider
         self.healthReporter = healthReporter
         areaCache = TVerAreaResultCache(ttl: areaCacheTTL)
@@ -87,6 +95,25 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     }
 
     func fetchSchedule(forceRefresh: Bool) async throws -> [ProgramDay] {
+        try await fetchScheduleSnapshot(forceRefresh: forceRefresh).days
+    }
+
+    /// 一覧と、その一覧をどれだけ信用してよいかを一緒に返す。
+    ///
+    /// 電波が無いとトークン取得が先に例外を投げるため、せっかく保存してある
+    /// 応答が一度も使われないままだった。取得に失敗したらキャッシュから組み直し、
+    /// それが「いつの」内容なのかを呼び出し側に伝える。
+    func fetchScheduleSnapshot(forceRefresh: Bool) async throws -> ScheduleSnapshot {
+        do {
+            let days = try await networkSchedule(forceRefresh: forceRefresh)
+            return ScheduleSnapshot(days: days, freshness: .fresh(at: dateProvider()))
+        } catch {
+            guard let cached = await cachedScheduleSnapshot(for: error) else { throw error }
+            return cached
+        }
+    }
+
+    private func networkSchedule(forceRefresh: Bool) async throws -> [ProgramDay] {
         let credentials = try await createBrowserCredentials()
 
         if let rankedEpisodes = try? await fetchEpisodeRanking(
@@ -757,6 +784,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 description: episode.description ?? "",
                 broadcastLabel: broadcastLabel,
                 availableUntil: availableUntilLabel(epochSeconds: episode.endAt),
+                availableUntilAt: availableUntilDate(epochSeconds: episode.endAt),
                 thumbnailURL: thumbnailURL(path: episode.thumbnailPath, episodeID: episodeID)
             )
             programsByDate[date, default: []].append(program)
@@ -838,6 +866,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(epochSeconds)))
     }
 
+    /// 期限の絶対時刻。表示用の文字列と違って年を失わない。
+    private func availableUntilDate(epochSeconds: Int?) -> Date? {
+        guard let epochSeconds, epochSeconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(epochSeconds))
+    }
+
     private func thumbnailURL(path: String?, episodeID: String) -> URL? {
         let candidate: URL?
         if let path, !path.isEmpty {
@@ -859,7 +893,27 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         try await fetchLiveChannels(forceRefresh: false)
     }
 
+    /// 既存の呼び出し元のために配列だけを返す。取得元と取得時刻も要るときは
+    /// `fetchLiveChannelsSnapshot(forceRefresh:)` を使う。
     func fetchLiveChannels(forceRefresh: Bool) async throws -> [TVerLiveChannel] {
+        try await fetchLiveChannelsSnapshot(forceRefresh: forceRefresh).channels
+    }
+
+    /// ライブ一覧と、その一覧をどれだけ信用してよいかを一緒に返す。
+    ///
+    /// キャッシュで代替したことを呼び出し側へ伝えないと、最大24時間前の一覧が
+    /// 「最新の情報です」として出てしまい、終わった番組に配信中の印が付く。
+    func fetchLiveChannelsSnapshot(forceRefresh: Bool) async throws -> LiveChannelsSnapshot {
+        do {
+            let channels = try await networkLiveChannels(forceRefresh: forceRefresh)
+            return LiveChannelsSnapshot(channels: channels, freshness: .fresh(at: dateProvider()))
+        } catch {
+            guard let cached = await cachedLiveChannelsSnapshot(for: error) else { throw error }
+            return cached
+        }
+    }
+
+    private func networkLiveChannels(forceRefresh: Bool) async throws -> [TVerLiveChannel] {
         let credentials = try await createBrowserCredentials()
         let rawChannels = try await fetchRawLiveChannels(
             credentials: credentials,
@@ -891,7 +945,24 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         try await fetchProgramGuide(forceRefresh: false)
     }
 
+    /// 既存の呼び出し元のために配列だけを返す。鮮度が要るときは
+    /// `fetchProgramGuideSnapshot(forceRefresh:)` を使う。
     func fetchProgramGuide(forceRefresh: Bool) async throws -> [TVerGuideChannel] {
+        try await fetchProgramGuideSnapshot(forceRefresh: forceRefresh).channels
+    }
+
+    /// 番組表と、その内容をどれだけ信用してよいかを一緒に返す。
+    func fetchProgramGuideSnapshot(forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
+        do {
+            let channels = try await networkProgramGuide(forceRefresh: forceRefresh)
+            return GuideChannelsSnapshot(channels: channels, freshness: .fresh(at: dateProvider()))
+        } catch {
+            guard let cached = await cachedGuideChannelsSnapshot(for: error) else { throw error }
+            return cached
+        }
+    }
+
+    private func networkProgramGuide(forceRefresh: Bool) async throws -> [TVerGuideChannel] {
         let credentials = try await createBrowserCredentials()
         let rawChannels = try await fetchRawLiveChannels(
             credentials: credentials,
@@ -1673,6 +1744,7 @@ extension TVerAPIClient {
             description: "",
             broadcastLabel: candidate.broadcastDateLabel ?? "",
             availableUntil: availableUntilLabel(epochSeconds: candidate.endAt),
+            availableUntilAt: availableUntilDate(epochSeconds: candidate.endAt),
             thumbnailURL: thumbnailURL(path: nil, episodeID: candidate.id)
         )
     }
@@ -1769,8 +1841,8 @@ extension TVerAPIClient {
 /// そのエリアの箱を見にいく。箱を分けておけば、将来 TVer がエリア別の内容を返すように
 /// なっても呼び出し側は変えなくていい。
 actor TVerAreaResultCache {
-    private var liveChannels: [String: (storedAt: Date, value: [TVerLiveChannel])] = [:]
-    private var programGuide: [String: (storedAt: Date, value: [TVerGuideChannel])] = [:]
+    private var liveChannels: [String: (storedAt: Date, value: LiveChannelsSnapshot)] = [:]
+    private var programGuide: [String: (storedAt: Date, value: GuideChannelsSnapshot)] = [:]
     private let ttl: TimeInterval
 
     init(ttl: TimeInterval) {
@@ -1778,21 +1850,47 @@ actor TVerAreaResultCache {
     }
 
     func channels(forAreaCode code: String, at date: Date) -> [TVerLiveChannel]? {
+        channelsSnapshot(forAreaCode: code, at: date)?.channels
+    }
+
+    /// 鮮度ごと引く。取り直しに失敗してキャッシュで代替した一覧を、TTL の間だけ
+    /// 「最新」に見せてしまわないよう、保存したときの鮮度をそのまま返す。
+    func channelsSnapshot(forAreaCode code: String, at date: Date) -> LiveChannelsSnapshot? {
         guard let entry = liveChannels[code], isFresh(entry.storedAt, at: date) else { return nil }
         return entry.value
     }
 
     func store(channels: [TVerLiveChannel], forAreaCode code: String, at date: Date) {
-        liveChannels[code] = (storedAt: date, value: channels)
+        store(
+            channelsSnapshot: LiveChannelsSnapshot(channels: channels, freshness: .fresh(at: date)),
+            forAreaCode: code,
+            at: date
+        )
+    }
+
+    func store(channelsSnapshot snapshot: LiveChannelsSnapshot, forAreaCode code: String, at date: Date) {
+        liveChannels[code] = (storedAt: date, value: snapshot)
     }
 
     func guide(forAreaCode code: String, at date: Date) -> [TVerGuideChannel]? {
+        guideSnapshot(forAreaCode: code, at: date)?.channels
+    }
+
+    func guideSnapshot(forAreaCode code: String, at date: Date) -> GuideChannelsSnapshot? {
         guard let entry = programGuide[code], isFresh(entry.storedAt, at: date) else { return nil }
         return entry.value
     }
 
     func store(guide: [TVerGuideChannel], forAreaCode code: String, at date: Date) {
-        programGuide[code] = (storedAt: date, value: guide)
+        store(
+            guideSnapshot: GuideChannelsSnapshot(channels: guide, freshness: .fresh(at: date)),
+            forAreaCode: code,
+            at: date
+        )
+    }
+
+    func store(guideSnapshot snapshot: GuideChannelsSnapshot, forAreaCode code: String, at date: Date) {
+        programGuide[code] = (storedAt: date, value: snapshot)
     }
 
     func removeAll() {
@@ -1826,24 +1924,35 @@ extension TVerAPIClient {
     /// 無視されるだけで、利用者の居住地を第三者に渡す分だけ損をする）。エリアは
     /// キャッシュの箱と表示文脈を分けるために使う。
     func fetchLiveChannels(area: TVerArea?, forceRefresh: Bool) async throws -> [TVerLiveChannel] {
+        try await fetchLiveChannelsSnapshot(area: area, forceRefresh: forceRefresh).channels
+    }
+
+    /// エリア付きの取得を鮮度ごと返す。エリア別キャッシュにも鮮度をそのまま入れておき、
+    /// 同じエリアを開き直したときに代替表示が最新扱いへ化けないようにする。
+    func fetchLiveChannelsSnapshot(area: TVerArea?, forceRefresh: Bool) async throws -> LiveChannelsSnapshot {
         let key = Self.areaCacheKey(for: area)
-        if !forceRefresh, let cached = await areaCache.channels(forAreaCode: key, at: dateProvider()) {
+        if !forceRefresh, let cached = await areaCache.channelsSnapshot(forAreaCode: key, at: dateProvider()) {
             return cached
         }
-        let channels = try await fetchLiveChannels(forceRefresh: forceRefresh)
-        await areaCache.store(channels: channels, forAreaCode: key, at: dateProvider())
-        return channels
+        let snapshot = try await fetchLiveChannelsSnapshot(forceRefresh: forceRefresh)
+        await areaCache.store(channelsSnapshot: snapshot, forAreaCode: key, at: dateProvider())
+        return snapshot
     }
 
     /// エリア付きの番組表取得。キャッシュの扱いはライブチャンネルと同じ。
     func fetchProgramGuide(area: TVerArea?, forceRefresh: Bool) async throws -> [TVerGuideChannel] {
+        try await fetchProgramGuideSnapshot(area: area, forceRefresh: forceRefresh).channels
+    }
+
+    /// エリア付きの番組表取得を鮮度ごと返す。
+    func fetchProgramGuideSnapshot(area: TVerArea?, forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
         let key = Self.areaCacheKey(for: area)
-        if !forceRefresh, let cached = await areaCache.guide(forAreaCode: key, at: dateProvider()) {
+        if !forceRefresh, let cached = await areaCache.guideSnapshot(forAreaCode: key, at: dateProvider()) {
             return cached
         }
-        let guide = try await fetchProgramGuide(forceRefresh: forceRefresh)
-        await areaCache.store(guide: guide, forAreaCode: key, at: dateProvider())
-        return guide
+        let snapshot = try await fetchProgramGuideSnapshot(forceRefresh: forceRefresh)
+        await areaCache.store(guideSnapshot: snapshot, forAreaCode: key, at: dateProvider())
+        return snapshot
     }
 
     /// TVer にエリア一覧 API は無い（callArea 系はすべて 404）ので、内蔵カタログを返す。
@@ -1860,5 +1969,235 @@ extension TVerAPIClient {
     /// キャッシュを持っているエリアコード。検証用。
     func cachedAreaCodes() async -> [String] {
         await areaCache.cachedAreaCodes()
+    }
+}
+
+/// 見逃し一覧と、その内容がどれだけ新しいかを一緒に運ぶ。
+struct ScheduleSnapshot: Sendable, Equatable {
+    let days: [ProgramDay]
+    let freshness: LoadFreshness
+
+    init(days: [ProgramDay], freshness: LoadFreshness) {
+        self.days = days
+        self.freshness = freshness
+    }
+}
+
+/// 鮮度付きで見逃し一覧を返せる取得元。
+///
+/// 既存の `TVerCatalogServicing` はそのまま残し、こちらを任意で乗せる。
+/// 未対応のダミー実装でも呼び出し側が壊れないようにするため。
+protocol TVerScheduleSnapshotProviding: Sendable {
+    func fetchScheduleSnapshot(forceRefresh: Bool) async throws -> ScheduleSnapshot
+}
+
+/// ライブ一覧と、その一覧をどれだけ信用してよいかを一緒に運ぶ。
+struct LiveChannelsSnapshot: Sendable {
+    let channels: [TVerLiveChannel]
+    let freshness: LoadFreshness
+
+    init(channels: [TVerLiveChannel], freshness: LoadFreshness) {
+        self.channels = channels
+        self.freshness = freshness
+    }
+}
+
+/// 番組表と、その内容をどれだけ信用してよいか。
+struct GuideChannelsSnapshot: Sendable {
+    let channels: [TVerGuideChannel]
+    let freshness: LoadFreshness
+
+    init(channels: [TVerGuideChannel], freshness: LoadFreshness) {
+        self.channels = channels
+        self.freshness = freshness
+    }
+}
+
+/// 鮮度付きでライブ一覧を返せる取得元。
+///
+/// 既存の `TVerLiveServicing` はそのまま残し、こちらを任意で乗せる。エリア付きの
+/// 口には既定実装があるので、エリアを知らない準拠型でも壊れない。
+protocol TVerLiveSnapshotProviding: Sendable {
+    func fetchLiveChannelsSnapshot(forceRefresh: Bool) async throws -> LiveChannelsSnapshot
+    func fetchLiveChannelsSnapshot(area: TVerArea?, forceRefresh: Bool) async throws -> LiveChannelsSnapshot
+}
+
+extension TVerLiveSnapshotProviding {
+    func fetchLiveChannelsSnapshot(area _: TVerArea?, forceRefresh: Bool) async throws -> LiveChannelsSnapshot {
+        try await fetchLiveChannelsSnapshot(forceRefresh: forceRefresh)
+    }
+}
+
+/// 鮮度付きで番組表を返せる取得元。扱いはライブ一覧と同じ。
+protocol TVerProgramGuideSnapshotProviding: Sendable {
+    func fetchProgramGuideSnapshot(forceRefresh: Bool) async throws -> GuideChannelsSnapshot
+    func fetchProgramGuideSnapshot(area: TVerArea?, forceRefresh: Bool) async throws -> GuideChannelsSnapshot
+}
+
+extension TVerProgramGuideSnapshotProviding {
+    func fetchProgramGuideSnapshot(area _: TVerArea?, forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
+        try await fetchProgramGuideSnapshot(forceRefresh: forceRefresh)
+    }
+}
+
+// MARK: - 取得に失敗したときの代替表示
+//
+// トークン取得が先に落ちると、HTTP 層の stale-if-error まで到達できない。
+// キャッシュ鍵は host と path だけで作られており、トークンの載るクエリは
+// 含まないので、資格情報が無くても保存済み応答を引ける。
+extension TVerAPIClient {
+    private func offlineCacheKey(path: String) -> String? {
+        var request = URLRequest(url: Self.serviceBaseURL.appendingPathComponent(path))
+        request.httpMethod = "GET"
+        return responseCacheKey(for: request)
+    }
+
+    private func cachedPayload(path: String, at date: Date) async -> TVerResponseCache.Snapshot? {
+        guard let key = offlineCacheKey(path: path),
+              let snapshot = await responseCache.snapshot(for: key),
+              date.timeIntervalSince(snapshot.storedAt) <= offlineFallbackTTL
+        else { return nil }
+        return snapshot
+    }
+
+    private func decodeCached<Value: Sendable>(
+        _ snapshot: TVerResponseCache.Snapshot,
+        endpoint: EndpointID,
+        transform: (TVerPayloadNode, TVerPayloadDecodeContext) throws -> Value
+    ) -> Value? {
+        guard let outcome = try? TVerPayloadDecoder.decode(
+            snapshot.data,
+            endpoint: endpoint,
+            transform: transform
+        ) else { return nil }
+        return outcome.value
+    }
+
+    private func cachedFreshness(at storedAt: Date, for error: Error) -> LoadFreshness {
+        switch TVerClientError.normalized(from: error) {
+        case .network:
+            return .cached(at: storedAt, reason: .offline)
+        case .invalidResponse:
+            return .cached(at: storedAt, reason: .decodeFailure)
+        default:
+            return .cached(at: storedAt, reason: .serverError)
+        }
+    }
+
+    /// 保存済み応答から見逃し一覧を組み直す。組めなければ nil を返し、
+    /// 呼び出し元が元のエラーをそのまま投げ直す。
+    fileprivate func cachedScheduleSnapshot(for error: Error) async -> ScheduleSnapshot? {
+        let now = dateProvider()
+
+        if let snapshot = await cachedPayload(path: "callEpisodeRanking", at: now),
+           let episodes = decodeCached(snapshot, endpoint: .episodeDetail, transform: { root, context in
+               try rankedEpisodes(root, context: context, limit: Self.maximumRankedContentCount)
+           }),
+           !episodes.isEmpty
+        {
+            let days = makeProgramDays(from: episodes)
+            if !days.isEmpty {
+                return ScheduleSnapshot(
+                    days: days,
+                    freshness: cachedFreshness(at: snapshot.storedAt, for: error)
+                )
+            }
+        }
+
+        guard let rankingSnapshot = await cachedPayload(path: "callRanking", at: now),
+              let seriesIDs = decodeCached(rankingSnapshot, endpoint: .episodeDetail, transform: { root, context in
+                  try rankedSeriesIDs(root, context: context, limit: Self.maximumRankedContentCount)
+              }),
+              !seriesIDs.isEmpty
+        else { return nil }
+
+        var episodes: [EpisodeContent] = []
+        // 一番古い応答の時刻を採る。実態より新しく見せないため。
+        var oldest = rankingSnapshot.storedAt
+        for seriesID in seriesIDs {
+            let encoded = seriesID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? seriesID
+            guard let snapshot = await cachedPayload(path: "callSeriesEpisodes/\(encoded)", at: now),
+                  let cachedEpisodes = decodeCached(snapshot, endpoint: .episodeDetail, transform: { root, context in
+                      try seriesEpisodes(root, context: context)
+                  })
+            else { continue }
+            episodes.append(contentsOf: cachedEpisodes)
+            oldest = min(oldest, snapshot.storedAt)
+        }
+
+        let days = makeProgramDays(from: episodes)
+        guard !days.isEmpty else { return nil }
+        return ScheduleSnapshot(days: days, freshness: cachedFreshness(at: oldest, for: error))
+    }
+
+    private func cachedRawLiveChannels(
+        at date: Date
+    ) async -> (channels: [LiveChannelContent], storedAt: Date)? {
+        guard let snapshot = await cachedPayload(path: "callLiveChannel", at: date),
+              let channels = decodeCached(snapshot, endpoint: .liveChannels, transform: { root, context in
+                  try liveChannels(root, context: context)
+              }),
+              !channels.isEmpty
+        else { return nil }
+        return (channels, snapshot.storedAt)
+    }
+
+    private func cachedTimeline(
+        channelID: String,
+        at date: Date
+    ) async -> (programs: [TVerLiveProgram], storedAt: Date)? {
+        let pathID = channelID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelID
+        guard let snapshot = await cachedPayload(path: "callLiveTimeline/\(pathID)", at: date),
+              let timeline = decodeCached(snapshot, endpoint: .programGuide, transform: { root, context in
+                  try liveTimeline(root, channelID: channelID, context: context)
+              })
+        else { return nil }
+        return (timeline, snapshot.storedAt)
+    }
+
+    /// 保存済み応答からライブ一覧を組み直す。組めなければ nil を返し、
+    /// 呼び出し元が元のエラーをそのまま投げ直す。
+    ///
+    /// 取得時刻は使った応答の中で一番古いものに合わせる。実態より新しく見せないため。
+    fileprivate func cachedLiveChannelsSnapshot(for error: Error) async -> LiveChannelsSnapshot? {
+        let now = dateProvider()
+        guard let cached = await cachedRawLiveChannels(at: now) else { return nil }
+
+        var oldest = cached.storedAt
+        var channels: [TVerLiveChannel] = []
+        for raw in cached.channels {
+            let timeline = await cachedTimeline(channelID: raw.id, at: now)
+            if let storedAt = timeline?.storedAt { oldest = min(oldest, storedAt) }
+            let programs = timeline?.programs ?? []
+            let current = programs.first { $0.startAt <= now && now < $0.endAt }
+            channels.append(makeLiveChannel(raw: raw, currentProgram: current))
+        }
+        return LiveChannelsSnapshot(
+            channels: channels,
+            freshness: cachedFreshness(at: oldest, for: error)
+        )
+    }
+
+    /// 番組表側の代替表示。組み方はライブ一覧と同じ。
+    fileprivate func cachedGuideChannelsSnapshot(for error: Error) async -> GuideChannelsSnapshot? {
+        let now = dateProvider()
+        guard let cached = await cachedRawLiveChannels(at: now) else { return nil }
+
+        var oldest = cached.storedAt
+        var guide: [TVerGuideChannel] = []
+        for raw in cached.channels {
+            let timeline = await cachedTimeline(channelID: raw.id, at: now)
+            if let storedAt = timeline?.storedAt { oldest = min(oldest, storedAt) }
+            let programs = (timeline?.programs ?? []).sorted { $0.startAt < $1.startAt }
+            let current = programs.first { $0.startAt <= now && now < $0.endAt }
+            guide.append(TVerGuideChannel(
+                channel: makeLiveChannel(raw: raw, currentProgram: current),
+                programs: programs
+            ))
+        }
+        return GuideChannelsSnapshot(
+            channels: guide,
+            freshness: cachedFreshness(at: oldest, for: error)
+        )
     }
 }

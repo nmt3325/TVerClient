@@ -6,19 +6,39 @@ import SwiftUI
 final class ScheduleViewModel: ObservableObject {
     @Published private(set) var days: [ProgramDay] = []
     @Published private(set) var isLoading = false
-    @Published private(set) var errorMessage: String?
+    @Published private(set) var failure: StatusFailure?
+    /// いま見えている一覧をどれだけ信用してよいか。
+    ///
+    /// 一覧が出ている状態で更新に失敗しても、以前はスピナーが消えるだけで
+    /// 何も起きなかった。利用者は古い一覧を最新だと信じてしまう。
+    @Published private(set) var freshness: LoadFreshness
 
     private let service: any TVerCatalogServicing
+    /// 鮮度まで返せる実装なら、そちらから受け取る。
+    private let snapshotProvider: (any TVerScheduleSnapshotProviding)?
     private let usesPreviewFallback: Bool
+    private let now: @Sendable () -> Date
     private var hasLoaded = false
+    private var lastGoodAt: Date?
 
-    init(service: any TVerCatalogServicing, usesPreviewFallback: Bool = true) {
+    init(
+        service: any TVerCatalogServicing,
+        usesPreviewFallback: Bool = true,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.service = service
+        snapshotProvider = service as? any TVerScheduleSnapshotProviding
         self.usesPreviewFallback = usesPreviewFallback
+        self.now = now
+        freshness = .fresh(at: now())
     }
 
     var showsInitialLoading: Bool {
         isLoading && days.isEmpty
+    }
+
+    var hasPrograms: Bool {
+        days.contains { !$0.programs.isEmpty }
     }
 
     func loadIfNeeded() async {
@@ -26,35 +46,64 @@ final class ScheduleViewModel: ObservableObject {
         await load()
     }
 
-    func load() async {
+    /// - Parameter forceRefresh: 引き下げ更新のように、利用者が明示的に
+    ///   最新を求めた操作かどうか。短命キャッシュを黙って返さないために要る。
+    func load(forceRefresh: Bool = false) async {
         guard !isLoading else { return }
         isLoading = true
-        errorMessage = nil
+        defer { isLoading = false }
 
         do {
-            let response = try await service.fetchSchedule()
-            #if DEBUG
-                days = response.isEmpty && usesPreviewFallback ? PreviewFixture.schedule : response
-            #else
-                days = response
-            #endif
+            let snapshot = try await scheduleSnapshot(forceRefresh: forceRefresh)
+            days = resolved(snapshot.days)
+            freshness = snapshot.freshness
+            if case let .fresh(at) = snapshot.freshness {
+                lastGoodAt = at
+            }
+            failure = nil
             hasLoaded = true
         } catch {
-            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let statusFailure = StatusFailure(error)
+            failure = statusFailure
+            if hasPrograms {
+                // 一覧が残っているときは、それが古いことを必ず画面に出す。
+                freshness = .refreshFailed(
+                    lastGoodAt: lastGoodAt,
+                    message: statusFailure.summary,
+                    recovery: statusFailure.recovery
+                )
+            }
             DiagnosticLogStore.shared.record(
                 .error,
                 category: "catalog",
                 message: "Schedule loading failed",
-                metadata: ["error": error.localizedDescription]
+                metadata: ["error": statusFailure.summary]
             )
         }
+    }
 
-        isLoading = false
+    private func scheduleSnapshot(forceRefresh: Bool) async throws -> ScheduleSnapshot {
+        if let snapshotProvider {
+            return try await snapshotProvider.fetchScheduleSnapshot(forceRefresh: forceRefresh)
+        }
+        let loaded = try await service.fetchSchedule(forceRefresh: forceRefresh)
+        return ScheduleSnapshot(days: loaded, freshness: .fresh(at: now()))
+    }
+
+    private func resolved(_ response: [ProgramDay]) -> [ProgramDay] {
+        #if DEBUG
+            return response.isEmpty && usesPreviewFallback ? PreviewFixture.schedule : response
+        #else
+            return response
+        #endif
     }
 }
 
-/// Reads the free-text availability label the catalog returns
-/// ("3月17日(月) 23:59まで") so a row can warn before a programme disappears.
+/// Works out when a programme disappears from the catch-up catalogue.
+///
+/// 期限は API から絶対時刻で届く。年の無い表示用文字列に一度落としてから
+/// 読み直すと、年末年始や閏年で年を取り違え、まだ見られる番組を「配信終了」
+/// と表示してしまう。文字列の解釈は絶対時刻を持たない古いデータ専用。
 enum ScheduleExpiry {
     /// Rows with this many days left or fewer get the countdown badge.
     static let expiringSoonThresholdDays = 1
@@ -66,6 +115,36 @@ enum ScheduleExpiry {
         calendar.locale = Locale(identifier: "ja_JP")
         calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
         return calendar
+    }
+
+    /// 番組の配信期限。絶対時刻があるときは必ずそちらを使う。
+    static func deadline(
+        for program: TVerProgram,
+        now: Date,
+        calendar: Calendar = ScheduleExpiry.calendar
+    ) -> Date? {
+        if let absolute = program.availableUntilAt { return absolute }
+        // 旧データ互換。絶対時刻を持たないときだけ文字列の推定に戻る。
+        return deadline(from: program.availableUntil, now: now, calendar: calendar)
+    }
+
+    /// 残り日数。絶対時刻があるときは推定を挟まないので誤判定しない。
+    static func remainingDays(
+        for program: TVerProgram,
+        now: Date,
+        calendar: Calendar = ScheduleExpiry.calendar
+    ) -> Int? {
+        guard let deadline = deadline(for: program, now: now, calendar: calendar) else { return nil }
+        return remainingDays(until: deadline, now: now, calendar: calendar)
+    }
+
+    /// 画面に出す期限。放送日の慣習に合わせて 24〜28 時表記を使う。
+    static func deadlineLabel(for program: TVerProgram, now: Date) -> String? {
+        guard let deadline = deadline(for: program, now: now) else {
+            let fallback = program.availableUntil?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return fallback?.isEmpty == false ? fallback : nil
+        }
+        return "\(broadcastDateLabel(for: deadline))\(BroadcastDay.timeLabel(for: deadline))まで"
     }
 
     static func deadline(
@@ -122,6 +201,16 @@ enum ScheduleExpiry {
         return "残り\(remainingDays)日"
     }
 
+    private static func broadcastDateLabel(for date: Date) -> String {
+        let calendar = BroadcastDay.calendar
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? Locale(identifier: "ja_JP")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "M月d日(E) "
+        return formatter.string(from: BroadcastDay.day(containing: date, calendar: calendar))
+    }
+
     private static func monthAndDay(in label: String) -> (month: Int, day: Int)? {
         guard let groups = firstMatch(pattern: "([0-9]{1,2})月([0-9]{1,2})日", in: label),
               groups.count == 2,
@@ -164,6 +253,10 @@ struct ScheduleView: View {
     @ObservedObject private var libraryStore: ProgramLibraryStore
     @State private var selectedProgram: TVerProgram?
     @State private var now = Date()
+
+    /// まもなく終わる番組をリストの先頭に出す本数。多すぎると本編の一覧が
+    /// 押し出されるので、拾い読みできる範囲で止める。
+    private static let expiringSoonLimit = 5
 
     init(
         viewModel: ScheduleViewModel,
@@ -215,15 +308,20 @@ struct ScheduleView: View {
     private var content: some View {
         if viewModel.showsInitialLoading {
             ContentStatusView(.loading("最新の配信情報を取得しています。"))
-        } else if let errorMessage = viewModel.errorMessage, viewModel.days.isEmpty {
+        } else if let failure = viewModel.failure, !viewModel.hasPrograms {
             ContentStatusView(
-                .failure(title: "番組表を読み込めませんでした", message: errorMessage),
+                .recoverableFailure(
+                    title: failure.title,
+                    message: failure.message,
+                    recovery: failure.recovery
+                ),
+                retryTitle: "再読み込み",
                 retry: { reload() }
             )
-        } else if !hasAnyProgram {
+        } else if !viewModel.hasPrograms {
             ContentStatusView(
                 .empty(
-                    title: "配信中の番組がありません",
+                    title: "見逃し配信がありません",
                     message: "時間をおいて、もう一度更新してください。",
                     systemImage: "tv.slash"
                 ),
@@ -236,60 +334,48 @@ struct ScheduleView: View {
     }
 
     private var scheduleList: some View {
-        List {
-            // One carousel, at the very top, for the episodes that are about
-            // to disappear. Everything else stays a scannable vertical list.
-            if !isSearchPresentationActive, !expiringSoonPrograms.isEmpty {
-                expiringSoonCarousel
-            }
+        VStack(spacing: 0) {
+            // 表示中の一覧が最新でないときだけ出る。スクロールしても
+            // 隠れない位置に置いて、古い内容を最新と取り違えさせない。
+            FreshnessBanner(freshness: viewModel.freshness, retry: { reload() })
 
-            if isSearchPresentationActive {
-                searchSection
-            } else {
-                ForEach(populatedDays, id: \.date) { day in
-                    Section {
-                        ForEach(day.programs, id: \.id) { program in
-                            programRow(program)
+            // 絞り込みはツールバーの奥で設定するので、効いていること自体に気づけない。
+            // 結果の上に固定で出して、その場で外せるようにする。
+            ProgramSearchFilterSummaryBar(viewModel: searchViewModel)
+
+            List {
+                if isSearchPresentationActive {
+                    searchSection
+                } else {
+                    if !expiringSoonPrograms.isEmpty {
+                        expiringSoonSection
+                    }
+                    ForEach(populatedDays, id: \.date) { day in
+                        Section {
+                            ForEach(day.programs, id: \.id) { program in
+                                programRow(program)
+                            }
+                        } header: {
+                            sectionHeader(dayTitle(for: day.date), subtitle: "\(day.programs.count)本")
                         }
-                    } header: {
-                        sectionHeader(dayTitle(for: day.date), subtitle: "\(day.programs.count)本")
                     }
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(DS.Palette.background)
+            .refreshable { await reloadAsync(forceRefresh: true) }
+            .overlay(alignment: .top) { refreshIndicator }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(DS.Palette.background)
-        .refreshable { await reloadAsync() }
-        .overlay(alignment: .top) { refreshIndicator }
     }
 
-    private var expiringSoonCarousel: some View {
+    /// カードの横スクロール棚をやめ、本編と同じ行で並べる。視線の動きが
+    /// 一方向になり、同じ情報量をより狭い面積で読める。
+    private var expiringSoonSection: some View {
         Section {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: DS.Spacing.m) {
-                    ForEach(expiringSoonPrograms, id: \.id) { program in
-                        Button {
-                            open(program)
-                        } label: {
-                            CompactMediaCell(
-                                title: displayTitle(for: program),
-                                subtitle: program.title,
-                                thumbnailURL: program.thumbnailURL,
-                                badges: badges(for: program)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(accessibilityLabel(for: program))
-                        .accessibilityHint("ダブルタップして視聴画面を開きます")
-                    }
-                }
-                .padding(.horizontal, DS.Spacing.l)
-                .padding(.vertical, DS.Spacing.s)
+            ForEach(expiringSoonPrograms, id: \.id) { program in
+                programRow(program)
             }
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
         } header: {
             sectionHeader("まもなく配信終了", subtitle: "\(expiringSoonPrograms.count)本")
         }
@@ -298,16 +384,10 @@ struct ScheduleView: View {
     @ViewBuilder
     private var searchSection: some View {
         Section {
-            if searchedPrograms.isEmpty, !searchViewModel.isFiltering {
-                ContentStatusView(
-                    .empty(
-                        title: "条件に合う番組がありません",
-                        message: "検索語や絞り込み条件を変えて、もう一度お試しください。",
-                        systemImage: "magnifyingglass"
-                    ),
-                    retryTitle: "検索条件をリセット",
-                    retry: { resetSearch() }
-                )
+            if searchedPrograms.isEmpty {
+                // 「入力中」と「0 件」を描き分け、0 件のときは何で探した結果なのかと
+                // 効いている絞り込みまで本文に出す。自前の表示に戻すとその区別が消える。
+                ProgramSearchStatusView(viewModel: searchViewModel, onReset: { resetSearch() })
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -369,10 +449,7 @@ struct ScheduleView: View {
             Button {
                 libraryStore.toggleFavorite(program)
             } label: {
-                Label(
-                    isFavorite ? "お気に入りから削除" : "お気に入りに追加",
-                    systemImage: isFavorite ? "heart.slash" : "heart"
-                )
+                Label(favoriteActionTitle(isFavorite), systemImage: isFavorite ? "heart.slash" : "heart")
             }
             .tint(DS.Palette.live)
         }
@@ -385,10 +462,7 @@ struct ScheduleView: View {
             Button {
                 libraryStore.toggleFavorite(program)
             } label: {
-                Label(
-                    isFavorite ? "お気に入りから削除" : "お気に入りに追加",
-                    systemImage: isFavorite ? "heart.slash" : "heart"
-                )
+                Label(favoriteActionTitle(isFavorite), systemImage: isFavorite ? "heart.slash" : "heart")
             }
             shareLink(for: program)
         }
@@ -407,10 +481,11 @@ struct ScheduleView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarTrailing) {
+        // iOS 16 で中身ごと消えないよう、配置は必ず ToolbarCompat を通す。
+        ToolbarItem(placement: ToolbarCompat.trailing) {
             Menu {
                 Section("絞り込み") {
-                    Toggle("お気に入りのみ", isOn: favoritesOnly)
+                    Toggle("\(Vocabulary.Library.favorites)のみ", isOn: favoritesOnly)
                 }
                 Picker("並び順", selection: $searchViewModel.sort) {
                     ForEach(ProgramSearchSort.allCases, id: \.self) { sort in
@@ -419,10 +494,12 @@ struct ScheduleView: View {
                 }
                 if activeControlCount > 0 {
                     Divider()
-                    Button(role: .destructive) {
+                    // 消えるのは絞り込み条件だけで、番組も履歴も失われない。
+                    // 破壊的操作の赤は本当に消える操作のために取っておく。
+                    Button {
                         resetSearch()
                     } label: {
-                        Label("検索条件をリセット", systemImage: "arrow.uturn.backward")
+                        Label("条件をクリア", systemImage: "arrow.uturn.backward")
                     }
                 }
             } label: {
@@ -443,7 +520,7 @@ struct ScheduleView: View {
 
     @ViewBuilder
     private var refreshIndicator: some View {
-        if viewModel.isLoading, !viewModel.days.isEmpty {
+        if viewModel.isLoading, viewModel.hasPrograms {
             ProgressView()
                 .padding(DS.Spacing.s)
                 .background(.regularMaterial, in: Circle())
@@ -479,10 +556,6 @@ struct ScheduleView: View {
         viewModel.days.filter { !$0.programs.isEmpty }
     }
 
-    private var hasAnyProgram: Bool {
-        viewModel.days.contains { !$0.programs.isEmpty }
-    }
-
     private var searchedPrograms: [TVerProgram] {
         ProgramSearchResultMapping.videoOnDemandPrograms(
             searchViewModel.results,
@@ -510,13 +583,13 @@ struct ScheduleView: View {
         for program in viewModel.days.flatMap(\.programs) {
             guard !badges(for: program).isEmpty, seen.insert(program.id).inserted else { continue }
             result.append(program)
-            if result.count == 10 { break }
+            if result.count == Self.expiringSoonLimit { break }
         }
         return result
     }
 
     private func badges(for program: TVerProgram) -> [MediaBadge] {
-        guard let remaining = ScheduleExpiry.remainingDays(from: program.availableUntil, now: now),
+        guard let remaining = ScheduleExpiry.remainingDays(for: program, now: now),
               ScheduleExpiry.isExpiringSoon(remaining)
         else { return [] }
         return [MediaBadge(.expiringSoon, text: ScheduleExpiry.countdownText(for: remaining))]
@@ -531,27 +604,48 @@ struct ScheduleView: View {
         if !program.broadcastLabel.isEmpty {
             parts.append(program.broadcastLabel)
         }
-        // The badge already spells out an imminent deadline, so the raw label
+        // The badge already spells out an imminent deadline, so the label
         // would just repeat it in a quieter colour.
-        if badges(for: program).isEmpty, let availableUntil = program.availableUntil,
-           !availableUntil.isEmpty {
-            parts.append(availableUntil)
+        if badges(for: program).isEmpty,
+           let deadline = ScheduleExpiry.deadlineLabel(for: program, now: now) {
+            parts.append(deadline)
         }
         if libraryStore.isFavorite(program) {
-            parts.append("お気に入り")
+            parts.append(Vocabulary.Library.favorites)
         }
         return parts.isEmpty ? nil : parts.joined(separator: " ・ ")
     }
 
-    private func accessibilityLabel(for program: TVerProgram) -> String {
-        TVerAccessibilityText.program(program, isFavorite: libraryStore.isFavorite(program))
+    private func favoriteActionTitle(_ isFavorite: Bool) -> String {
+        isFavorite
+            ? "\(Vocabulary.Library.favorites)から削除"
+            : "\(Vocabulary.Library.favorites)に追加"
     }
 
+    /// 読み上げも画面の文言と同じ語彙にそろえる。
+    private func accessibilityLabel(for program: TVerProgram) -> String {
+        var label = TVerAccessibilityText.program(program)
+        if libraryStore.isFavorite(program) {
+            label += "、\(Vocabulary.Library.favorites)に登録済み"
+        }
+        return label
+    }
+
+    /// 見出しは放送日で数える。深夜2時は前日の続きとして扱う。
     private func dayTitle(for date: Date) -> String {
-        let calendar = ScheduleExpiry.calendar
-        if calendar.isDateInToday(date) { return "今日" }
-        if calendar.isDateInYesterday(date) { return "昨日" }
-        return date.formatted(.dateTime.month(.wide).day().weekday(.abbreviated))
+        let calendar = BroadcastDay.calendar
+        let today = BroadcastDay.day(containing: now, calendar: calendar)
+        if calendar.isDate(date, inSameDayAs: today) { return "今日" }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: today),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return "昨日"
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? Locale(identifier: "ja_JP")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "M月d日(E)"
+        return formatter.string(from: date)
     }
 
     private func open(_ program: TVerProgram) {
@@ -564,11 +658,11 @@ struct ScheduleView: View {
     }
 
     private func reload() {
-        Task { await reloadAsync() }
+        Task { await reloadAsync(forceRefresh: true) }
     }
 
-    private func reloadAsync() async {
-        await viewModel.load()
+    private func reloadAsync(forceRefresh: Bool) async {
+        await viewModel.load(forceRefresh: forceRefresh)
         now = Date()
         refreshSearchIndex()
     }

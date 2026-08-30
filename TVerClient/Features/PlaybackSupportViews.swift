@@ -218,3 +218,47 @@ struct PictureInPictureControl: View {
         }
     }
 }
+
+/// 勝手に止まった理由と次の一手を、縦向きの番組情報側に出すための表示。
+///
+/// 映像に重ねる版は `PlayerOverlayControls` にある。縦向きの小さな映像へ
+/// 重ねると再生コントロールを覆ってしまうので、ここでは本文として積む。
+/// 文言は `PlaybackContinuityNotice` に一本化しているため、表示は器だけ。
+struct PlaybackContinuityNoticeView: View {
+    let notice: PlaybackContinuityNotice
+    let recover: () -> Void
+    let dismissNotice: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.s) {
+            Label(notice.title, systemImage: "pause.circle.fill")
+                .font(.headline)
+            Text(notice.nextStep)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: DS.Spacing.s) {
+                Button(action: recover) {
+                    Label(notice.actionTitle, systemImage: notice.actionSystemImage)
+                        .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
+                }
+                .buttonStyle(.borderedProminent)
+                Button(action: dismissNotice) {
+                    Text("閉じる")
+                        .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("この案内を閉じる")
+            }
+            .controlSize(.large)
+        }
+        .padding(DS.Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                .fill(Color.secondary.opacity(0.12))
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(notice.accessibilityDescription)
+    }
+}
