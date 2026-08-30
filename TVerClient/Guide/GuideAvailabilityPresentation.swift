@@ -14,8 +14,10 @@ enum GuideAvailabilityPresentation {
         }
     }
 
-    /// A finished slot with nothing behind it is dimmed and inert: discovering
-    /// that only after tapping play was the original complaint.
+    /// 見逃し配信がないことが確定している終了済みの枠。
+    ///
+    /// これで落とすのは「再生」だけ。以前はセルごと `disabled` にしていたため、
+    /// 番組詳細を見ることも、再放送の通知を仕掛けることもできなくなっていた。
     static func hasNothingToPlay(isOnAir: Bool, availability: CatchUpAvailability) -> Bool {
         !isOnAir && availability == .unavailable
     }
@@ -27,9 +29,9 @@ enum GuideAvailabilityPresentation {
     ) -> String {
         if isOnAir { return base }
         switch availability {
-        case .available: return base + "、見逃し配信あり"
-        case .unavailable: return base + "、配信なし"
-        case .checking: return base + "、見逃し配信を確認中"
+        case .available: return base + "、" + Vocabulary.CatchUp.available
+        case .unavailable: return base + "、" + Vocabulary.CatchUp.none
+        case .checking: return base + "、見逃し配信を" + Vocabulary.CatchUp.checking
         case .unknown, .future, .liveNow: return base
         }
     }

@@ -5,33 +5,42 @@ import UIKit
 ///
 /// Vertical geometry is driven by `pointsPerMinute`, so pinching recomputes
 /// real slot heights instead of magnifying the rendered grid.
+///
+/// 以前はスクロールのたびに全チャンネル分のセルを作り直していた。いまは
+/// レイアウトを（番組表, 放送日, 倍率）が変わったときだけ `GuideColumnLayout` に
+/// 畳み込み、キャンバスを `Equatable` にして可視範囲のセルだけを描く。
 struct ProgramGuideGrid: View {
     let guide: [TVerGuideChannel]
     let selectedDate: Date
     @Binding var pointsPerMinute: CGFloat
     let scrollToNowToken: Int
-    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
+    let onSelect: (TVerLiveChannel, TVerLiveProgram, CatchUpAvailability) -> Void
 
     @EnvironmentObject private var availabilityStore: CatchUpAvailabilityStore
     @State private var contentOffset = CGPoint.zero
-    @State private var appliedPointsPerMinute = GuideZoom.defaultPointsPerMinute
+    /// 描画に使う倍率。ピンチ中はこちらだけを動かし、指を離したときに
+    /// 1回だけ保存先の `pointsPerMinute` へ書き戻す。
+    @State private var zoom = GuideZoom.defaultPointsPerMinute
+    @State private var columns: [GuideColumnLayout] = []
+    @State private var visibleWindow = GuideVisibleWindow.unbounded
     @State private var pinchAnchorMinutes: CGFloat?
     @State private var pinchStartPointsPerMinute = GuideZoom.defaultPointsPerMinute
     @State private var isPinching = false
     @State private var lastPrefetchKey = ""
 
     private var contentSize: CGSize {
-        ProgramGuideMetrics.gridSize(channelCount: guide.count, pointsPerMinute: pointsPerMinute)
+        ProgramGuideMetrics.gridSize(channelCount: guide.count, pointsPerMinute: zoom)
     }
 
     private var hourHeight: CGFloat {
-        GuideZoom.hourHeight(pointsPerMinute: pointsPerMinute)
+        GuideZoom.hourHeight(pointsPerMinute: zoom)
     }
 
     var body: some View {
         GeometryReader { proxy in
             let bodyHeight = max(0, proxy.size.height - ProgramGuideMetrics.stationHeaderHeight)
             let viewportWidth = max(0, proxy.size.width - ProgramGuideMetrics.timeAxisWidth)
+            let viewportSize = CGSize(width: viewportWidth, height: bodyHeight)
             TimelineView(.periodic(from: .now, by: 60)) { context in
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
@@ -57,36 +66,53 @@ struct ProgramGuideGrid: View {
                             onPinchEnded: endPinch
                         ) {
                             ProgramGuideCanvas(
-                                guide: guide,
-                                selectedDate: selectedDate,
+                                columns: columns,
+                                window: visibleWindow,
+                                availability: visibleAvailability(now: context.date),
+                                nowLineY: nowLineY(now: context.date),
                                 now: context.date,
-                                pointsPerMinute: pointsPerMinute,
-                                availabilityFor: { channel, program in
-                                    availabilityStore.availability(
-                                        channelID: channel.id,
+                                pointsPerMinute: zoom,
+                                contentSize: contentSize,
+                                onSelect: { channel, program, state in
+                                    handleSelection(
+                                        channel: channel,
                                         program: program,
-                                        channelState: channel.state,
+                                        availability: state,
                                         now: context.date
                                     )
-                                },
-                                onSelect: { channel, program in
-                                    handleSelection(channel: channel, program: program, now: context.date)
                                 }
                             )
+                            .equatable()
                             .frame(width: contentSize.width, height: contentSize.height)
                         }
                     }
                 }
                 .onAppear {
-                    appliedPointsPerMinute = GuideZoom.clamp(pointsPerMinute)
+                    zoom = GuideZoom.clamp(pointsPerMinute)
+                    rebuildLayout()
                     scrollToStartPosition(bodyHeight: bodyHeight)
+                    updateVisibleWindow(viewportSize: viewportSize)
                     prefetchVisible(now: context.date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
                 }
                 .onChange(of: context.date) { date in
                     prefetchVisible(now: date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
                 }
                 .onChange(of: contentOffset) { _ in
+                    updateVisibleWindow(viewportSize: viewportSize)
                     prefetchVisible(now: context.date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
+                }
+                .onChange(of: guide) { _ in
+                    rebuildLayout()
+                    updateVisibleWindow(viewportSize: viewportSize)
+                }
+                .onChange(of: selectedDate) { _ in
+                    rebuildLayout()
+                    scrollToStartPosition(bodyHeight: bodyHeight)
+                    updateVisibleWindow(viewportSize: viewportSize)
+                }
+                .onChange(of: zoom) { _ in
+                    rebuildLayout()
+                    updateVisibleWindow(viewportSize: viewportSize)
                 }
                 .onChange(of: pointsPerMinute) { newValue in
                     applyZoomChange(to: newValue, bodyHeight: bodyHeight)
@@ -127,17 +153,18 @@ struct ProgramGuideGrid: View {
         .clipped()
     }
 
-    /// Hour ruler plus the pinned "now" pill.
+    /// Hour ruler plus the pinned "now" pill. 放送日は5時始まりなので、目盛りは
+    /// 05:00〜28:00 を並べる。
     private func timeAxis(now: Date, bodyHeight: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             Color(uiColor: .systemGroupedBackground)
             ZStack(alignment: .topLeading) {
-                ForEach(0 ..< 24, id: \.self) { hour in
-                    Text(ProgramGuideMetrics.hourLabel(hour))
+                ForEach(0 ..< GuideBroadcastAxis.hoursPerDay, id: \.self) { row in
+                    Text(GuideBroadcastAxis.hourLabel(forRow: row))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(width: ProgramGuideMetrics.timeAxisWidth - 8, alignment: .trailing)
-                        .offset(y: CGFloat(hour) * hourHeight - 7)
+                        .offset(y: CGFloat(row) * hourHeight - 7)
                 }
             }
             .frame(height: contentSize.height, alignment: .top)
@@ -151,11 +178,11 @@ struct ProgramGuideGrid: View {
 
     @ViewBuilder
     private func currentTimePill(now: Date, bodyHeight: CGFloat) -> some View {
-        if ProgramGuideMetrics.isSameDay(now, selectedDate) {
-            let y = ProgramGuideMetrics.yPosition(for: now, on: selectedDate, pointsPerMinute: pointsPerMinute)
+        if GuideBroadcastAxis.isSameDay(now, selectedDate) {
+            let y = GuideBroadcastAxis.yPosition(for: now, on: selectedDate, pointsPerMinute: zoom)
                 - contentOffset.y
             if y >= -12, y <= bodyHeight + 12 {
-                Text(now, format: .dateTime.hour().minute())
+                Text(GuideBroadcastAxis.timeLabel(for: now))
                     .font(.caption2.monospacedDigit().weight(.bold))
                     .foregroundStyle(Color.white)
                     .padding(.horizontal, DS.Spacing.xs)
@@ -167,11 +194,58 @@ struct ProgramGuideGrid: View {
         }
     }
 
+    // MARK: - Layout
+
+    private func rebuildLayout() {
+        columns = ProgramGuideLayout.columns(
+            for: guide,
+            on: selectedDate,
+            pointsPerMinute: zoom
+        )
+    }
+
+    private func updateVisibleWindow(viewportSize: CGSize) {
+        let window = ProgramGuideLayout.visibleWindow(
+            contentOffset: contentOffset,
+            viewportSize: viewportSize,
+            columnCount: columns.count
+        )
+        guard window != visibleWindow else { return }
+        visibleWindow = window
+    }
+
+    /// 見えている枠の見逃し状態だけを値として渡す。クロージャで渡すと
+    /// キャンバスの等価判定ができない。
+    private func visibleAvailability(now: Date) -> [String: CatchUpAvailability] {
+        var result: [String: CatchUpAvailability] = [:]
+        for (index, column) in columns.enumerated() where visibleWindow.contains(column: index) {
+            for frame in column.frames where visibleWindow.intersects(y: frame.y, maxY: frame.maxY) {
+                let key = CatchUpAvailabilityStore.key(
+                    channelID: column.channel.id,
+                    programID: frame.program.id
+                )
+                result[key] = availabilityStore.availability(
+                    channelID: column.channel.id,
+                    program: frame.program,
+                    channelState: column.channel.state,
+                    now: now
+                )
+            }
+        }
+        return result
+    }
+
+    /// 現在時刻線の位置。TimelineView が1分ごとに進めるので、開いたまま放置しても動く。
+    private func nowLineY(now: Date) -> CGFloat? {
+        guard GuideBroadcastAxis.isSameDay(now, selectedDate) else { return nil }
+        return GuideBroadcastAxis.yPosition(for: now, on: selectedDate, pointsPerMinute: zoom)
+    }
+
     // MARK: - Zoom
 
     private func beginPinch(contentY: CGFloat) {
         isPinching = true
-        pinchStartPointsPerMinute = GuideZoom.clamp(pointsPerMinute)
+        pinchStartPointsPerMinute = zoom
         pinchAnchorMinutes = ProgramGuideMetrics.minutes(
             atOffsetY: contentY,
             pointsPerMinute: pinchStartPointsPerMinute
@@ -183,9 +257,10 @@ struct ProgramGuideGrid: View {
         // Quantised so a continuous gesture does not re-lay out the whole grid
         // for every pixel the fingers travel.
         let target = GuideZoom.clamp(((pinchStartPointsPerMinute * scale) / 0.02).rounded() * 0.02)
-        guard abs(target - appliedPointsPerMinute) > 0.001 else { return }
-        appliedPointsPerMinute = target
-        pointsPerMinute = target
+        guard abs(target - zoom) > 0.001 else { return }
+        zoom = target
+        // 指を置いた位置の時刻をそのままにする。横方向は触らないので
+        // 見ていたチャンネルもずれない。
         contentOffset.y = ProgramGuideMetrics.anchoredOffsetY(
             anchorMinutes: anchorMinutes,
             focalY: focalY,
@@ -197,16 +272,19 @@ struct ProgramGuideGrid: View {
     private func endPinch() {
         isPinching = false
         pinchAnchorMinutes = nil
+        guard abs(pointsPerMinute - zoom) > 0.0001 else { return }
+        pointsPerMinute = zoom
     }
 
     /// Keeps the middle of the viewport steady when the zoom is changed from
     /// the toolbar rather than by a pinch.
     private func applyZoomChange(to newValue: CGFloat, bodyHeight: CGFloat) {
         guard !isPinching else { return }
-        let previous = appliedPointsPerMinute
+        let previous = zoom
         let updated = GuideZoom.clamp(newValue)
-        appliedPointsPerMinute = updated
-        guard bodyHeight > 0, abs(updated - previous) > 0.001 else { return }
+        guard abs(updated - previous) > 0.001 else { return }
+        zoom = updated
+        guard bodyHeight > 0 else { return }
         let focalY = bodyHeight / 2
         let anchorMinutes = ProgramGuideMetrics.minutes(
             atOffsetY: contentOffset.y + focalY,
@@ -224,14 +302,16 @@ struct ProgramGuideGrid: View {
 
     private func scrollToStartPosition(bodyHeight: CGFloat) {
         let now = Date()
-        let target = ProgramGuideMetrics.isSameDay(now, selectedDate)
+        let day = GuideBroadcastAxis.dayInterval(for: selectedDate)
+        // 放送日は5時始まり。今日以外は朝6時あたりから見せる。
+        let target = GuideBroadcastAxis.isSameDay(now, selectedDate)
             ? now
-            : ProgramGuideMetrics.calendar.date(bySettingHour: 6, minute: 0, second: 0, of: selectedDate) ?? selectedDate
-        contentOffset.y = ProgramGuideMetrics.initialOffsetY(
+            : day.start.addingTimeInterval(3600)
+        contentOffset.y = GuideBroadcastAxis.initialOffsetY(
             for: target,
             on: selectedDate,
             viewportHeight: bodyHeight,
-            pointsPerMinute: pointsPerMinute
+            pointsPerMinute: zoom
         )
     }
 
@@ -241,13 +321,21 @@ struct ProgramGuideGrid: View {
 
     // MARK: - Availability
 
-    private func handleSelection(channel: TVerLiveChannel, program: TVerLiveProgram, now: Date) {
-        let state = availabilityStore.availability(
-            channelID: channel.id,
-            program: program,
-            channelState: channel.state,
-            now: now
-        )
+    private func handleSelection(
+        channel: TVerLiveChannel,
+        program: TVerLiveProgram,
+        availability: CatchUpAvailability,
+        now: Date
+    ) {
+        var state = availability
+        if case .unknown = state {
+            state = availabilityStore.availability(
+                channelID: channel.id,
+                program: program,
+                channelState: channel.state,
+                now: now
+            )
+        }
         // The slot was never checked, so ask now: the badge turns into a
         // spinner while the sheet opens and settles on 見逃し / 見逃しなし.
         if case .unknown = state {
@@ -259,16 +347,16 @@ struct ProgramGuideGrid: View {
                 )
             }
         }
-        onSelect(channel, program)
+        onSelect(channel, program, state)
     }
 
     /// Only asks about slots the user can actually see: a whole day of every
     /// channel would be hundreds of requests.
     private func prefetchVisible(now: Date, bodyHeight: CGFloat, viewportWidth: CGFloat) {
         guard bodyHeight > 0, !guide.isEmpty else { return }
-        let zoom = GuideZoom.clamp(pointsPerMinute)
-        let topMinutes = ProgramGuideMetrics.minutes(atOffsetY: contentOffset.y, pointsPerMinute: zoom)
-        let visibleMinutes = bodyHeight / zoom
+        let scale = GuideZoom.clamp(zoom)
+        let topMinutes = ProgramGuideMetrics.minutes(atOffsetY: contentOffset.y, pointsPerMinute: scale)
+        let visibleMinutes = bodyHeight / scale
         let firstColumn = max(0, Int(contentOffset.x / ProgramGuideMetrics.stationWidth))
         let columnCount = max(1, Int((viewportWidth / ProgramGuideMetrics.stationWidth).rounded(.up)) + 1)
         let lastColumn = min(guide.count, firstColumn + columnCount)
@@ -287,12 +375,12 @@ struct ProgramGuideGrid: View {
 
         // A little slack above and below, so a short scroll does not have to
         // wait for a fresh round of lookups.
-        let day = ProgramGuideMetrics.dayInterval(for: selectedDate)
+        let day = GuideBroadcastAxis.dayInterval(for: selectedDate)
         let start = day.start.addingTimeInterval(Double(max(0, topMinutes - 30)) * 60)
         let end = day.start.addingTimeInterval(Double(topMinutes + visibleMinutes + 30) * 60)
         let window = DateInterval(start: start, end: max(start, end))
         for item in guide[firstColumn ..< lastColumn] {
-            let programs = ProgramGuideMetrics.programs(
+            let programs = GuideBroadcastAxis.programs(
                 item.programs,
                 on: selectedDate,
                 overlapping: window
@@ -302,21 +390,44 @@ struct ProgramGuideGrid: View {
     }
 }
 
+/// キャンバスが描く1列。何列目なのかを保ったまま可視分だけ間引くための入れ物。
+private struct GuideCanvasColumn: Identifiable {
+    let index: Int
+    let column: GuideColumnLayout
+
+    var id: String { column.id }
+}
+
 /// Absolutely positioned slots for one day, drawn at the current zoom.
-struct ProgramGuideCanvas: View {
-    let guide: [TVerGuideChannel]
-    let selectedDate: Date
+///
+/// `Equatable` なのは意図的。親はスクロールのたびに body を見直すので、
+/// これがないと番組表全体が毎回作り直されてしまう。
+struct ProgramGuideCanvas: View, Equatable {
+    let columns: [GuideColumnLayout]
+    let window: GuideVisibleWindow
+    let availability: [String: CatchUpAvailability]
+    let nowLineY: CGFloat?
     let now: Date
     let pointsPerMinute: CGFloat
-    let availabilityFor: (TVerLiveChannel, TVerLiveProgram) -> CatchUpAvailability
-    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
+    let contentSize: CGSize
+    let onSelect: (TVerLiveChannel, TVerLiveProgram, CatchUpAvailability) -> Void
+
+    static func == (lhs: ProgramGuideCanvas, rhs: ProgramGuideCanvas) -> Bool {
+        lhs.pointsPerMinute == rhs.pointsPerMinute
+            && lhs.contentSize == rhs.contentSize
+            && lhs.nowLineY == rhs.nowLineY
+            && lhs.now == rhs.now
+            && lhs.window == rhs.window
+            && lhs.availability == rhs.availability
+            && lhs.columns == rhs.columns
+    }
 
     private var width: CGFloat {
-        CGFloat(guide.count) * ProgramGuideMetrics.stationWidth
+        contentSize.width
     }
 
     private var height: CGFloat {
-        ProgramGuideMetrics.dayHeight(pointsPerMinute: pointsPerMinute)
+        contentSize.height
     }
 
     private var hourHeight: CGFloat {
@@ -326,6 +437,14 @@ struct ProgramGuideCanvas: View {
     /// Half-hour rules are dropped once they would sit on top of each other.
     private var showsHalfHourLines: Bool {
         hourHeight >= 60
+    }
+
+    private var visibleColumns: [GuideCanvasColumn] {
+        columns.enumerated().compactMap { index, column in
+            window.contains(column: index)
+                ? GuideCanvasColumn(index: index, column: column)
+                : nil
+        }
     }
 
     var body: some View {
@@ -340,28 +459,36 @@ struct ProgramGuideCanvas: View {
     }
 
     private var columnBackgrounds: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(guide.enumerated()), id: \.element.id) { index, _ in
-                (index.isMultiple(of: 2)
-                    ? Color(uiColor: .systemBackground)
-                    : Color(uiColor: .secondarySystemBackground).opacity(0.45))
-                    .frame(width: ProgramGuideMetrics.stationWidth, height: height)
-            }
+        ForEach(visibleColumns) { entry in
+            (entry.index.isMultiple(of: 2)
+                ? Color(uiColor: .systemBackground)
+                : Color(uiColor: .secondarySystemBackground).opacity(0.45))
+                .frame(width: ProgramGuideMetrics.stationWidth, height: height)
+                .offset(x: ProgramGuideMetrics.xPosition(forColumn: entry.index))
         }
     }
 
     private var gridLines: some View {
-        let divisions = showsHalfHourLines ? 48 : 24
+        let divisions = showsHalfHourLines
+            ? GuideBroadcastAxis.hoursPerDay * 2
+            : GuideBroadcastAxis.hoursPerDay
         let spacing = height / CGFloat(divisions)
+        let rows = (0 ... divisions).filter { index in
+            let y = CGFloat(index) * spacing
+            return window.intersects(y: y, maxY: y)
+        }
+        let boundaries = (0 ... columns.count).filter { column in
+            window.contains(column: column) || window.contains(column: column - 1)
+        }
         return ZStack(alignment: .topLeading) {
-            ForEach(0 ... divisions, id: \.self) { index in
+            ForEach(rows, id: \.self) { index in
                 let isHourLine = !showsHalfHourLines || index.isMultiple(of: 2)
                 Rectangle()
                     .fill(Color(uiColor: .separator).opacity(isHourLine ? 0.42 : 0.18))
                     .frame(width: width, height: isHourLine ? 1 : 0.5)
                     .offset(y: CGFloat(index) * spacing)
             }
-            ForEach(0 ... guide.count, id: \.self) { column in
+            ForEach(boundaries, id: \.self) { column in
                 Rectangle()
                     .fill(Color(uiColor: .separator).opacity(0.35))
                     .frame(width: 1, height: height)
@@ -372,30 +499,21 @@ struct ProgramGuideCanvas: View {
     }
 
     private var programs: some View {
-        ForEach(Array(guide.enumerated()), id: \.element.id) { column, item in
-            ForEach(ProgramGuideMetrics.programs(item.programs, on: selectedDate)) { program in
-                let y = ProgramGuideMetrics.yPosition(
-                    for: program.startAt,
-                    on: selectedDate,
-                    pointsPerMinute: pointsPerMinute
-                )
-                let programHeight = ProgramGuideMetrics.height(
-                    for: program,
-                    on: selectedDate,
-                    pointsPerMinute: pointsPerMinute
-                )
+        ForEach(visibleColumns) { entry in
+            ForEach(visibleFrames(in: entry.column)) { frame in
+                let state = state(for: entry.column.channel, program: frame.program)
                 ProgramGuideBlock(
-                    stationName: item.channel.name,
-                    program: program,
-                    isOnAir: program.startAt <= now && now < program.endAt,
-                    availability: availabilityFor(item.channel, program)
+                    stationName: entry.column.channel.name,
+                    program: frame.program,
+                    isOnAir: frame.program.startAt <= now && now < frame.program.endAt,
+                    availability: state
                 ) {
-                    onSelect(item.channel, program)
+                    onSelect(entry.column.channel, frame.program, state)
                 }
-                .frame(width: ProgramGuideMetrics.stationWidth - 6, height: programHeight)
+                .frame(width: ProgramGuideMetrics.stationWidth - 6, height: frame.height)
                 .offset(
-                    x: ProgramGuideMetrics.xPosition(forColumn: column) + 3,
-                    y: y
+                    x: ProgramGuideMetrics.xPosition(forColumn: entry.index) + 3,
+                    y: frame.y
                 )
             }
         }
@@ -403,15 +521,26 @@ struct ProgramGuideCanvas: View {
 
     @ViewBuilder
     private var currentTimeLine: some View {
-        if ProgramGuideMetrics.isSameDay(now, selectedDate) {
-            let y = ProgramGuideMetrics.yPosition(for: now, on: selectedDate, pointsPerMinute: pointsPerMinute)
+        if let nowLineY {
             ZStack(alignment: .leading) {
                 Rectangle().fill(DS.Palette.live).frame(width: width, height: 1)
                 Circle().fill(DS.Palette.live).frame(width: 7, height: 7).offset(x: -3)
             }
-            .offset(y: y)
+            .offset(y: nowLineY)
             .accessibilityHidden(true)
         }
+    }
+
+    private func visibleFrames(in column: GuideColumnLayout) -> [GuideSlotFrame] {
+        column.frames.filter { window.intersects(y: $0.y, maxY: $0.maxY) }
+    }
+
+    private func state(
+        for channel: TVerLiveChannel,
+        program: TVerLiveProgram
+    ) -> CatchUpAvailability {
+        let key = CatchUpAvailabilityStore.key(channelID: channel.id, programID: program.id)
+        return availability[key] ?? .unknown
     }
 }
 
@@ -423,8 +552,8 @@ struct ProgramGuideBlock: View {
     let availability: CatchUpAvailability
     let action: () -> Void
 
-    /// A finished slot with nothing behind it is dimmed and inert: finding
-    /// that out only after tapping play was the complaint.
+    /// 見逃し配信がない終了済みの枠。暗くはするが押せなくはしない。
+    /// 以前はセルごと disabled にしていたため、番組詳細も通知予約もできなかった。
     private var hasNothingToPlay: Bool {
         GuideAvailabilityPresentation.hasNothingToPlay(isOnAir: isOnAir, availability: availability)
     }
@@ -441,7 +570,7 @@ struct ProgramGuideBlock: View {
                 VStack(alignment: .leading, spacing: height < 62 ? 1 : 3) {
                     if !isCompact {
                         HStack(spacing: DS.Spacing.xs) {
-                            Text(program.timeLabel)
+                            Text(GuideBroadcastAxis.timeRangeLabel(for: program))
                                 .font(.caption2.monospacedDigit().weight(.semibold))
                             if isOnAir {
                                 Text("放送中")
@@ -477,16 +606,14 @@ struct ProgramGuideBlock: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(hasNothingToPlay)
         }
-        .opacity(hasNothingToPlay ? 0.45 : 1)
+        .opacity(hasNothingToPlay ? 0.72 : 1)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint(accessibilityHint)
         .accessibilityInputLabels([program.seriesTitle, program.title])
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
-        .accessibilityRemoveTraits(hasNothingToPlay ? .isButton : [])
     }
 
     @ViewBuilder

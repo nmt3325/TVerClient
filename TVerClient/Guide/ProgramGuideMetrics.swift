@@ -63,7 +63,7 @@ enum ProgramGuideMetrics {
     }
 
     static func hourLabel(_ hour: Int) -> String {
-        String(format: "%02d:00", min(max(0, hour), 23))
+        String(format: "%02d:00", min(max(0, hour), 29))
     }
 
     static var calendar: Calendar {
