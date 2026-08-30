@@ -92,6 +92,12 @@ protocol OfflineDownloadDriving: AnyObject {
     func resume(programID: String)
     func cancel(programID: String)
 
+    /// その番組の転送タスクを今も握っているか。
+    ///
+    /// 握っていない相手に `resume()` を送っても進捗は二度と来ない。押しても
+    /// 何も起きない「再開」を出さないために、呼ぶ側が先に確かめる。
+    func hasTask(programID: String) -> Bool
+
     /// 前回の起動から生き残った転送を拾い直し、操作を取り戻せた番組IDを返す。
     ///
     /// バックグラウンドセッションのタスクはプロセスをまたいで生き残るのに、
@@ -103,6 +109,9 @@ extension OfflineDownloadDriving {
     /// 拾い直しの仕組みを持たないドライバは「拾えるものは無い」と答える。
     /// 呼び出し側はその場合、やり直せる状態へ戻す。
     func adoptRunningTasks(knownLocations _: [String: URL]) async -> Set<String> { [] }
+
+    /// 在庫を答えられないドライバは、これまで通り握っている前提で扱う。
+    func hasTask(programID _: String) -> Bool { true }
 }
 
 /// Forwards `AVAssetDownloadURLSession` callbacks out of the delegate queue.
@@ -215,6 +224,8 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     func pause(programID: String) { tasks[programID]?.suspend() }
 
     func resume(programID: String) { tasks[programID]?.resume() }
+
+    func hasTask(programID: String) -> Bool { tasks[programID] != nil }
 
     func cancel(programID: String) {
         tasks[programID]?.cancel()
@@ -507,6 +518,14 @@ final class DownloadCenter: ObservableObject {
             return
         }
 
+        // ドライバがタスクを握っていない行は、再開しても進捗が二度と来ない。
+        // 「ダウンロード中 0%」で固まる代わりに、最初からやり直す。
+        guard driver.hasTask(programID: programID) else {
+            interruptedIDs.insert(programID)
+            restart(record.program, allowingCellular: allowingCellular)
+            return
+        }
+
         if let rejection = cellularRejection(for: record.program, allowingCellular: allowingCellular) {
             lastRejection = rejection
             return
@@ -763,19 +782,45 @@ final class DownloadCenter: ObservableObject {
     }
 
     /// 設定を後からWi-Fi限定にしたとき、すでに走っている転送を放置しない。
+    ///
+    /// 順番待ち（`.queued`）にはまだ URLSession のタスクがない。`driver.pause()`
+    /// は空振りし、配信URLの解決だけが「一時停止中」を見て黙って降りるので、
+    /// タスクの無い行が残り、再開しても永久に進まなくなる。順番待ちは解決ごと
+    /// 畳み、続きからは戻せない（やり直しが要る）ことを記録に残す。
     private func enforceCellularRestriction() {
         guard wifiOnly, networkStatus() == .cellular else { return }
         let affected = records.filter { record in record.state.isInFlight }
         guard !affected.isEmpty else { return }
+
+        var restartRequired = 0
         for record in affected {
-            driver.pause(programID: record.id)
+            let hasLiveTask: Bool
+            if case .downloading = record.state {
+                hasLiveTask = driver.hasTask(programID: record.id)
+            } else {
+                hasLiveTask = false
+            }
             update(record.id, to: .paused(progress: Self.inFlightProgress(record.state)))
+            if hasLiveTask {
+                driver.pause(programID: record.id)
+                continue
+            }
+            resolutions[record.id]?.cancel()
+            resolutions[record.id] = nil
+            driver.cancel(programID: record.id)
+            interruptedIDs.insert(record.id)
+            restartRequired += 1
+        }
+
+        var recovery = "Wi-Fiに接続すると続きから進みます。"
+        if restartRequired > 0 {
+            recovery += "このうち\(restartRequired)件はまだ受け取りが始まっていないため、最初からやり直します。"
         }
         post(DownloadNotice(
             id: "download.wifiOnly.enforced",
             kind: .info,
             message: "モバイル通信のため、\(affected.count)件の\(Vocabulary.Download.action)を\(Vocabulary.Download.paused)にしました。",
-            recovery: "Wi-Fiに接続すると続きから進みます。",
+            recovery: recovery,
             action: .resumeOnCellular(
                 programIDs: affected.map { record in record.id },
                 label: "今回だけモバイル通信で続ける"
