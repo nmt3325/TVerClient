@@ -85,8 +85,19 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
             return preferredURL
         }
 
-        guard let projectID = Self.string(media["project"]) ?? Self.string(media["projectId"]),
-              let mediaID = Self.string(media["mediaId"]) ?? Self.string(media["id"]),
+        // The official playback API returns snake_case identifiers at the root
+        // of the payload (project_id / id / ref_id). Older camelCase spellings
+        // and the requested channel remain as fallbacks.
+        let wireProjectID = Self.string(media["project"])
+            ?? Self.string(media["projectId"])
+            ?? Self.string(media["project_id"])
+            ?? Self.string(channel.projectID)
+        let wireMediaID = Self.string(media["mediaId"])
+            ?? Self.string(media["id"])
+            ?? Self.string(media["media_id"])
+            ?? Self.string(media["ref_id"])
+        guard let projectID = wireProjectID,
+              let mediaID = wireMediaID,
               let project = Self.pathSegment(projectID),
               let mediaPath = Self.pathSegment(mediaID),
               let sessionURL = URL(string: "https://ssai.api.streaks.jp/v1/projects/\(project)/medias/\(mediaPath)/ssai/session") else {
