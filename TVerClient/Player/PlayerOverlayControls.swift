@@ -36,6 +36,13 @@ struct PlayerOverlayControls: View {
         .background(PlayerScrim())
         .tint(.white)
         .foregroundStyle(.white)
+        // スクラブが onScrubEnded を伴わずに終わる経路がある（別のジェスチャに奪われた、
+        // 途中で画面が閉じた）。掴んだ印をそこだけで落としていると、自動非表示が
+        // 止まったまま操作パネルが出っぱなしになる。
+        .onChange(of: playbackController.isScrubbing) { isScrubbing in
+            guard !isScrubbing else { return }
+            model.endHeldInteraction()
+        }
     }
 
     // MARK: - Top
