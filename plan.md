@@ -9,10 +9,10 @@
 | タスク | 担当 | 所有パス | ブランチ | 状態 |
 | --- | --- | --- | --- | --- |
 | t1 | プレイヤーと再生継続性 | `TVerClient/Player/**`, `TVerClient/Playback/**`, `Features/PlaybackView.swift`, `Features/FullScreenPlaybackView.swift`, `Features/PlaybackSupportViews.swift` | feat/fix-t1-player | pending |
-| t2 | 番組表 | `TVerClient/Guide/**`, `Features/ProgramGuideView.swift` | feat/fix-t2-guide | pending |
+| t2 | 番組表と番組通知 | `TVerClient/Guide/**`, `Features/ProgramGuideView.swift`, `Services/ProgramNotificationScheduler.swift` | feat/fix-t2-guide | pending |
 | t3 | ダウンロードとライブラリ | `TVerClient/Downloads/**`, `Features/LibraryView.swift`, `Services/ProgramLibraryStore.swift` | feat/fix-t3-downloads | pending |
-| t4 | 通知・ライブ・エリア・診断 | `Services/ProgramNotificationScheduler.swift`, `Features/LiveView.swift`, `Features/DiagnosticsView.swift`, `TVerClient/Area/**` | feat/fix-t4-notify-live | pending |
-| t5 | 見逃し一覧・検索・通信層 | `Features/ScheduleView.swift`, `Features/SharedStatusViews.swift`, `Features/ProgramSearchViewModel.swift`, `Services/TVerAPIClient.swift`, `Services/TVerResponseCache.swift`, `Services/ProgramSearchIndex.swift`, `Services/NetworkDiagnosticsService.swift`, `TVerClient/DesignSystem/**`, `TVerClient/Images/**` | feat/fix-t5-list-network | pending |
+| t4 | ライブ・エリア・検索・診断 | `Features/LiveView.swift`, `Features/DiagnosticsView.swift`, `Features/ProgramSearchViewModel.swift`, `TVerClient/Area/**`, `Services/DiagnosticLogStore.swift`, `Services/NetworkDiagnosticsService.swift`, `Services/ProgramSearchIndex.swift` | feat/fix-t4-notify-live | pending |
+| t5 | 見逃し一覧と通信層 | `Features/ScheduleView.swift`, `Features/SharedStatusViews.swift`, `Services/TVerAPIClient.swift`, `Services/TVerResponseCache.swift`, `TVerClient/DesignSystem/**`, `TVerClient/Images/**` | feat/fix-t5-list-network | pending |
 
 ## オーケストレータ専有（全員変更禁止）
 
