@@ -34,6 +34,20 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var isPlaying = false
     @Published private(set) var error: TVerClientError?
+    /// Playhead in seconds. Frozen while the user drags the scrubber so the
+    /// knob never jumps back to a stale periodic observer value.
+    @Published private(set) var currentTime: TimeInterval = 0
+    /// Duration of the current item, nil for live and not yet known items.
+    @Published private(set) var duration: TimeInterval?
+    /// How far the item is buffered ahead of the playhead, 0...1.
+    @Published private(set) var loadedFraction: Double = 0
+    /// True while a seek is still chasing the requested time.
+    @Published private(set) var isSeeking = false
+    /// True while a finger is on the scrubber.
+    @Published private(set) var isScrubbing = false
+    @Published private(set) var playbackSpeed: PlaybackSpeed = .normal
+    @Published private(set) var subtitleOptions: [MediaSelectionEntry] = []
+    @Published private(set) var audioOptions: [MediaSelectionEntry] = []
 
     let player: AVPlayer
     private let resolver: any TVerStreamResolving
@@ -49,6 +63,9 @@ final class PlaybackController: ObservableObject {
     private var routeChangeObserver: NSObjectProtocol?
     private var requestGeneration = 0
     private var wantsPlayback = false
+    private var seeker = ChaseTimeSeeker()
+    private var legibleGroup: AVMediaSelectionGroup?
+    private var audibleGroup: AVMediaSelectionGroup?
     /// Set only when the system suspended playback that we had asked for, so
     /// the end of an interruption restores those sessions and nothing else.
     private var shouldResumeAfterInterruption = false
@@ -81,11 +98,22 @@ final class PlaybackController: ObservableObject {
     var errorMessage: String? { error?.localizedDescription }
     var errorPresentation: TVerErrorPresentation? { error?.presentation }
     var isLive: Bool { currentLiveChannel != nil }
+    var isLoading: Bool { state == .resolving }
+    /// Seeking needs a finite duration, so live streams stay excluded.
+    var canSeek: Bool { !isLive && (duration ?? 0) > 0 }
+    var chaseTime: CMTime { seeker.chaseTime }
+    var isSeekInProgress: Bool { seeker.isSeekInProgress }
 
     func play(_ program: TVerProgram) async {
         beginRequest(program: program, liveChannel: nil)
         let generation = requestGeneration
         do {
+            // A downloaded episode must play from disk, never from the network.
+            if let offlineURL = OfflineAssetRegistry.assetURL(for: program.id) {
+                recordPlaybackCheckpoint("Offline asset resolved")
+                try await start(url: offlineURL, generation: generation)
+                return
+            }
             let url = try await resolver.resolveStream(for: program)
             recordPlaybackCheckpoint("VOD stream resolved")
             try await start(url: url, generation: generation)
@@ -121,9 +149,11 @@ final class PlaybackController: ObservableObject {
             // controls and the lock screen all report playback while the
             // player stays silent.
             if hasPlayedToEnd(item) {
+                seeker.reset()
                 player.seek(to: .zero)
+                currentTime = 0
             }
-            player.play()
+            startPlayback()
             if item.status == .readyToPlay {
                 transition(to: .playing)
             } else {
@@ -150,6 +180,7 @@ final class PlaybackController: ObservableObject {
         itemStatusObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        resetTimingState()
         currentProgram = nil
         currentLiveChannel = nil
         error = nil
@@ -164,15 +195,177 @@ final class PlaybackController: ObservableObject {
 
     func seek(to seconds: TimeInterval) {
         guard !isLive, seconds.isFinite else { return }
-        let target = max(0, seconds)
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        let target = ScrubberMath.clamped(seconds, duration: duration ?? 0)
+        currentTime = target
+        seekToTime(CMTime(seconds: target, preferredTimescale: 600))
         updateNowPlayingInfo(elapsed: target)
     }
 
     func seek(by offset: TimeInterval) {
         guard !isLive else { return }
-        let current = player.currentTime().seconds
-        seek(to: (current.isFinite ? current : 0) + offset)
+        // While a seek is still chasing, the player clock lags behind the
+        // requested position, so repeated skips must stack on our own value.
+        let playerTime = player.currentTime().seconds
+        let base = (isSeekInProgress || isScrubbing || !playerTime.isFinite) ? currentTime : playerTime
+        seek(to: base + offset)
+    }
+
+    /// Chase-time seeking, Apple QA1820.
+    ///
+    /// Only one seek is ever in flight: a newer target is remembered and
+    /// chased from the completion handler. Issuing a seek per drag update
+    /// instead cancels the previous one forever and the picture never
+    /// catches up with the finger.
+    func seekToTime(_ time: CMTime) {
+        guard let next = seeker.request(time) else { return }
+        isSeeking = true
+        performSeek(to: next)
+    }
+
+    /// Freezes the published playhead while the scrubber is being dragged.
+    func beginScrubbing() {
+        guard canSeek else { return }
+        isScrubbing = true
+    }
+
+    func previewScrub(to seconds: TimeInterval) {
+        guard isScrubbing else { return }
+        currentTime = ScrubberMath.clamped(seconds, duration: duration ?? 0)
+    }
+
+    func endScrubbing(at seconds: TimeInterval) {
+        guard isScrubbing else { return }
+        isScrubbing = false
+        seek(to: seconds)
+    }
+
+    func setPlaybackSpeed(_ speed: PlaybackSpeed) {
+        playbackSpeed = speed
+        // `defaultRate` keeps the choice across pauses, and `rate` only sticks
+        // when it is applied after `play()`.
+        player.defaultRate = Float(speed.rawValue)
+        if isPlaying { startPlayback() }
+        updateNowPlayingInfo()
+    }
+
+    func selectSubtitle(id: String) {
+        guard let item = player.currentItem, let group = legibleGroup else { return }
+        if id == MediaSelectionEntry.offIdentifier {
+            item.select(nil, in: group)
+        } else if let index = Int(id), group.options.indices.contains(index) {
+            item.select(group.options[index], in: group)
+        }
+        updateMediaSelectionEntries()
+    }
+
+    func selectAudio(id: String) {
+        guard let item = player.currentItem,
+              let group = audibleGroup,
+              let index = Int(id),
+              group.options.indices.contains(index) else { return }
+        item.select(group.options[index], in: group)
+        updateMediaSelectionEntries()
+    }
+
+    private func performSeek(to time: CMTime) {
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let next = self.seeker.complete(time) {
+                    self.performSeek(to: next)
+                } else {
+                    self.isSeeking = false
+                    self.refreshTimingState()
+                }
+            }
+        }
+    }
+
+    private func resetTimingState() {
+        seeker.reset()
+        isScrubbing = false
+        isSeeking = false
+        currentTime = 0
+        duration = nil
+        loadedFraction = 0
+        legibleGroup = nil
+        audibleGroup = nil
+        subtitleOptions = []
+        audioOptions = []
+    }
+
+    /// Keeps duration and the buffered range in sync with the current item.
+    private func refreshTimingState() {
+        guard let item = player.currentItem else {
+            duration = nil
+            loadedFraction = 0
+            return
+        }
+        let itemDuration = item.duration.seconds
+        let resolved: TimeInterval? = (itemDuration.isFinite && itemDuration > 0) ? itemDuration : nil
+        if duration != resolved { duration = resolved }
+        loadedFraction = BufferMath.loadedFraction(
+            ranges: item.loadedTimeRanges.map(\.timeRangeValue),
+            currentTime: currentTime,
+            duration: resolved ?? 0
+        )
+    }
+
+    private func refreshMediaSelection(for item: AVPlayerItem) {
+        legibleGroup = nil
+        audibleGroup = nil
+        subtitleOptions = []
+        audioOptions = []
+        Task { @MainActor [weak self] in
+            let asset = item.asset
+            let legible = try? await asset.loadMediaSelectionGroup(for: .legible)
+            let audible = try? await asset.loadMediaSelectionGroup(for: .audible)
+            guard let self, item === self.player.currentItem else { return }
+            self.legibleGroup = legible
+            self.audibleGroup = audible
+            self.updateMediaSelectionEntries()
+        }
+    }
+
+    private func updateMediaSelectionEntries() {
+        guard let item = player.currentItem else {
+            subtitleOptions = []
+            audioOptions = []
+            return
+        }
+        let selection = item.currentMediaSelection
+        if let group = legibleGroup, !group.options.isEmpty {
+            let selected = selection.selectedMediaOption(in: group)
+            var entries = [
+                MediaSelectionEntry(
+                    id: MediaSelectionEntry.offIdentifier,
+                    title: "オフ",
+                    isSelected: selected == nil
+                ),
+            ]
+            entries.append(contentsOf: group.options.enumerated().map { index, option in
+                MediaSelectionEntry(
+                    id: String(index),
+                    title: option.displayName,
+                    isSelected: option == selected
+                )
+            })
+            subtitleOptions = entries
+        } else {
+            subtitleOptions = []
+        }
+        if let group = audibleGroup, !group.options.isEmpty {
+            let selected = selection.selectedMediaOption(in: group)
+            audioOptions = group.options.enumerated().map { index, option in
+                MediaSelectionEntry(
+                    id: String(index),
+                    title: option.displayName,
+                    isSelected: option == selected
+                )
+            }
+        } else {
+            audioOptions = []
+        }
     }
 
     private func beginRequest(program: TVerProgram?, liveChannel: TVerLiveChannel?) {
@@ -190,6 +383,7 @@ final class PlaybackController: ObservableObject {
         itemStatusObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        resetTimingState()
         transition(to: .resolving)
         configureRemoteCommandsForCurrentItem()
     }
@@ -202,9 +396,17 @@ final class PlaybackController: ObservableObject {
         let item = AVPlayerItem(url: url)
         observeStatus(of: item, generation: generation)
         player.replaceCurrentItem(with: item)
+        refreshMediaSelection(for: item)
         recordPlaybackCheckpoint("Player item attached")
-        player.play()
+        startPlayback()
         transition(to: .resolving)
+    }
+
+    /// `rate` is only honoured once playback has started, so the selected
+    /// speed is applied right after `play()`.
+    private func startPlayback() {
+        player.play()
+        player.rate = Float(playbackSpeed.rawValue)
     }
 
     private func observeStatus(of item: AVPlayerItem, generation: Int) {
@@ -217,8 +419,10 @@ final class PlaybackController: ObservableObject {
                 switch item.status {
                 case .readyToPlay:
                     self.recordPlaybackCheckpoint("Player item ready")
+                    self.refreshTimingState()
+                    self.updateMediaSelectionEntries()
                     if self.wantsPlayback {
-                        self.player.play()
+                        self.startPlayback()
                         self.transition(to: .playing)
                     } else {
                         self.transition(to: .paused)
@@ -290,8 +494,12 @@ final class PlaybackController: ObservableObject {
     }
 
     private func installPlayerObservers() {
-        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
-            Task { @MainActor [weak self] in self?.updateNowPlayingInfo(elapsed: time.seconds) }
+        // Twice a second keeps the scrubber smooth without burning CPU.
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor [weak self] in self?.handlePeriodicTime(time) }
         }
         endObserver = notificationCenter.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
@@ -405,6 +613,17 @@ final class PlaybackController: ObservableObject {
         )
     }
 
+    /// Published playhead updates, suppressed while the user drags the
+    /// scrubber or while a seek is still chasing its target - otherwise the
+    /// knob snaps back to where the player used to be.
+    private func handlePeriodicTime(_ time: CMTime) {
+        refreshTimingState()
+        guard !isScrubbing, !isSeekInProgress else { return }
+        let seconds = time.seconds
+        if seconds.isFinite { currentTime = max(0, seconds) }
+        updateNowPlayingInfo(elapsed: currentTime)
+    }
+
     /// True when the playhead already reached the end of a finite item.
     private func hasPlayedToEnd(_ item: AVPlayerItem) -> Bool {
         guard !isLive else { return false }
@@ -455,7 +674,7 @@ final class PlaybackController: ObservableObject {
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyAlbumTitle: album,
             MPMediaItemPropertyArtist: artist,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? playbackSpeed.rawValue : 0.0,
             MPNowPlayingInfoPropertyIsLiveStream: isLive
         ]
         if !isLive {

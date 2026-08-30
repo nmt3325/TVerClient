@@ -26,6 +26,10 @@ final class ProgramSearchViewModel: ObservableObject {
     private let debounceNanoseconds: UInt64
     private let now: @Sendable () -> Date
     private var searchTask: Task<Void, Never>?
+    /// Bumped whenever pending work is cancelled or superseded. A debounced
+    /// task that wakes up late compares against it and bows out instead of
+    /// overwriting the results of a newer search.
+    private var searchGeneration: UInt64 = 0
 
     // Inputs behind the entries currently in `results`. `.searchable` writes the
     // bound text on every keystroke and re-writes the same string while an IME
@@ -78,6 +82,8 @@ final class ProgramSearchViewModel: ObservableObject {
         searchNow()
     }
 
+    /// Skips the debounce, e.g. when the caller already knows the inputs are
+    /// final (index swap, explicit reset, pull to refresh).
     func searchNow() {
         cancelPendingSearch()
         applySearch()
@@ -95,6 +101,8 @@ final class ProgramSearchViewModel: ObservableObject {
         }
 
         isFiltering = true
+        searchGeneration &+= 1
+        let generation = searchGeneration
         let delay = debounceNanoseconds
         searchTask = Task { [weak self] in
             if delay > 0 {
@@ -105,9 +113,15 @@ final class ProgramSearchViewModel: ObservableObject {
                 }
             }
             guard !Task.isCancelled, let self else { return }
-            searchTask = nil
-            applySearch()
+            self.completeScheduledSearch(generation: generation)
         }
+    }
+
+    private func completeScheduledSearch(generation: UInt64) {
+        // A newer edit already took over; leave its task handle alone.
+        guard generation == searchGeneration else { return }
+        searchTask = nil
+        applySearch()
     }
 
     private var matchesAppliedSearch: Bool {
@@ -125,6 +139,7 @@ final class ProgramSearchViewModel: ObservableObject {
     private func cancelPendingSearch() {
         searchTask?.cancel()
         searchTask = nil
+        searchGeneration &+= 1
     }
 
     private func applySearch() {

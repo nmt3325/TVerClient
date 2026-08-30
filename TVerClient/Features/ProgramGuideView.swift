@@ -103,135 +103,6 @@ final class ProgramGuideViewModel: ObservableObject {
     }
 }
 
-enum ProgramGuideMetrics {
-    static let stationWidth: CGFloat = 168
-    static let hourHeight: CGFloat = 112
-    static let timeAxisWidth: CGFloat = 58
-    static let stationHeaderHeight: CGFloat = 66
-    static let minimumTapTarget: CGFloat = 44
-    static let minimumProgramHeight = minimumTapTarget
-
-    /// Upper bound for how many days a single slot may be spread across, so a
-    /// malformed end date cannot make the picker walk years of days.
-    static let maximumProgramDaySpan = 7
-
-    static func gridSize(channelCount: Int) -> CGSize {
-        CGSize(
-            width: CGFloat(max(0, channelCount)) * stationWidth,
-            height: 24 * hourHeight
-        )
-    }
-
-    static func xPosition(forColumn column: Int) -> CGFloat {
-        CGFloat(max(0, column)) * stationWidth
-    }
-
-    static func hourLabel(_ hour: Int) -> String {
-        String(format: "%02d:00", min(max(0, hour), 23))
-    }
-
-    static var calendar: Calendar {
-        var value = Calendar(identifier: .gregorian)
-        value.locale = Locale(identifier: "ja_JP")
-        value.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
-        return value
-    }
-
-    static func dayInterval(for date: Date) -> DateInterval {
-        let start = calendar.startOfDay(for: date)
-        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86400)
-        return DateInterval(start: start, end: end)
-    }
-
-    /// Days the picker should offer.
-    ///
-    /// A slot running past midnight is rendered on every day it overlaps, so
-    /// listing only its start day hid the tail of an overnight broadcast: the
-    /// day existed in the grid but could not be selected.
-    static func dates(in guide: [TVerGuideChannel]) -> [Date] {
-        var days: Set<Date> = []
-        for program in guide.flatMap(\.programs) {
-            let firstDay = calendar.startOfDay(for: program.startAt)
-            days.insert(firstDay)
-            guard program.endAt > program.startAt else { continue }
-
-            let lastDay = calendar.startOfDay(for: program.endAt)
-            var day = firstDay
-            var remainingDays = maximumProgramDaySpan
-            while day < lastDay, remainingDays > 0 {
-                remainingDays -= 1
-                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
-                day = next
-                // A slot ending exactly at midnight does not reach into the
-                // next day, matching the rule `programs(_:on:)` applies.
-                if program.endAt > day { days.insert(day) }
-            }
-        }
-        return days.sorted()
-    }
-
-    /// The day the guide should open on.
-    ///
-    /// `dates` holds day starts, so ranking them by distance from "now" made a
-    /// late-evening session jump to tomorrow: today began up to 24 hours ago
-    /// while tomorrow begins in minutes.
-    static func preferredDate(in dates: [Date], now: Date = Date()) -> Date? {
-        guard !dates.isEmpty else { return nil }
-        if let today = dates.first(where: { isSameDay($0, now) }) { return today }
-
-        let today = calendar.startOfDay(for: now)
-        return dates.min { lhs, rhs in
-            let left = abs(lhs.timeIntervalSince(today))
-            let right = abs(rhs.timeIntervalSince(today))
-            // On a tie prefer the upcoming day over the one already gone.
-            return left == right ? lhs > rhs : left < right
-        }
-    }
-
-    static func programs(_ programs: [TVerLiveProgram], on date: Date) -> [TVerLiveProgram] {
-        let day = dayInterval(for: date)
-        var seenIDs: Set<String> = []
-        return programs
-            .filter { $0.startAt < day.end && $0.endAt > day.start }
-            .sorted { lhs, rhs in
-                lhs.startAt == rhs.startAt ? lhs.id < rhs.id : lhs.startAt < rhs.startAt
-            }
-            // Repeated slots in the payload used to stack identical blocks on
-            // top of each other and break SwiftUI list identity.
-            .filter { seenIDs.insert($0.id).inserted }
-    }
-
-    static func yPosition(for date: Date, on selectedDate: Date) -> CGFloat {
-        let day = dayInterval(for: selectedDate)
-        let clipped = min(max(date, day.start), day.end)
-        return CGFloat(clipped.timeIntervalSince(day.start) / 3600) * hourHeight
-    }
-
-    static func height(for program: TVerLiveProgram, on selectedDate: Date) -> CGFloat {
-        let day = dayInterval(for: selectedDate)
-        let start = max(program.startAt, day.start)
-        let end = min(program.endAt, day.end)
-        return max(minimumProgramHeight, CGFloat(max(0, end.timeIntervalSince(start)) / 3600) * hourHeight)
-    }
-
-    static func isSameDay(_ lhs: Date, _ rhs: Date) -> Bool {
-        calendar.isDate(lhs, inSameDayAs: rhs)
-    }
-
-    /// Vertical offset the grid should open at, clamped so late-evening slots
-    /// cannot scroll the content past its own end.
-    static func initialOffsetY(
-        for date: Date,
-        on selectedDate: Date,
-        viewportHeight: CGFloat,
-        leadingInset: CGFloat = 120
-    ) -> CGFloat {
-        let contentHeight = gridSize(channelCount: 0).height
-        let maximumOffset = max(0, contentHeight - max(0, viewportHeight))
-        return min(max(0, yPosition(for: date, on: selectedDate) - leadingInset), maximumOffset)
-    }
-}
-
 struct ProgramGuideView: View {
     @StateObject private var viewModel: ProgramGuideViewModel
     @ObservedObject private var playbackController: PlaybackController
@@ -239,6 +110,10 @@ struct ProgramGuideView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedDate = ProgramGuideMetrics.calendar.startOfDay(for: Date())
     @State private var selectedProgram: ProgramGuideSelection?
+    @State private var scrollToNowToken = 0
+    /// Persisted so the grid reopens at the density the user chose.
+    @AppStorage("guide.pointsPerMinute") private var storedPointsPerMinute = Double(GuideZoom.defaultPointsPerMinute)
+    @AppStorage("guide.hiddenChannelIDs") private var hiddenChannelIDsText = ""
     private let notificationScheduler: ProgramNotificationScheduler
     private let catchUpLookup: GuideCatchUpLookup
 
@@ -295,6 +170,29 @@ struct ProgramGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
+                        Image(systemName: "minus.magnifyingglass")
+                            .frame(
+                                width: ProgramGuideMetrics.minimumTapTarget,
+                                height: ProgramGuideMetrics.minimumTapTarget
+                            )
+                    }
+                    .disabled(!canZoomOut)
+                    .accessibilityLabel("番組表を縮小")
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
+                        Image(systemName: "plus.magnifyingglass")
+                            .frame(
+                                width: ProgramGuideMetrics.minimumTapTarget,
+                                height: ProgramGuideMetrics.minimumTapTarget
+                            )
+                    }
+                    .disabled(!canZoomIn)
+                    .accessibilityLabel("番組表を拡大")
+                }
+                ToolbarItem(placement: .topBarTrailing) { channelFilterMenu }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Task { await viewModel.load() } } label: {
                         if viewModel.isLoading {
@@ -343,14 +241,16 @@ struct ProgramGuideView: View {
             Group {
                 if dynamicTypeSize.isAccessibilitySize {
                     ProgramGuideAccessibleList(
-                        guide: viewModel.guide,
+                        guide: visibleGuide,
                         selectedDate: selectedDate,
                         onSelect: selectProgram
                     )
                 } else {
                     ProgramGuideGrid(
-                        guide: viewModel.guide,
+                        guide: visibleGuide,
                         selectedDate: selectedDate,
+                        pointsPerMinute: pointsPerMinuteBinding,
+                        scrollToNowToken: scrollToNowToken,
                         onSelect: selectProgram
                     )
                 }
@@ -365,6 +265,110 @@ struct ProgramGuideView: View {
                     .padding(.top, 8)
                     .accessibilityLabel("更新中")
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if hasTodayInGuide {
+                Button(action: jumpToNow) {
+                    Label("今", systemImage: "clock.arrow.circlepath")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, DS.Spacing.m)
+                        .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay { Capsule().stroke(Color(uiColor: .separator).opacity(0.4)) }
+                }
+                .buttonStyle(.plain)
+                .padding(DS.Spacing.l)
+                .accessibilityLabel("現在時刻に戻る")
+            }
+        }
+    }
+
+    /// Zoom of the grid, in points per broadcast minute.
+    private var pointsPerMinute: CGFloat {
+        GuideZoom.clamp(CGFloat(storedPointsPerMinute))
+    }
+
+    private var pointsPerMinuteBinding: Binding<CGFloat> {
+        Binding(
+            get: { GuideZoom.clamp(CGFloat(storedPointsPerMinute)) },
+            set: { storedPointsPerMinute = Double(GuideZoom.clamp($0)) }
+        )
+    }
+
+    private var canZoomIn: Bool { pointsPerMinute < GuideZoom.maximumPointsPerMinute - 0.01 }
+
+    private var canZoomOut: Bool { pointsPerMinute > GuideZoom.minimumPointsPerMinute + 0.01 }
+
+    private var hiddenChannelIDs: Set<String> {
+        Set(hiddenChannelIDsText.split(separator: "\n").map(String.init))
+    }
+
+    private var visibleGuide: [TVerGuideChannel] {
+        let hidden = hiddenChannelIDs
+        guard !hidden.isEmpty else { return viewModel.guide }
+        let filtered = viewModel.guide.filter { !hidden.contains($0.channel.id) }
+        // Hiding every channel would leave a blank grid with no way back.
+        return filtered.isEmpty ? viewModel.guide : filtered
+    }
+
+    private var hasTodayInGuide: Bool {
+        ProgramGuideMetrics.dates(in: viewModel.guide)
+            .contains { ProgramGuideMetrics.calendar.isDateInToday($0) }
+    }
+
+    private var channelFilterMenu: some View {
+        Menu {
+            Button { hiddenChannelIDsText = "" } label: {
+                Label("すべて表示", systemImage: "eye")
+            }
+            .disabled(hiddenChannelIDs.isEmpty)
+            Divider()
+            ForEach(viewModel.guide) { item in
+                Button { toggleChannel(item.channel.id) } label: {
+                    if hiddenChannelIDs.contains(item.channel.id) {
+                        Text(item.channel.name)
+                    } else {
+                        Label(item.channel.name, systemImage: "checkmark")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: hiddenChannelIDs.isEmpty
+                ? "line.3.horizontal.decrease.circle"
+                : "line.3.horizontal.decrease.circle.fill")
+                .frame(
+                    width: ProgramGuideMetrics.minimumTapTarget,
+                    height: ProgramGuideMetrics.minimumTapTarget
+                )
+        }
+        .accessibilityLabel("チャンネルを絞り込む")
+    }
+
+    private func zoom(to value: CGFloat) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            storedPointsPerMinute = Double(GuideZoom.clamp(value))
+        }
+    }
+
+    private func toggleChannel(_ channelID: String) {
+        var hidden = hiddenChannelIDs
+        if hidden.contains(channelID) {
+            hidden.remove(channelID)
+        } else {
+            hidden.insert(channelID)
+        }
+        hiddenChannelIDsText = hidden.sorted().joined(separator: "\n")
+    }
+
+    /// Jumps to the live edge, switching to today first when the user is
+    /// looking at another day.
+    private func jumpToNow() {
+        let today = ProgramGuideMetrics.dates(in: viewModel.guide)
+            .first { ProgramGuideMetrics.calendar.isDateInToday($0) }
+        if let today, !ProgramGuideMetrics.isSameDay(today, selectedDate) {
+            selectedDate = today
+        } else {
+            scrollToNowToken += 1
         }
     }
 
@@ -462,6 +466,7 @@ private struct ProgramGuideAccessibleList: View {
     let guide: [TVerGuideChannel]
     let selectedDate: Date
     let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
+    @EnvironmentObject private var availabilityStore: CatchUpAvailabilityStore
 
     var body: some View {
         ScrollView {
@@ -474,15 +479,24 @@ private struct ProgramGuideAccessibleList: View {
                             Label(item.channel.name, systemImage: "tv")
                                 .font(.headline)
                                 .accessibilityAddTraits(.isHeader)
+                                .onAppear {
+                                    availabilityStore.prefetch(
+                                        channelID: item.channel.id,
+                                        programs: programs
+                                    )
+                                }
 
                             ForEach(programs) { program in
                                 let now = Date()
                                 let isOnAir = program.startAt <= now && now < program.endAt
-                                let isCatchUpAvailable = GuidePlaybackRouter.route(
-                                    for: program,
+                                let availability = availabilityStore.availability(
+                                    channelID: item.channel.id,
+                                    program: program,
                                     channelState: item.channel.state,
                                     now: now
-                                ) == .catchUp
+                                )
+                                let hasNothingToPlay = GuideAvailabilityPresentation
+                                    .hasNothingToPlay(isOnAir: isOnAir, availability: availability)
                                 Button {
                                     onSelect(item.channel, program)
                                 } label: {
@@ -493,10 +507,12 @@ private struct ProgramGuideAccessibleList: View {
                                             if isOnAir {
                                                 Text("放送中")
                                                     .font(.subheadline.bold())
-                                                    .foregroundStyle(.red)
+                                                    .foregroundStyle(DS.Palette.live)
                                             }
-                                            if isCatchUpAvailable {
-                                                GuideCatchUpBadge()
+                                            if let kind = GuideAvailabilityPresentation
+                                                .badgeKind(isOnAir: isOnAir, availability: availability)
+                                            {
+                                                MediaBadge(kind)
                                             }
                                         }
                                         Text(program.seriesTitle)
@@ -516,20 +532,28 @@ private struct ProgramGuideAccessibleList: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(hasNothingToPlay)
+                                .opacity(hasNothingToPlay ? 0.45 : 1)
                                 .accessibilityElement(children: .ignore)
                                 .accessibilityLabel(
-                                    TVerAccessibilityText.guideProgram(
-                                        stationName: item.channel.name,
-                                        program: program,
-                                        isOnAir: isOnAir
+                                    GuideAvailabilityPresentation.accessibilityLabel(
+                                        base: TVerAccessibilityText.guideProgram(
+                                            stationName: item.channel.name,
+                                            program: program,
+                                            isOnAir: isOnAir
+                                        ),
+                                        isOnAir: isOnAir,
+                                        availability: availability
                                     )
                                 )
                                 .accessibilityHint(
-                                    isCatchUpAvailable
-                                        ? "ダブルタップして番組詳細を開き、見逃し配信を再生できます"
-                                        : "ダブルタップして番組詳細を開きます"
+                                    GuideAvailabilityPresentation.accessibilityHint(
+                                        isOnAir: isOnAir,
+                                        availability: availability
+                                    )
                                 )
                                 .accessibilityAddTraits(isOnAir ? .isSelected : [])
+                                .accessibilityRemoveTraits(hasNothingToPlay ? .isButton : [])
                             }
                         }
                     }
@@ -538,279 +562,6 @@ private struct ProgramGuideAccessibleList: View {
             .padding(16)
         }
         .accessibilityElement(children: .contain)
-    }
-}
-
-private struct ProgramGuideGrid: View {
-    let guide: [TVerGuideChannel]
-    let selectedDate: Date
-    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
-    @State private var contentOffset = CGPoint.zero
-
-    private var contentSize: CGSize {
-        ProgramGuideMetrics.gridSize(channelCount: guide.count)
-    }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let bodyHeight = max(0, proxy.size.height - ProgramGuideMetrics.stationHeaderHeight)
-            VStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    Text("時刻")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: ProgramGuideMetrics.timeAxisWidth, height: ProgramGuideMetrics.stationHeaderHeight)
-                        .background(.regularMaterial)
-                        .accessibilityAddTraits(.isHeader)
-                    stationHeaders
-                        .frame(height: ProgramGuideMetrics.stationHeaderHeight)
-                }
-                Divider()
-                HStack(spacing: 0) {
-                    timeScale
-                        .frame(width: ProgramGuideMetrics.timeAxisWidth, height: bodyHeight, alignment: .top)
-                        .clipped()
-                    TimelineView(.periodic(from: .now, by: 60)) { context in
-                        SynchronizedGuideScrollView(
-                            contentOffset: $contentOffset,
-                            contentSize: contentSize
-                        ) {
-                            ProgramGuideCanvas(
-                                guide: guide,
-                                selectedDate: selectedDate,
-                                now: context.date,
-                                onSelect: onSelect
-                            )
-                            .frame(width: contentSize.width, height: contentSize.height)
-                        }
-                    }
-                }
-            }
-            .onAppear {
-                let now = Date()
-                let targetDate = ProgramGuideMetrics.isSameDay(now, selectedDate)
-                    ? now : ProgramGuideMetrics.calendar.date(bySettingHour: 6, minute: 0, second: 0, of: selectedDate) ?? selectedDate
-                contentOffset.y = ProgramGuideMetrics.initialOffsetY(
-                    for: targetDate,
-                    on: selectedDate,
-                    viewportHeight: bodyHeight
-                )
-            }
-        }
-    }
-
-    private var stationHeaders: some View {
-        GeometryReader { _ in
-            HStack(spacing: 0) {
-                ForEach(guide) { item in
-                    HStack(spacing: 8) {
-                        CachedProgramImage(url: item.channel.iconURL, contentMode: .fit) {
-                            Image(systemName: "tv").foregroundStyle(.secondary)
-                        }
-                        .frame(width: 28, height: 28)
-                        .accessibilityHidden(true)
-                        Text(item.channel.name)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(2)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(width: ProgramGuideMetrics.stationWidth, height: ProgramGuideMetrics.stationHeaderHeight)
-                    .background(.regularMaterial)
-                    .overlay(alignment: .trailing) { Divider() }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(item.channel.name)、放送局")
-                    .accessibilityAddTraits(.isHeader)
-                }
-            }
-            .offset(x: -contentOffset.x)
-            .frame(width: contentSize.width, alignment: .leading)
-        }
-        .clipped()
-    }
-
-    private var timeScale: some View {
-        ZStack(alignment: .topLeading) {
-            Color(uiColor: .systemGroupedBackground)
-            ForEach(0 ..< 24, id: \.self) { hour in
-                Text(ProgramGuideMetrics.hourLabel(hour))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: ProgramGuideMetrics.timeAxisWidth - 8, alignment: .trailing)
-                    .offset(y: CGFloat(hour) * ProgramGuideMetrics.hourHeight - 7)
-            }
-        }
-        .frame(height: contentSize.height, alignment: .top)
-        .offset(y: -contentOffset.y)
-        .background(Color(uiColor: .systemGroupedBackground))
-        .accessibilityHidden(true)
-    }
-}
-
-private struct ProgramGuideCanvas: View {
-    let guide: [TVerGuideChannel]
-    let selectedDate: Date
-    let now: Date
-    let onSelect: (TVerLiveChannel, TVerLiveProgram) -> Void
-
-    private var width: CGFloat {
-        CGFloat(guide.count) * ProgramGuideMetrics.stationWidth
-    }
-
-    private var height: CGFloat {
-        24 * ProgramGuideMetrics.hourHeight
-    }
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color(uiColor: .systemBackground)
-            columnBackgrounds
-            gridLines
-            programs
-            currentTimeLine
-        }
-        .frame(width: width, height: height)
-    }
-
-    private var columnBackgrounds: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(guide.enumerated()), id: \.element.id) { index, _ in
-                (index.isMultiple(of: 2)
-                    ? Color(uiColor: .systemBackground)
-                    : Color(uiColor: .secondarySystemBackground).opacity(0.45))
-                    .frame(width: ProgramGuideMetrics.stationWidth, height: height)
-            }
-        }
-    }
-
-    private var gridLines: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(0 ... 48, id: \.self) { halfHour in
-                Rectangle()
-                    .fill(Color(uiColor: .separator).opacity(halfHour.isMultiple(of: 2) ? 0.42 : 0.18))
-                    .frame(width: width, height: halfHour.isMultiple(of: 2) ? 1 : 0.5)
-                    .offset(y: CGFloat(halfHour) * ProgramGuideMetrics.hourHeight / 2)
-            }
-            ForEach(0 ... guide.count, id: \.self) { column in
-                Rectangle()
-                    .fill(Color(uiColor: .separator).opacity(0.35))
-                    .frame(width: 1, height: height)
-                    .offset(x: CGFloat(column) * ProgramGuideMetrics.stationWidth)
-            }
-        }
-        .accessibilityHidden(true)
-    }
-
-    private var programs: some View {
-        ForEach(Array(guide.enumerated()), id: \.element.id) { column, item in
-            ForEach(ProgramGuideMetrics.programs(item.programs, on: selectedDate)) { program in
-                let y = ProgramGuideMetrics.yPosition(for: program.startAt, on: selectedDate)
-                let programHeight = ProgramGuideMetrics.height(for: program, on: selectedDate)
-                ProgramGuideBlock(
-                    stationName: item.channel.name,
-                    program: program,
-                    isOnAir: program.startAt <= now && now < program.endAt,
-                    isCatchUpAvailable: GuidePlaybackRouter.route(
-                        for: program,
-                        channelState: item.channel.state,
-                        now: now
-                    ) == .catchUp
-                ) {
-                    onSelect(item.channel, program)
-                }
-                .frame(width: ProgramGuideMetrics.stationWidth - 6, height: programHeight)
-                .offset(
-                    x: ProgramGuideMetrics.xPosition(forColumn: column) + 3,
-                    y: y
-                )
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var currentTimeLine: some View {
-        if ProgramGuideMetrics.isSameDay(now, selectedDate) {
-            let y = ProgramGuideMetrics.yPosition(for: now, on: selectedDate)
-            ZStack(alignment: .leading) {
-                Rectangle().fill(Color.red).frame(width: width, height: 2)
-                Circle().fill(Color.red).frame(width: 9, height: 9).offset(x: -4)
-            }
-            .offset(y: y)
-            .accessibilityHidden(true)
-        }
-    }
-}
-
-private struct ProgramGuideBlock: View {
-    let stationName: String
-    let program: TVerLiveProgram
-    let isOnAir: Bool
-    let isCatchUpAvailable: Bool
-    let action: () -> Void
-
-    var body: some View {
-        GeometryReader { proxy in
-            Button(action: action) {
-                VStack(alignment: .leading, spacing: proxy.size.height < 62 ? 1 : 3) {
-                    HStack(spacing: 4) {
-                        Text(program.timeLabel)
-                            .font(.caption2.monospacedDigit().weight(.semibold))
-                        if isOnAir {
-                            Text("放送中")
-                                .font(.caption2.bold())
-                                .foregroundStyle(.red)
-                        }
-                        if isCatchUpAvailable {
-                            GuideCatchUpBadge()
-                        }
-                    }
-                    .lineLimit(1)
-                    Text(program.seriesTitle)
-                        .font(.footnote.weight(.semibold))
-                        .lineLimit(proxy.size.height < 76 ? 1 : 2)
-                    if proxy.size.height >= 76, program.title != program.seriesTitle {
-                        Text(program.title)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(proxy.size.height >= 112 ? 2 : 1)
-                    }
-                }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 5)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(blockBackground)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(isOnAir ? Color.accentColor : Color(uiColor: .separator).opacity(0.42), lineWidth: isOnAir ? 2 : 1)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(TVerAccessibilityText.guideProgram(
-            stationName: stationName,
-            program: program,
-            isOnAir: isOnAir
-        ))
-        .accessibilityHint(
-            isCatchUpAvailable
-                ? "ダブルタップして番組詳細を開き、見逃し配信を再生できます"
-                : "ダブルタップして番組詳細を開きます"
-        )
-        .accessibilityInputLabels([program.seriesTitle, program.title])
-        .accessibilityAddTraits(isOnAir ? .isSelected : [])
-    }
-
-    private var blockBackground: Color {
-        if program.isPause {
-            return Color(uiColor: .tertiarySystemFill)
-        }
-        if isOnAir {
-            return Color.accentColor.opacity(0.14)
-        }
-        return Color(uiColor: .secondarySystemBackground)
     }
 }
 
@@ -1402,62 +1153,6 @@ private struct ProgramGuideStatusView<Accessory: View>: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
-    @Binding var contentOffset: CGPoint
-    let contentSize: CGSize
-    @ViewBuilder let content: Content
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
-        scrollView.delegate = context.coordinator
-        scrollView.backgroundColor = .clear
-        scrollView.contentInsetAdjustmentBehavior = .never
-        scrollView.alwaysBounceHorizontal = contentSize.width > 0
-        scrollView.alwaysBounceVertical = true
-        scrollView.showsHorizontalScrollIndicator = true
-        scrollView.showsVerticalScrollIndicator = true
-        scrollView.isDirectionalLockEnabled = false
-
-        let hostedView = context.coordinator.hostingController.view!
-        hostedView.backgroundColor = .clear
-        hostedView.frame = CGRect(origin: .zero, size: contentSize)
-        scrollView.addSubview(hostedView)
-        scrollView.contentSize = contentSize
-        return scrollView
-    }
-
-    func updateUIView(_ scrollView: UIScrollView, context: Context) {
-        context.coordinator.parent = self
-        context.coordinator.hostingController.rootView = content
-        context.coordinator.hostingController.view.frame = CGRect(origin: .zero, size: contentSize)
-        scrollView.contentSize = contentSize
-        if !scrollView.isDragging && !scrollView.isDecelerating,
-           abs(scrollView.contentOffset.x - contentOffset.x) > 1 || abs(scrollView.contentOffset.y - contentOffset.y) > 1
-        {
-            scrollView.setContentOffset(contentOffset, animated: false)
-        }
-    }
-
-    final class Coordinator: NSObject, UIScrollViewDelegate {
-        var parent: SynchronizedGuideScrollView
-        let hostingController: UIHostingController<Content>
-
-        init(parent: SynchronizedGuideScrollView) {
-            self.parent = parent
-            hostingController = UIHostingController(rootView: parent.content)
-        }
-
-        func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard parent.contentOffset != scrollView.contentOffset else { return }
-            parent.contentOffset = scrollView.contentOffset
-        }
     }
 }
 

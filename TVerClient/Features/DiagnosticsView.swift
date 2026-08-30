@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct DiagnosticLogDocument: FileDocument {
@@ -31,6 +32,7 @@ struct DiagnosticsView: View {
     @State private var exportDocument = DiagnosticLogDocument(text: "")
     @State private var exportError: String?
     @State private var showsClearConfirmation = false
+    @State private var copyConfirmation: String?
 
     init(
         logStore: DiagnosticLogStore,
@@ -63,7 +65,7 @@ struct DiagnosticsView: View {
                     ForEach(results, id: \.target) { result in
                         HStack {
                             Label(result.target.displayName, systemImage: result.isReachable ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundStyle(result.isReachable ? Color.green : Color.red)
+                                .foregroundStyle(result.isReachable ? DS.Palette.downloaded : DS.Palette.live)
                             Spacer()
                             Text(result.summary)
                                 .font(.caption)
@@ -103,7 +105,7 @@ struct DiagnosticsView: View {
                                 Spacer()
                                 Text(step.line)
                                     .font(.caption2.monospaced())
-                                    .foregroundStyle(step.isOK ? Color.secondary : Color.orange)
+                                    .foregroundStyle(step.isOK ? Color.secondary : DS.Palette.warning)
                                     .multilineTextAlignment(.trailing)
                             }
                             .accessibilityElement(children: .combine)
@@ -131,7 +133,7 @@ struct DiagnosticsView: View {
                                             ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                                     )
                                     .font(.caption.bold())
-                                    .foregroundStyle(summary.isHealthy ? Color.green : Color.orange)
+                                    .foregroundStyle(summary.isHealthy ? DS.Palette.downloaded : DS.Palette.warning)
                                     Spacer()
                                     if let outcome = summary.lastOutcome {
                                         Text(outcome.badgeTitle)
@@ -185,6 +187,19 @@ struct DiagnosticsView: View {
                     }
                     .accessibilityHint("個人情報を除去したテキストログをファイルへ保存します")
 
+                    Button {
+                        copyToPasteboard(logStore.exportText(), label: "診断ログ")
+                    } label: {
+                        Label("ログをコピー", systemImage: "doc.on.doc")
+                    }
+                    .accessibilityHint("個人情報を除去したテキストログをクリップボードへコピーします")
+
+                    if let copyConfirmation {
+                        Label(copyConfirmation, systemImage: "checkmark.circle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(DS.Palette.downloaded)
+                    }
+
                     Button(role: .destructive) {
                         showsClearConfirmation = true
                     } label: {
@@ -194,7 +209,7 @@ struct DiagnosticsView: View {
                     if let exportError {
                         Text(exportError)
                             .font(.footnote)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(DS.Palette.live)
                     }
                 }
 
@@ -226,6 +241,7 @@ struct DiagnosticsView: View {
                     }
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("診断ログ")
         }
         .fileExporter(
@@ -287,6 +303,18 @@ struct DiagnosticsView: View {
         isRunning = false
     }
 
+    /// Sharing a file is awkward inside LiveContainer, so the log can also go
+    /// straight to the clipboard for pasting into a bug report.
+    private func copyToPasteboard(_ text: String, label: String) {
+        UIPasteboard.general.string = text
+        copyConfirmation = "\(label)をコピーしました"
+        logStore.record(.info, category: "diagnostics", message: "Diagnostic text copied")
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            copyConfirmation = nil
+        }
+    }
+
     private var exportFilename: String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -340,10 +368,10 @@ private extension EndpointOutcome {
 
     var color: Color {
         switch self {
-        case .ok: return .green
-        case .degraded: return .yellow
-        case .fallbackUsed: return .orange
-        case .failed: return .red
+        case .ok: return DS.Palette.downloaded
+        case .degraded: return DS.Palette.warning
+        case .fallbackUsed: return DS.Palette.catchUp
+        case .failed: return DS.Palette.live
         }
     }
 }
@@ -373,9 +401,9 @@ private extension StartupSelfCheckStatus {
 
     var color: Color {
         switch self {
-        case .ok: return .green
-        case .degraded: return .orange
-        case .failed: return .red
+        case .ok: return DS.Palette.downloaded
+        case .degraded: return DS.Palette.warning
+        case .failed: return DS.Palette.live
         }
     }
 }
@@ -383,9 +411,9 @@ private extension StartupSelfCheckStatus {
 private extension DiagnosticLogLevel {
     var color: Color {
         switch self {
-        case .info: return .secondary
-        case .warning: return .orange
-        case .error: return .red
+        case .info: return DS.Palette.inactive
+        case .warning: return DS.Palette.warning
+        case .error: return DS.Palette.live
         }
     }
 }
