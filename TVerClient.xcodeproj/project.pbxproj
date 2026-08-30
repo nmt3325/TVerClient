@@ -27,11 +27,14 @@
 		6F4775D1C3B2444D9254128F /* TVerResponseCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */; };
 		6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */; };
 		76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98541A0DE8DC22D472A22948 /* LiveTVTests.swift */; };
+		85DA1ECF2703B7ECFBA2749A /* LivePlaybackSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0432F314A0AE04A2F05B02 /* LivePlaybackSmokeTests.swift */; };
+		86E6923A8741F2B70ADAC895 /* LiveOfficialPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */; };
 		8FB4F5C69927BE3AA196012B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C65634372978E5370261875 /* Models.swift */; };
 		9341A785DBD70A206C583341 /* ProgramSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B17459506284E16C8F1197 /* ProgramSearchTests.swift */; };
 		A639341EF4079C4945D80801 /* PlaybackSupportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D724867F055BF95F468C548F /* PlaybackSupportViews.swift */; };
 		A797F94513B4E43294A549D1 /* ProgramImagePipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7221131F4842AB294C43DB2 /* ProgramImagePipelineTests.swift */; };
 		B7C7EC271A75EC1A2E61EDCA /* AccessibilityTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54500B4EAA52ED53A69EDA53 /* AccessibilityTestSupport.swift */; };
+		BEDEFF5EBF59AABF2D269BBA /* AppRuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F2299BDF182A9F1E9D46F50 /* AppRuntimeEnvironment.swift */; };
 		BEFDCA83E0968C4C675DC611 /* PictureInPictureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB95878D02318C092E70FB9 /* PictureInPictureCoordinator.swift */; };
 		CF226E96D743E2E798483358 /* ProgramSearchIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6518FEAB10E70D5B84B7C7A9 /* ProgramSearchIndex.swift */; };
 		CFA34A6767DE529B368824B8 /* PlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 812D411CA1CDDA66EA3464E8 /* PlaybackController.swift */; };
@@ -59,9 +62,11 @@
 
 /* Begin PBXFileReference section */
 		03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerClientApp.swift; sourceTree = "<group>"; };
+		0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveOfficialPayloadTests.swift; sourceTree = "<group>"; };
 		12A14931282466CB20FBE8FE /* ProgramImagePipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramImagePipeline.swift; sourceTree = "<group>"; };
 		26DFE41E5BF9011519303CBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2B7FEF1C55CD936A6F922845 /* ProgramSearchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramSearchViewModel.swift; sourceTree = "<group>"; };
+		2F2299BDF182A9F1E9D46F50 /* AppRuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntimeEnvironment.swift; sourceTree = "<group>"; };
 		36207CBF65F4346306A8B03C /* UsabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityTests.swift; sourceTree = "<group>"; };
 		3DF009DC4BD0B9E186B1461E /* PlayerLayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerLayerView.swift; sourceTree = "<group>"; };
 		3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramLibraryStore.swift; sourceTree = "<group>"; };
@@ -85,6 +90,7 @@
 		8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIClientCacheTests.swift; sourceTree = "<group>"; };
 		98541A0DE8DC22D472A22948 /* LiveTVTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVTests.swift; sourceTree = "<group>"; };
 		9B694A98CF622006290A9BB2 /* UsabilityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityModels.swift; sourceTree = "<group>"; };
+		9E0432F314A0AE04A2F05B02 /* LivePlaybackSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePlaybackSmokeTests.swift; sourceTree = "<group>"; };
 		9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerResponseCache.swift; sourceTree = "<group>"; };
 		A7221131F4842AB294C43DB2 /* ProgramImagePipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramImagePipelineTests.swift; sourceTree = "<group>"; };
 		A7D57C1EF91D7CC418CFBF73 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -151,6 +157,8 @@
 				849A4EE822663B98C82CAE0A /* AccessibilityCoverageTests.swift */,
 				54500B4EAA52ED53A69EDA53 /* AccessibilityTestSupport.swift */,
 				E661CB17A220637A10F71949 /* DiagnosticLogStoreTests.swift */,
+				0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */,
+				9E0432F314A0AE04A2F05B02 /* LivePlaybackSmokeTests.swift */,
 				98541A0DE8DC22D472A22948 /* LiveTVTests.swift */,
 				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
 				B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */,
@@ -199,6 +207,7 @@
 		A852B85A63DED680716132EE /* App */ = {
 			isa = PBXGroup;
 			children = (
+				2F2299BDF182A9F1E9D46F50 /* AppRuntimeEnvironment.swift */,
 				03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */,
 			);
 			path = App;
@@ -325,6 +334,8 @@
 				27DD9758EF6268FBAA96B481 /* AccessibilityCoverageTests.swift in Sources */,
 				B7C7EC271A75EC1A2E61EDCA /* AccessibilityTestSupport.swift in Sources */,
 				D791FCB8DCF1E264A281EFCD /* DiagnosticLogStoreTests.swift in Sources */,
+				86E6923A8741F2B70ADAC895 /* LiveOfficialPayloadTests.swift in Sources */,
+				85DA1ECF2703B7ECFBA2749A /* LivePlaybackSmokeTests.swift in Sources */,
 				76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */,
 				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
 				E8144F8465B6938C94CFB212 /* NetworkDiagnosticsServiceTests.swift in Sources */,
@@ -342,6 +353,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BEDEFF5EBF59AABF2D269BBA /* AppRuntimeEnvironment.swift in Sources */,
 				5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */,
 				09D65C4953364F7121B68964 /* CachedProgramImage.swift in Sources */,
 				5FD462579134FAEFD353C2A9 /* DiagnosticLogStore.swift in Sources */,
@@ -434,7 +446,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -495,7 +507,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import Combine
 @testable import TVerClient
 import XCTest
 
@@ -104,6 +105,22 @@ final class PictureInPictureTests: XCTestCase {
         notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         await Task.yield()
         XCTAssertEqual(coordinator.applicationState, .active)
+    }
+
+    func testRepeatedAttachToSameLayerDoesNotRepublishAvailability() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        let layer = AVPlayerLayer(player: AVPlayer())
+        var publicationCount = 0
+        let observation = coordinator.objectWillChange.sink { publicationCount += 1 }
+
+        coordinator.attach(to: layer)
+        let countAfterFirstAttach = publicationCount
+        coordinator.attach(to: layer)
+
+        XCTAssertEqual(publicationCount, countAfterFirstAttach)
+        withExtendedLifetime(observation) {}
     }
 
     func testCoordinatorWorksWithSamePlayerLayerForLiveAndVODItems() {

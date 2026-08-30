@@ -43,10 +43,17 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PlayerLayerContainerView, context: Context) {
-        context.coordinator.pictureInPicture = pictureInPicture
         configure(view)
-        context.coordinator.attachedLayer = view.playerLayer
-        pictureInPicture.attach(to: view.playerLayer)
+
+        if context.coordinator.pictureInPicture !== pictureInPicture {
+            context.coordinator.pictureInPicture.detach(from: view.playerLayer)
+            context.coordinator.pictureInPicture = pictureInPicture
+            context.coordinator.attachedLayer = view.playerLayer
+            pictureInPicture.attach(to: view.playerLayer)
+        } else if context.coordinator.attachedLayer !== view.playerLayer {
+            context.coordinator.attachedLayer = view.playerLayer
+            pictureInPicture.attach(to: view.playerLayer)
+        }
     }
 
     static func dismantleUIView(
