@@ -15,6 +15,36 @@ struct MediaThumbnailPlaceholder: View {
     }
 }
 
+/// 画像の取得に失敗したときの共通表示。
+///
+/// 失敗しても読み込み中と同じ絵のままだと、待てば出るのか出ないのかが
+/// 利用者に分からない。記号と短い文字の両方で「出ない」と伝える。
+struct MediaThumbnailUnavailable: View {
+    var body: some View {
+        ZStack {
+            DS.Palette.thumbnailPlaceholder
+            ViewThatFits(in: .vertical) {
+                VStack(spacing: DS.Spacing.xxs) {
+                    glyph
+                    Text("画像なし")
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                glyph
+            }
+            .foregroundStyle(.secondary)
+            .padding(DS.Spacing.xxs)
+        }
+    }
+
+    private var glyph: some View {
+        Image(systemName: "exclamationmark.triangle")
+            .font(.footnote)
+            .symbolRenderingMode(.hierarchical)
+    }
+}
+
 /// Fixed 16:9 artwork with a placeholder, a fade-in and an optional resume bar.
 struct MediaThumbnail: View {
     let url: URL?
@@ -150,19 +180,41 @@ struct MediaRow<Accessory: View>: View {
         !badges.isEmpty || !(detail ?? "").isEmpty
     }
 
+    /// バッジと補足を1行に収められないときは、切り捨てずに段を分ける。
+    /// 「まもなく終了」のような期限情報を truncate で消さないため。
     private var metadata: some View {
-        HStack(spacing: DS.Spacing.xs) {
-            ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in
-                badge
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: DS.Spacing.xs) {
+                badgeStrip
+                detailLabel
             }
-            if let detail, !detail.isEmpty {
-                Text(detail)
-                    .font(DS.Typography.rowDetail)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                badgeStrip
+                detailLabel
             }
         }
         .padding(.top, DS.Spacing.xxs)
+    }
+
+    @ViewBuilder
+    private var badgeStrip: some View {
+        if !badges.isEmpty {
+            HStack(spacing: DS.Spacing.xs) {
+                ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in
+                    badge
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detailLabel: some View {
+        if let detail, !detail.isEmpty {
+            Text(detail)
+                .font(DS.Typography.rowDetail)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 }
 
