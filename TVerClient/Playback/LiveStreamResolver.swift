@@ -1,5 +1,13 @@
 import Foundation
 
+/// Stage at which live stream resolution stopped, mirroring the three network
+/// hops the official player performs.
+enum LiveResolutionStage: String, Sendable {
+    case metadata
+    case session
+    case manifest
+}
+
 /// Resolves TVer's official live Streaks flow. Live SSAI media must be
 /// sessionized before its manifest is handed to AVPlayer.
 final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
@@ -7,22 +15,26 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
     private let session: URLSession
     private let dateProvider: () -> Date
     private let requestObserver: ((URLRequest) -> Void)?
+    private let healthReporter: EndpointHealthReporting
 
     init(
         session: URLSession = TVerNetworking.makeEphemeralSession(),
         dateProvider: @escaping () -> Date = Date.init,
-        requestObserver: ((URLRequest) -> Void)? = nil
+        requestObserver: ((URLRequest) -> Void)? = nil,
+        healthReporter: EndpointHealthReporting = EndpointHealthStore.shared
     ) {
         self.session = session
         self.dateProvider = dateProvider
         self.requestObserver = requestObserver
+        self.healthReporter = healthReporter
     }
 
     func resolveLiveStream(for channel: TVerLiveChannel) async throws -> URL {
-        let info = try await json(from: Self.playerInfoURL)
+        let info = try await json(from: Self.playerInfoURL, stage: .metadata)
         let legacyKey = "tver-\(channel.apiKey)"
         guard let projectInfo = (info[channel.projectID] ?? info[legacyKey] ?? info[channel.apiKey]) as? [String: Any],
               let keyObject = projectInfo["api_key"] as? [String: Any] else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "player info has no api_key for this project")
             throw TVerClientError.noPlayableStream
         }
 
@@ -30,32 +42,74 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
         guard !apiKeys.isEmpty,
               let project = Self.pathSegment(channel.projectID),
               let reference = Self.pathSegment(channel.mediaID) else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "channel is missing usable project or media identifiers")
             throw TVerClientError.noPlayableStream
         }
 
         // The official live module never supplies the VOD-only `ati` query.
         guard let playbackURL = URL(string: "https://playback.api.streaks.jp/v1/projects/\(project)/medias/\(reference)") else {
+            reportManifest(outcome: .failed, category: .clientBug, note: "playback URL could not be built")
             throw TVerClientError.invalidResponse
         }
 
+        // Each API key is a separate network attempt and is reported as such.
+        // Only metadata failures are worth retrying with the next key; once a
+        // payload is in hand the manifest stage runs exactly once so its
+        // failure reason is no longer replaced by a generic retry loop.
+        var media: [String: Any]?
         for apiKey in apiKeys {
+            var request = URLRequest(url: playbackURL)
+            Self.addOfficialHeaders(to: &request)
+            request.setValue(apiKey, forHTTPHeaderField: "X-Streaks-Api-Key")
+            let started = Date()
             do {
-                var request = URLRequest(url: playbackURL)
-                Self.addOfficialHeaders(to: &request)
-                request.setValue(apiKey, forHTTPHeaderField: "X-Streaks-Api-Key")
-                let data = try await load(request)
-                guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw TVerClientError.invalidResponse
+                let result = try await load(request)
+                guard let root = (try? JSONSerialization.jsonObject(with: result.data)) as? [String: Any] else {
+                    report(
+                        stage: .metadata, outcome: .failed, category: .upstreamChange,
+                        httpStatus: result.statusCode, startedAt: started,
+                        note: "playback payload is not a JSON object"
+                    )
+                    continue
                 }
-                let media = (root["media"] as? [String: Any]) ?? root
-                return try await resolveManifest(media: media, channel: channel)
+                report(
+                    stage: .metadata, outcome: .ok,
+                    httpStatus: result.statusCode, startedAt: started
+                )
+                media = (root["media"] as? [String: Any]) ?? root
+                break
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let failure as LiveHTTPFailure {
+                report(
+                    stage: .metadata, outcome: .failed, category: failure.category,
+                    httpStatus: failure.statusCode, startedAt: started,
+                    note: "playback metadata request failed"
+                )
+                continue
             } catch {
+                report(
+                    stage: .metadata, outcome: .failed, category: .clientBug,
+                    startedAt: started, note: "playback metadata attempt raised an unexpected error"
+                )
                 continue
             }
         }
-        throw TVerClientError.noPlayableStream
+
+        guard let media else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "every playback API key was rejected")
+            throw TVerClientError.noPlayableStream
+        }
+
+        do {
+            return try await resolveManifest(media: media, channel: channel)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as TVerClientError {
+            throw error
+        } catch {
+            throw TVerClientError.noPlayableStream
+        }
     }
 
     private func resolveManifest(media: [String: Any], channel: TVerLiveChannel) async throws -> URL {
@@ -65,6 +119,7 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
               let preferredRawURL = Self.string(preferred["src"]),
               let preferredURL = URL(string: preferredRawURL),
               TVerNetworking.isPermittedStreamURL(preferredURL) else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "payload exposed no permitted DRM-free HLS source")
             throw TVerClientError.noPlayableStream
         }
 
@@ -79,9 +134,20 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
             // Already-sessionized and genuinely non-SSAI sources retain the
             // historical clear-HLS fallback. Raw SSAI sources never do.
             if mediaUsesSSAI || Self.isEnabledSSAI(preferred["ssai"]) {
-                if Self.isSessionized(preferredRawURL) { return preferredURL }
+                if Self.isSessionized(preferredRawURL) {
+                    reportManifest(outcome: .ok, category: .none, note: "payload already carried a sessionized manifest")
+                    return preferredURL
+                }
+                reportManifest(outcome: .failed, category: .upstreamChange, note: "SSAI media exposed no sessionizable source")
                 throw TVerClientError.noPlayableStream
             }
+            // Handing AVPlayer the raw clear-HLS source skips the official
+            // session, so it is a fallback rather than a success.
+            reportManifest(
+                outcome: .fallbackUsed,
+                category: .upstreamChange,
+                note: "no SSAI source advertised; using non-sessionized clear HLS"
+            )
             return preferredURL
         }
 
@@ -101,11 +167,15 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
               let project = Self.pathSegment(projectID),
               let mediaPath = Self.pathSegment(mediaID),
               let sessionURL = URL(string: "https://ssai.api.streaks.jp/v1/projects/\(project)/medias/\(mediaPath)/ssai/session") else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "payload carried no usable SSAI session identifiers")
             throw TVerClientError.noPlayableStream
         }
 
         let sourceIDs = selectedSources.compactMap { Self.string($0["id"]) }
-        guard !sourceIDs.isEmpty else { throw TVerClientError.noPlayableStream }
+        guard !sourceIDs.isEmpty else {
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "selected sources carried no identifiers")
+            throw TVerClientError.noPlayableStream
+        }
 
         var adsParams = Self.defaultLiveAdsParams(for: channel)
         let wireAdFields = (media["ad_fields"] as? [String: Any]) ?? (media["adFields"] as? [String: Any]) ?? [:]
@@ -123,10 +193,33 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
             "id": sourceIDs.joined(separator: ",")
         ])
 
-        let responseData = try await load(request)
-        guard let entries = try JSONSerialization.jsonObject(with: responseData) as? [[String: Any]] else {
+        let sessionStartedAt = Date()
+        let sessionResult: (data: Data, statusCode: Int)
+        do {
+            sessionResult = try await load(request)
+        } catch let failure as LiveHTTPFailure {
+            report(
+                stage: .session, outcome: .failed, category: failure.category,
+                httpStatus: failure.statusCode, startedAt: sessionStartedAt,
+                note: "SSAI session request failed"
+            )
+            reportManifest(outcome: .failed, category: failure.category, note: "SSAI session could not be created")
+            throw TVerClientError.noPlayableStream
+        }
+
+        guard let entries = (try? JSONSerialization.jsonObject(with: sessionResult.data)) as? [[String: Any]] else {
+            report(
+                stage: .session, outcome: .failed, category: .upstreamChange,
+                httpStatus: sessionResult.statusCode, startedAt: sessionStartedAt,
+                note: "session payload is not a JSON array"
+            )
+            reportManifest(outcome: .failed, category: .upstreamChange, note: "SSAI session payload changed shape")
             throw TVerClientError.invalidResponse
         }
+        report(
+            stage: .session, outcome: .ok,
+            httpStatus: sessionResult.statusCode, startedAt: sessionStartedAt
+        )
 
         for source in selectedSources {
             guard let sourceID = Self.string(source["id"]),
@@ -138,28 +231,111 @@ final class LiveStreamResolver: TVerLiveStreamResolving, @unchecked Sendable {
             guard let finalURL = URL(string: rawSource + separator + opaqueQuery),
                   TVerNetworking.isPermittedStreamURL(finalURL),
                   Self.isSessionized(finalURL.absoluteString) else { continue }
+            reportManifest(outcome: .ok, category: .none, note: "sessionized live manifest resolved")
             return finalURL
         }
+        reportManifest(
+            outcome: .failed,
+            category: .upstreamChange,
+            note: "session response matched none of the \(selectedSources.count) selected sources"
+        )
         throw TVerClientError.noPlayableStream
     }
 
-    private func json(from url: URL) async throws -> [String: Any] {
+    private func json(from url: URL, stage: LiveResolutionStage) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         Self.addOfficialHeaders(to: &request)
-        let data = try await load(request)
-        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw TVerClientError.invalidResponse
-        }
-        return value
-    }
-
-    private func load(_ request: URLRequest) async throws -> Data {
-        requestObserver?(request)
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        let started = Date()
+        do {
+            let result = try await load(request)
+            guard let value = (try? JSONSerialization.jsonObject(with: result.data)) as? [String: Any] else {
+                report(
+                    stage: stage, outcome: .failed, category: .upstreamChange,
+                    httpStatus: result.statusCode, startedAt: started,
+                    note: "player info payload is not a JSON object"
+                )
+                throw TVerClientError.invalidResponse
+            }
+            report(stage: stage, outcome: .ok, httpStatus: result.statusCode, startedAt: started)
+            return value
+        } catch let failure as LiveHTTPFailure {
+            report(
+                stage: stage, outcome: .failed, category: failure.category,
+                httpStatus: failure.statusCode, startedAt: started,
+                note: "player info request failed"
+            )
             throw TVerClientError.noPlayableStream
         }
-        return data
+    }
+
+    /// Transport level failure. Unlike the previous implementation this keeps
+    /// the HTTP status so the diagnostics screen can tell an upstream change
+    /// (4xx) apart from an outage (5xx) or a network problem.
+    private struct LiveHTTPFailure: Error {
+        let statusCode: Int?
+        let category: EndpointFailureCategory
+    }
+
+    private func load(_ request: URLRequest) async throws -> (data: Data, statusCode: Int) {
+        requestObserver?(request)
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw LiveHTTPFailure(statusCode: nil, category: .clientBug)
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                throw LiveHTTPFailure(
+                    statusCode: http.statusCode,
+                    category: http.statusCode >= 500 ? .environment : .upstreamChange
+                )
+            }
+            return (data, http.statusCode)
+        } catch let failure as LiveHTTPFailure {
+            throw failure
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw LiveHTTPFailure(statusCode: nil, category: .network)
+        }
+    }
+
+    private func report(
+        stage: LiveResolutionStage,
+        outcome: EndpointOutcome,
+        category: EndpointFailureCategory = .none,
+        httpStatus: Int? = nil,
+        startedAt: Date,
+        note: String? = nil
+    ) {
+        var text = "live \(stage.rawValue)"
+        if let note, !note.isEmpty { text += ": \(note)" }
+        healthReporter.record(EndpointHealthEvent(
+            endpoint: .liveManifest,
+            outcome: outcome,
+            category: category,
+            httpStatus: httpStatus,
+            durationMS: Self.elapsedMS(since: startedAt),
+            note: text
+        ))
+    }
+
+    /// Reports what AVPlayer is actually going to be handed. A downgrade to a
+    /// non-sessionized manifest is reported as `.fallbackUsed`, never `.ok`.
+    private func reportManifest(
+        outcome: EndpointOutcome,
+        category: EndpointFailureCategory,
+        note: String
+    ) {
+        healthReporter.record(EndpointHealthEvent(
+            endpoint: .mediaManifest,
+            outcome: outcome,
+            category: category,
+            note: "live manifest: \(note)"
+        ))
+    }
+
+    private static func elapsedMS(since start: Date) -> Int {
+        max(0, Int((Date().timeIntervalSince(start) * 1000).rounded()))
     }
 
     private static func orderedAPIKeys(_ keyObject: [String: Any], at date: Date) -> [String] {

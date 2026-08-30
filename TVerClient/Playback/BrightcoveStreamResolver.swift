@@ -36,15 +36,18 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
   private let session: URLSession
   private let dateProvider: @Sendable () -> Date
   private let recorder: DiagnosticRecorder
+  private let healthReporter: EndpointHealthReporting
 
   init(
     session: URLSession = TVerNetworking.makeEphemeralSession(),
     dateProvider: @escaping @Sendable () -> Date = { Date() },
-    diagnosticRecorder: DiagnosticRecorder? = nil
+    diagnosticRecorder: DiagnosticRecorder? = nil,
+    healthReporter: EndpointHealthReporting = EndpointHealthStore.shared
   ) {
     self.session = session
     self.dateProvider = dateProvider
     self.recorder = diagnosticRecorder ?? Self.makeDefaultRecorder()
+    self.healthReporter = healthReporter
   }
 
   private static func makeDefaultRecorder() -> DiagnosticRecorder {
@@ -76,6 +79,13 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
         message: "Episode document could not be loaded",
         extra: ["episode": program.id, "reason": failure]
       )
+      reportHealth(
+        endpoint: .episodeDetail,
+        outcome: .failed,
+        category: Self.category(for: error),
+        httpStatus: Self.httpStatus(for: error),
+        note: "episode document could not be loaded"
+      )
       throw TVerClientError.api("番組情報の取得に失敗しました（段階: episode-metadata / \(failure)）。")
     }
 
@@ -90,6 +100,12 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
           message: "Resolved catch-up stream via Streaks",
           extra: ["episode": program.id, "project": streaks.projectID]
         )
+        reportHealth(endpoint: .vodPlaybackAPI, outcome: .ok, note: "streaks playback resolved")
+        reportHealth(
+          endpoint: .mediaManifest,
+          outcome: .ok,
+          note: "catch-up manifest resolved through the primary Streaks route"
+        )
         return url
       } catch is CancellationError {
         throw CancellationError()
@@ -101,6 +117,12 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
             message: "Streaks refused playback for this episode",
             extra: ["episode": program.id, "project": streaks.projectID, "detail": message]
           )
+          reportHealth(
+            endpoint: .vodPlaybackAPI,
+            outcome: .failed,
+            category: .upstreamChange,
+            note: "streaks refused playback for this episode"
+          )
           throw TVerClientError.api(message)
         }
         if case .noSource = failure {
@@ -109,6 +131,12 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
             stage: .noHLSSource,
             message: "Streaks returned no DRM-free HLS source",
             extra: ["episode": program.id, "project": streaks.projectID]
+          )
+          reportHealth(
+            endpoint: .mediaManifest,
+            outcome: .failed,
+            category: .upstreamChange,
+            note: "streaks payload carried no DRM-free HLS source"
           )
           throw TVerClientError.noPlayableStream
         }
@@ -123,6 +151,13 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
             "reason": Self.describe(failure),
           ]
         )
+        reportHealth(
+          endpoint: .vodPlaybackAPI,
+          outcome: .failed,
+          category: Self.category(for: failure),
+          httpStatus: Self.httpStatus(for: failure),
+          note: "streaks playback lookup failed"
+        )
       }
     } else {
       failedStages.append(VODResolutionStage.streaks.rawValue)
@@ -132,15 +167,36 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
         message: "Episode document exposes no Streaks block",
         extra: ["episode": program.id]
       )
+      reportHealth(
+        endpoint: .vodPlaybackAPI,
+        outcome: .failed,
+        category: .upstreamChange,
+        note: "episode document exposes no Streaks block"
+      )
     }
 
     do {
       let url = try await resolveViaBrightcove(episode, program: program)
+      // Reaching this line means the primary route is broken. Recording it as
+      // an informational success is precisely how a dead Streaks route stayed
+      // invisible, so it is reported as a fallback at warning level instead.
       record(
-        .info,
+        .warning,
         stage: .brightcove,
-        message: "Resolved catch-up stream via Brightcove fallback",
-        extra: ["episode": program.id]
+        message: "Resolved catch-up stream via the legacy Brightcove fallback",
+        extra: ["episode": program.id, "outcome": EndpointOutcome.fallbackUsed.rawValue]
+      )
+      reportHealth(
+        endpoint: .vodPlaybackAPI,
+        outcome: .fallbackUsed,
+        category: .upstreamChange,
+        note: "primary Streaks route unavailable; legacy Brightcove route used"
+      )
+      reportHealth(
+        endpoint: .mediaManifest,
+        outcome: .fallbackUsed,
+        category: .upstreamChange,
+        note: "catch-up manifest resolved through the legacy Brightcove fallback"
       )
       return url
     } catch is CancellationError {
@@ -153,6 +209,12 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
           message: "No DRM-free HLS source in any playback response",
           extra: ["episode": program.id]
         )
+        reportHealth(
+          endpoint: .mediaManifest,
+          outcome: .failed,
+          category: .upstreamChange,
+          note: "no DRM-free HLS source in any playback response"
+        )
         throw TVerClientError.noPlayableStream
       }
       failedStages.append(VODResolutionStage.brightcove.rawValue)
@@ -162,9 +224,22 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
         message: "Brightcove fallback failed",
         extra: ["episode": program.id, "reason": Self.describe(failure)]
       )
+      reportHealth(
+        endpoint: .vodPlaybackAPI,
+        outcome: .failed,
+        category: Self.category(for: failure),
+        httpStatus: Self.httpStatus(for: failure),
+        note: "legacy Brightcove fallback failed"
+      )
     }
 
     let stages = failedStages.joined(separator: ", ")
+    reportHealth(
+      endpoint: .mediaManifest,
+      outcome: .failed,
+      category: .upstreamChange,
+      note: "every catch-up route failed: \(stages)"
+    )
     throw TVerClientError.api(
       "配信ストリームを取得できませんでした（失敗した段階: \(stages)）。TVer公式サイトでは視聴できる場合があります。"
     )
@@ -245,14 +320,21 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
 
     var lastFailure = ResolveFailure.noSource
     var sawPayload = false
+    // A failure raised after a playback payload was already parsed is a
+    // session or manifest failure, not a missing source. Collapsing those into
+    // `noSource` reported outages as "this episode has no playable source" and
+    // skipped the remaining route, so the real reason is preserved here.
+    var lastPostPayloadFailure: ResolveFailure?
 
     for attempt in attempts {
+      var payloadParsed = false
       do {
         let media = try await fetchStreaksMedia(
           projectID: streaks.projectID,
           attempt: attempt
         )
         sawPayload = true
+        payloadParsed = true
         return try await resolvePlayableURL(
           media: media,
           projectID: streaks.projectID,
@@ -264,10 +346,17 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
       } catch let failure as ResolveFailure {
         // A rights or geo refusal is authoritative: another key will not help.
         if case .denied = failure { throw failure }
-        lastFailure = failure
+        if payloadParsed, case .noSource = failure {
+          // A valid payload that genuinely carries no DRM-free source.
+          lastFailure = failure
+        } else {
+          if payloadParsed { lastPostPayloadFailure = failure }
+          lastFailure = failure
+        }
       }
     }
 
+    if let lastPostPayloadFailure { throw lastPostPayloadFailure }
     throw sawPayload ? ResolveFailure.noSource : lastFailure
   }
 
@@ -456,7 +545,22 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
       } catch is CancellationError {
         throw CancellationError()
       } catch {
-        // Fall through to the account-wide default player.
+        // Falling through to the account-wide default player used to be
+        // completely silent, which hid a broken player configuration behind a
+        // later and unrelated failure.
+        record(
+          .warning,
+          stage: .policyKey,
+          message: "Player policy key unavailable, using the account default player",
+          extra: ["reason": Self.describe(error)]
+        )
+        reportHealth(
+          endpoint: .vodPlaybackAPI,
+          outcome: .fallbackUsed,
+          category: Self.category(for: error),
+          httpStatus: Self.httpStatus(for: error),
+          note: "player policy key unavailable; account default player used"
+        )
       }
     }
     return try await fetchFallbackPolicyKey(accountID: accountID)
@@ -586,6 +690,42 @@ final class BrightcoveStreamResolver: TVerStreamResolving, @unchecked Sendable {
     var metadata = extra
     metadata["stage"] = stage.rawValue
     recorder(level, message, metadata)
+  }
+
+  /// Emits exactly one `EndpointHealthEvent`. Notes are short fixed phrases:
+  /// no URL, query string, header or token ever reaches the health store.
+  private func reportHealth(
+    endpoint: EndpointID,
+    outcome: EndpointOutcome,
+    category: EndpointFailureCategory = .none,
+    httpStatus: Int? = nil,
+    note: String
+  ) {
+    healthReporter.record(EndpointHealthEvent(
+      endpoint: endpoint,
+      outcome: outcome,
+      category: category,
+      httpStatus: httpStatus,
+      note: "catch-up: \(note)"
+    ))
+  }
+
+  private static func category(for error: Error) -> EndpointFailureCategory {
+    guard let failure = error as? ResolveFailure else { return .clientBug }
+    switch failure {
+    case .denied: return .upstreamChange
+    case let .http(status): return status >= 500 ? .environment : .upstreamChange
+    case .malformed: return .upstreamChange
+    case .noSource: return .upstreamChange
+    case .transport: return .network
+    }
+  }
+
+  private static func httpStatus(for error: Error) -> Int? {
+    guard let failure = error as? ResolveFailure, case let .http(status) = failure else {
+      return nil
+    }
+    return status
   }
 
   private static func describe(_ error: Error) -> String {
