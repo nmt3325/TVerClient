@@ -452,26 +452,9 @@ final class DownloadCenter: ObservableObject {
         let current = state(for: program.id)
         if current.isFinished || current.isInFlight { return .alreadyPresent }
 
-        if let reason = driver.unavailableReason {
-            lastRejection = Rejection(programID: program.id, message: reason, program: program)
-            return .rejected(reason: reason)
-        }
-
-        // 圈外では黙って始めても失敗するだけなので、始める前に理由を返す。
-        if networkStatus() == .unavailable {
-            let message = "オフラインのため\(Vocabulary.Download.action)を開始できませんでした。"
-            lastRejection = Rejection(
-                programID: program.id,
-                message: message,
-                recovery: "Wi-Fiまたはモバイル通信に接続してから、もう一度お試しください。",
-                program: program
-            )
-            return .rejected(reason: message)
-        }
-
-        if let rejection = cellularRejection(for: program, allowingCellular: allowingCellular) {
-            lastRejection = rejection
-            return .blockedByCellular
+        if let refusal = startRefusal(for: program, allowingCellular: allowingCellular) {
+            lastRejection = refusal.rejection
+            return refusal.result
         }
 
         lastRejection = nil
@@ -564,9 +547,20 @@ final class DownloadCenter: ObservableObject {
     }
 
     /// 残骸を片付けてから最初からやり直す。中断した転送の唯一の出口。
+    ///
+    /// 消す前に必ず `start()` の可否を確かめる。以前は記録と実体を先に
+    /// 消していたため、シミュレータ・圏外・Wi-Fi限定で断られると行そのものが
+    /// 一覧から消え、途中まで受け取ったデータごと戻せなくなっていた。
     @discardableResult
     func restart(_ program: TVerProgram, allowingCellular: Bool = false) -> DownloadStartResult {
         let programID = program.id
+        if let refusal = startRefusal(for: program, allowingCellular: allowingCellular) {
+            // 通らないと分かった時点で返す。行も途中までの実体も何も消さない。
+            lastRejection = refusal.rejection
+            return refusal.result
+        }
+
+        let previous = records.first { entry in entry.id == programID }
         resolutions[programID]?.cancel()
         resolutions[programID] = nil
         driver.cancel(programID: programID)
@@ -576,7 +570,31 @@ final class DownloadCenter: ObservableObject {
         dismissNotice(Self.failureNoticeID(programID))
         records.removeAll { entry in entry.id == programID }
         persistRecords()
-        return start(program, allowingCellular: allowingCellular)
+
+        let result = start(program, allowingCellular: allowingCellular)
+        switch result {
+        case .started, .alreadyPresent:
+            return result
+        case .blockedByCellular, .rejected:
+            // 事前判定をすり抜けたときの保険。畳んでしまった行を戻してから返す。
+            if let previous { reinstate(previous) }
+            return result
+        }
+    }
+
+    /// やり直しに失敗したときに、消してしまった行を一覧へ戻す。
+    ///
+    /// 実体はすでに手元にないので、続きからは進めない行として戻す。黙って
+    /// 一覧から消えるより、やり直せる行が残っている方が利用者は困らない。
+    private func reinstate(_ record: DownloadRecord) {
+        guard !records.contains(where: { entry in entry.id == record.id }) else { return }
+        var restored = record
+        restored.state = .paused(progress: Self.inFlightProgress(record.state))
+        restored.updatedAt = Date()
+        records.insert(restored, at: 0)
+        interruptedIDs.insert(record.id)
+        persistRecords()
+        refreshStorage()
     }
 
     func retry(_ programID: String) {
@@ -585,19 +603,65 @@ final class DownloadCenter: ObservableObject {
     }
 
     /// お知らせの「最初からやり直す」からまとめて呼ばれる。
+    ///
+    /// 1件分の拒否だけを出して残りを黙らせない。断られた件数と理由、次の一手を
+    /// まとめてお知らせにする。
     func restartAll(_ programIDs: [String]) {
+        var refusedIDs: [String] = []
+        var refusedTitles: [String] = []
+        var reasons: [String] = []
+        var recoveries: [String] = []
+        var onlyCellular = true
+
         for programID in programIDs {
             guard let record = records.first(where: { entry in entry.id == programID }) else {
                 continue
             }
-            restart(record.program)
+            let result = restart(record.program)
+            if result == .started || result == .alreadyPresent { continue }
+            if result != .blockedByCellular { onlyCellular = false }
+            refusedIDs.append(programID)
+            refusedTitles.append(Self.displayTitle(record.program))
+            if let reason = lastRejection?.message, !reasons.contains(reason) {
+                reasons.append(reason)
+            }
+            if let recovery = lastRejection?.recovery, !recoveries.contains(recovery) {
+                recoveries.append(recovery)
+            }
         }
+
+        guard !refusedIDs.isEmpty else { return }
+        let details = ([Self.joined(refusedTitles)] + reasons + recoveries)
+            .filter { text in !text.isEmpty }
+            .joined(separator: " ")
+        post(DownloadNotice(
+            id: "download.restart.refused",
+            kind: .warning,
+            message: "\(refusedIDs.count)件を最初からやり直せませんでした。一覧はそのまま残しています。",
+            recovery: details,
+            action: onlyCellular
+                ? .resumeOnCellular(
+                    programIDs: refusedIDs,
+                    label: "今回だけモバイル通信でやり直す"
+                )
+                : .restart(programIDs: refusedIDs, label: "もう一度やり直す")
+        ))
     }
 
     /// Wi-Fi制限で止めた分を、今回だけモバイル通信で進める。
+    ///
+    /// 続きから戻せない行は `resume()` が弾いてしまう。その場合はやり直しに
+    /// 回して、押しても何も起きないボタンを残さない。
     func resumeAllAllowingCellular(_ programIDs: [String]) {
         for programID in programIDs {
-            resume(programID, allowingCellular: true)
+            guard let record = records.first(where: { entry in entry.id == programID }) else {
+                continue
+            }
+            if case .paused = record.state {
+                resume(programID, allowingCellular: true)
+            } else if !record.state.isFinished {
+                restart(record.program, allowingCellular: true)
+            }
         }
     }
 
@@ -651,6 +715,37 @@ final class DownloadCenter: ObservableObject {
     }
 
     // MARK: - Wi-Fi restriction
+
+    /// `start()` が受け付けない理由と、返すべき結果。
+    ///
+    /// 判定を関数にまとめておかないと、記録を消してから断られる経路（やり直し）
+    /// で行だけが失われる。始める前に必ずここを通す。
+    private func startRefusal(
+        for program: TVerProgram,
+        allowingCellular: Bool
+    ) -> (rejection: Rejection, result: DownloadStartResult)? {
+        if let reason = driver.unavailableReason {
+            let rejection = Rejection(programID: program.id, message: reason, program: program)
+            return (rejection, .rejected(reason: reason))
+        }
+
+        // 圏外では黙って始めても失敗するだけなので、始める前に理由を返す。
+        if networkStatus() == .unavailable {
+            let message = "オフラインのため\(Vocabulary.Download.action)を開始できませんでした。"
+            let rejection = Rejection(
+                programID: program.id,
+                message: message,
+                recovery: "Wi-Fiまたはモバイル通信に接続してから、もう一度お試しください。",
+                program: program
+            )
+            return (rejection, .rejected(reason: message))
+        }
+
+        if let rejection = cellularRejection(for: program, allowingCellular: allowingCellular) {
+            return (rejection, .blockedByCellular)
+        }
+        return nil
+    }
 
     /// Wi-Fi限定の判定を一か所にまとめる。経路ごとに書くと必ずどこかが抜ける。
     private func cellularRejection(
