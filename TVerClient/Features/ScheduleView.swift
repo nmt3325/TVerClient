@@ -339,6 +339,10 @@ struct ScheduleView: View {
             // 隠れない位置に置いて、古い内容を最新と取り違えさせない。
             FreshnessBanner(freshness: viewModel.freshness, retry: { reload() })
 
+            // 絞り込みはツールバーの奥で設定するので、効いていること自体に気づけない。
+            // 結果の上に固定で出して、その場で外せるようにする。
+            ProgramSearchFilterSummaryBar(viewModel: searchViewModel)
+
             List {
                 if isSearchPresentationActive {
                     searchSection
@@ -380,16 +384,10 @@ struct ScheduleView: View {
     @ViewBuilder
     private var searchSection: some View {
         Section {
-            if searchedPrograms.isEmpty, !searchViewModel.isFiltering {
-                ContentStatusView(
-                    .empty(
-                        title: "条件に合う番組がありません",
-                        message: "検索語や絞り込み条件を変えて、もう一度お試しください。",
-                        systemImage: "magnifyingglass"
-                    ),
-                    retryTitle: "条件をクリア",
-                    retry: { resetSearch() }
-                )
+            if searchedPrograms.isEmpty {
+                // 「入力中」と「0 件」を描き分け、0 件のときは何で探した結果なのかと
+                // 効いている絞り込みまで本文に出す。自前の表示に戻すとその区別が消える。
+                ProgramSearchStatusView(viewModel: searchViewModel, onReset: { resetSearch() })
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
