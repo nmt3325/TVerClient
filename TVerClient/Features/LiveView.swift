@@ -6,32 +6,70 @@ final class LiveViewModel: ObservableObject {
     @Published private(set) var channels: [TVerLiveChannel] = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
+    /// 直近の取得で使ったエリア。エリアを切り替えたときだけ取り直すために持つ。
+    @Published private(set) var loadedArea: TVerArea?
+
     private let service: any TVerLiveServicing
+    /// エリア対応の実装を持っているサービスならこちらを使う。init のシグネチャは
+    /// 契約で固定なので、ここでキャストして拾う。
+    private let areaService: (any TVerAreaAwareServicing)?
     private let usesPreviewFallback: Bool
     private var hasLoaded = false
+    private var currentArea: TVerArea?
 
     init(service: any TVerLiveServicing, usesPreviewFallback: Bool = true) {
         self.service = service
+        areaService = service as? any TVerAreaAwareServicing
         self.usesPreviewFallback = usesPreviewFallback
     }
 
+    /// エリア切替をサービス側が理解できるか。
+    var supportsAreaSwitching: Bool { areaService != nil }
+
+    /// 配信中（即座に見られる）チャンネル数。
+    var playableChannelCount: Int { channels.filter(\.isPlayable).count }
+
     func loadIfNeeded() async {
-        guard !hasLoaded else { return }
-        await load()
+        await loadIfNeeded(area: currentArea)
+    }
+
+    func loadIfNeeded(area: TVerArea?) async {
+        guard !hasLoaded || loadedArea?.code != area?.code else { return }
+        await load(area: area, forceRefresh: false)
     }
 
     func load() async {
+        await load(area: currentArea, forceRefresh: false)
+    }
+
+    func load(area: TVerArea?) async {
+        await load(area: area, forceRefresh: false)
+    }
+
+    /// 引き下げ更新。エリア別キャッシュを跨いで取り直す。
+    func refresh() async {
+        await load(area: currentArea, forceRefresh: true)
+    }
+
+    private func load(area: TVerArea?, forceRefresh: Bool) async {
         guard !isLoading else { return }
+        currentArea = area
         isLoading = true
         errorMessage = nil
         do {
-            let response = try await service.fetchLiveChannels()
+            let response: [TVerLiveChannel]
+            if let areaService {
+                response = try await areaService.fetchLiveChannels(area: area, forceRefresh: forceRefresh)
+            } else {
+                response = try await service.fetchLiveChannels(forceRefresh: forceRefresh)
+            }
             #if DEBUG
                 channels = response.isEmpty && usesPreviewFallback ? PreviewFixture.liveChannels : response
             #else
                 channels = response
             #endif
             hasLoaded = true
+            loadedArea = area
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             DiagnosticLogStore.shared.record(
@@ -48,6 +86,8 @@ final class LiveViewModel: ObservableObject {
 struct LiveView: View {
     @StateObject private var viewModel: LiveViewModel
     @ObservedObject private var playbackController: PlaybackController
+    @EnvironmentObject private var areaStore: AreaStore
+    @Environment(\.openURL) private var openURL
     @State private var selectedChannel: TVerLiveChannel?
 
     init(viewModel: LiveViewModel, playbackController: PlaybackController) {
@@ -57,113 +97,181 @@ struct LiveView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if viewModel.isLoading && viewModel.channels.isEmpty {
-                    ScheduleStatusView(title: "ライブを読み込み中", message: "公式TVerのリアルタイム配信情報を取得しています。", systemImage: "dot.radiowaves.left.and.right") {
-                        ProgressView().controlSize(.large)
-                    }
-                } else if let error = viewModel.errorMessage, viewModel.channels.isEmpty {
-                    ScheduleStatusView(title: "ライブを読み込めませんでした", message: error, systemImage: "wifi.exclamationmark") {
-                        Button("再試行") { Task { await viewModel.load() } }
-                            .buttonStyle(.borderedProminent).controlSize(.large)
-                    }
-                } else if viewModel.channels.isEmpty {
-                    ScheduleStatusView(title: "ライブ配信がありません", message: "時間をおいて、もう一度更新してください。", systemImage: "tv.slash") {
-                        Button("更新") { Task { await viewModel.load() } }
-                            .buttonStyle(.bordered).controlSize(.large)
-                    }
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 14) {
-                            ForEach(viewModel.channels) { channel in
-                                LiveChannelCard(channel: channel) {
-                                    DiagnosticLogStore.shared.record(
-                                        .info,
-                                        category: "playback",
-                                        message: "Live playback selected"
-                                    )
-                                    selectedChannel = channel
-                                }
-                            }
-                        }
-                        .padding(16)
-                    }
-                    .refreshable { await viewModel.load() }
-                    .overlay(alignment: .top) {
-                        if viewModel.isLoading {
-                            ProgressView().padding(10).background(.regularMaterial, in: Circle()).padding(.top, 8)
-                                .accessibilityLabel("更新中")
-                        }
-                    }
+            content
+                .navigationTitle("ライブ")
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) { areaPicker }
                 }
-            }
-            .navigationTitle("ライブ")
-            .background(Color(uiColor: .systemGroupedBackground))
         }
-        .task { await viewModel.loadIfNeeded() }
+        .task { await viewModel.loadIfNeeded(area: areaStore.selected) }
+        .onChange(of: areaStore.selected) { newArea in
+            Task { await viewModel.load(area: newArea) }
+        }
         .sheet(item: $selectedChannel) { channel in
             LivePlaybackView(channel: channel, playbackController: playbackController)
         }
     }
-}
 
-struct LiveChannelCard: View {
-    let channel: TVerLiveChannel
-    let onWatch: () -> Void
+    @ViewBuilder
+    private var content: some View {
+        if viewModel.isLoading, viewModel.channels.isEmpty {
+            ContentStatusView(.loading("リアルタイム配信を読み込み中"))
+        } else if let error = viewModel.errorMessage, viewModel.channels.isEmpty {
+            ContentStatusView(.failure(title: "ライブを読み込めませんでした", message: error)) {
+                Button("再試行") { Task { await viewModel.refresh() } }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
+        } else if viewModel.channels.isEmpty {
+            ContentStatusView(
+                .empty(
+                    title: "配信中のチャンネルがありません",
+                    message: "時間をおいて、もう一度更新してください。",
+                    systemImage: "tv.slash"
+                )
+            ) {
+                Button("更新") { Task { await viewModel.refresh() } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+            }
+        } else {
+            channelList
+        }
+    }
 
-    private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
+    private var channelList: some View {
+        List {
+            Section { availabilityNotice }
+            Section {
+                ForEach(viewModel.channels) { channel in
+                    row(for: channel)
+                }
+            } header: {
+                SectionHeader(
+                    "チャンネル",
+                    subtitle: "\(viewModel.playableChannelCount)/\(viewModel.channels.count) が今すぐ見られます"
+                )
+            }
+        }
+        .listStyle(.plain)
+        .refreshable { await viewModel.refresh() }
+        .overlay(alignment: .top) { refreshIndicator }
+    }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            Button(action: onWatch) {
-                HStack(alignment: .top, spacing: 14) {
-                    ProgramThumbnail(url: channel.currentProgram?.thumbnailURL ?? channel.iconURL)
-                        .frame(width: 136, height: 77)
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(channel.name).font(.headline).foregroundStyle(.primary)
-                            Spacer(minLength: 6)
-                            Text(channel.state.label)
-                                .font(.caption.bold())
-                                .foregroundStyle(channel.state == .onAir ? Color.red : Color.secondary)
+    /// 再生を試す前に、このエリアで何が見られるのかを先に出す。
+    private var availabilityNotice: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+            Label(TVerAreaAvailability.headline(for: areaStore.selected), systemImage: "info.circle")
+                .font(.footnote.weight(.semibold))
+            Text(TVerAreaAvailability.detail(for: areaStore.selected))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, DS.Spacing.xs)
+        .listRowSeparator(.hidden)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func row(for channel: TVerLiveChannel) -> some View {
+        Button {
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: "Live playback selected"
+            )
+            selectedChannel = channel
+        } label: {
+            MediaRow(
+                title: channel.currentProgram?.seriesTitle ?? channel.name,
+                subtitle: subtitle(for: channel),
+                detail: detail(for: channel),
+                thumbnailURL: channel.currentProgram?.thumbnailURL ?? channel.iconURL,
+                badges: badges(for: channel)
+            ) {
+                Image(systemName: channel.isPlayable ? "play.circle.fill" : "nosign")
+                    .font(.title3)
+                    .foregroundStyle(channel.isPlayable ? DS.Palette.live : Color.secondary)
+                    .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
+                    .accessibilityHidden(true)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!channel.isPlayable)
+        .opacity(channel.isPlayable ? 1 : 0.45)
+        .listRowInsets(EdgeInsets(top: 0, leading: DS.Spacing.l, bottom: 0, trailing: DS.Spacing.l))
+        .accessibilityLabel(TVerAccessibilityText.live(channel: channel))
+        .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
+        .contextMenu { rowMenu(for: channel) }
+    }
+
+    @ViewBuilder
+    private func rowMenu(for channel: TVerLiveChannel) -> some View {
+        let shareItem = ProgramShareItem(channel: channel)
+        ShareLink(
+            item: shareItem.url,
+            subject: Text(shareItem.subject),
+            message: Text(shareItem.message)
+        ) {
+            Label("共有", systemImage: "square.and.arrow.up")
+        }
+        Button {
+            openURL(channel.webURL)
+        } label: {
+            Label("TVer公式ページで開く", systemImage: "safari")
+        }
+    }
+
+    private var areaPicker: some View {
+        Menu {
+            Picker("エリア", selection: $areaStore.selected) {
+                ForEach(areaStore.groupedAreas) { group in
+                    Section(group.name) {
+                        ForEach(group.areas) { area in
+                            Text(area.name).tag(area)
                         }
-                        Text(channel.currentProgram?.seriesTitle ?? "番組情報なし")
-                            .font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(2)
-                        if let program = channel.currentProgram {
-                            Text(program.timeLabel).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Text(channel.currentProgram?.title ?? "現在の番組を取得できませんでした。")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(CardButtonStyle())
-            .disabled(!channel.isPlayable)
-            .opacity(channel.isPlayable ? 1 : 0.72)
-            .accessibilityLabel(TVerAccessibilityText.live(channel: channel))
-            .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
-
-            Divider().padding(.leading, 12)
-            HStack(spacing: 8) {
-                ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
-                    Label("共有", systemImage: "square.and.arrow.up")
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                Spacer(minLength: 8)
-                Button(action: onWatch) {
-                    Label(channel.isPlayable ? "視聴" : "視聴不可", systemImage: "play.fill")
-                        .frame(minHeight: 44)
-                }
-                .disabled(!channel.isPlayable)
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 12)
+        } label: {
+            Label(areaStore.selected.name, systemImage: "mappin.and.ellipse")
+                .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
         }
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color(uiColor: .separator).opacity(0.22)) }
+        .accessibilityLabel("エリアを選択")
+        .accessibilityValue(areaStore.selected.name)
+    }
+
+    @ViewBuilder
+    private var refreshIndicator: some View {
+        if viewModel.isLoading, !viewModel.channels.isEmpty {
+            ProgressView()
+                .padding(DS.Spacing.s)
+                .background(.regularMaterial, in: Circle())
+                .padding(.top, DS.Spacing.s)
+                .accessibilityLabel("更新中")
+        }
+    }
+
+    /// 再生できない行は、その理由を番組名より先に見せる。
+    private func subtitle(for channel: TVerLiveChannel) -> String {
+        if let caution = TVerAreaAvailability.rowCaution(for: channel) { return caution }
+        return channel.currentProgram?.title ?? "番組情報を取得できませんでした"
+    }
+
+    private func detail(for channel: TVerLiveChannel) -> String {
+        var parts = [channel.name]
+        if let program = channel.currentProgram {
+            parts.append(program.timeLabel)
+        }
+        return parts.joined(separator: "・")
+    }
+
+    private func badges(for channel: TVerLiveChannel) -> [MediaBadge] {
+        switch channel.state {
+        case .onAir: return [MediaBadge(.live)]
+        case .paused: return [MediaBadge(.catchUpChecking, text: "配信休止")]
+        case .unavailable: return [MediaBadge(.noCatchUp, text: "配信なし")]
+        }
     }
 }
 

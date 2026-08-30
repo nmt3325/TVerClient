@@ -1,0 +1,25 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "channel",
+        "content": { "id": "kanto01", "version": 1, "name": "関東テスト1" },
+        "video": {
+          "apiKey": "kanto01",
+          "projectID": "placeholder-simul-kanto01",
+          "mediaID": "ref:placeholder-simul-kanto01"
+        }
+      },
+      {
+        "type": "channel",
+        "content": { "id": "kanto02", "version": 1, "name": "関東テスト2" },
+        "video": {
+          "apiKey": "kanto02",
+          "projectID": "placeholder-simul-kanto02",
+          "mediaID": "ref:placeholder-simul-kanto02"
+        }
+      }
+    ]
+  }
+}
