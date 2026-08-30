@@ -41,7 +41,13 @@ final class ProgramImagePipeline: @unchecked Sendable {
         let completion: Completion
     }
 
+    /// `generation` identifies one concrete download attempt for a URL.
+    ///
+    /// The same URL can be requested again while a previously cancelled task is still
+    /// winding down, so every callback has to prove that it belongs to the attempt that
+    /// is currently registered for that URL before it consumes its subscribers.
     private struct InFlightRequest {
+        let generation: UUID
         let task: URLSessionDataTask
         var subscribers: [UUID: Subscriber]
     }
@@ -49,6 +55,7 @@ final class ProgramImagePipeline: @unchecked Sendable {
     private let session: URLSession
     private let cache: NSCache<NSURL, UIImage>
     private let maximumResponseBytes: Int
+    private let screenScale: CGFloat
     private let callbackQueue: DispatchQueue
     private let lock = NSLock()
     private var inFlight: [URL: InFlightRequest] = [:]
@@ -59,14 +66,17 @@ final class ProgramImagePipeline: @unchecked Sendable {
         cache: NSCache<NSURL, UIImage> = NSCache(),
         maximumResponseBytes: Int = 8 * 1_024 * 1_024,
         maximumCacheBytes: Int = 48 * 1_024 * 1_024,
+        screenScale: CGFloat = UIScreen.main.scale,
         callbackQueue: DispatchQueue = .main
     ) {
         precondition(maximumResponseBytes > 0)
         precondition(maximumCacheBytes > 0)
+        precondition(screenScale > 0)
 
         self.session = session
         self.cache = cache
         self.maximumResponseBytes = maximumResponseBytes
+        self.screenScale = screenScale
         self.callbackQueue = callbackQueue
         cache.totalCostLimit = maximumCacheBytes
         cache.countLimit = 200
@@ -116,10 +126,8 @@ final class ProgramImagePipeline: @unchecked Sendable {
             return token
         }
 
-        token.installCancellation { [weak self, weak token] in
-            guard let self, let token else { return }
-            self.cancel(url: url, requestID: token.id)
-        }
+        let generation: UUID
+        var taskToStart: URLSessionDataTask?
 
         lock.lock()
         if let image = cache.object(forKey: url as NSURL) {
@@ -129,43 +137,76 @@ final class ProgramImagePipeline: @unchecked Sendable {
         }
 
         if var existing = inFlight[url] {
+            generation = existing.generation
             existing.subscribers[requestID] = Subscriber(token: token, completion: completion)
             inFlight[url] = existing
-            lock.unlock()
-            return token
-        }
+        } else {
+            let newGeneration = UUID()
+            generation = newGeneration
 
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 30
-        request.httpShouldHandleCookies = false
-        request.setValue("image/*", forHTTPHeaderField: "Accept")
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 30
+            request.httpShouldHandleCookies = false
+            request.setValue("image/*", forHTTPHeaderField: "Accept")
 
-        let task = session.dataTask(with: request) { [weak self] data, response, error in
-            self?.finish(url: url, data: data, response: response, error: error)
+            let task = session.dataTask(with: request) { [weak self] data, response, error in
+                self?.finish(
+                    url: url,
+                    generation: newGeneration,
+                    data: data,
+                    response: response,
+                    error: error
+                )
+            }
+            inFlight[url] = InFlightRequest(
+                generation: newGeneration,
+                task: task,
+                subscribers: [requestID: Subscriber(token: token, completion: completion)]
+            )
+            taskToStart = task
         }
-        inFlight[url] = InFlightRequest(
-            task: task,
-            subscribers: [requestID: Subscriber(token: token, completion: completion)]
-        )
         lock.unlock()
 
-        task.resume()
+        taskToStart?.resume()
+
+        token.installCancellation { [weak self] in
+            self?.cancel(url: url, generation: generation, requestID: requestID)
+        }
+
         return token
     }
 
-    private func finish(url: URL, data: Data?, response: URLResponse?, error: Error?) {
+    private func finish(
+        url: URL,
+        generation: UUID,
+        data: Data?,
+        response: URLResponse?,
+        error: Error?
+    ) {
         lock.lock()
-        guard let request = inFlight.removeValue(forKey: url) else {
+        let isCurrentAttempt = inFlight[url]?.generation == generation
+        lock.unlock()
+
+        // A cancelled task still reports back after the URL has been requested again.
+        // Without this guard the stale callback consumed the newer attempt's subscribers
+        // and handed them the cancellation error.
+        guard isCurrentAttempt else { return }
+
+        let result = makeResult(data: data, response: response, error: error)
+
+        lock.lock()
+        guard let request = inFlight[url], request.generation == generation else {
             lock.unlock()
             return
         }
-        lock.unlock()
-
-        let result = makeResult(url: url, data: data, response: response, error: error)
+        inFlight.removeValue(forKey: url)
+        // Publishing the image before releasing the lock keeps the cache write and the
+        // in-flight removal atomic for callers that look both up under the same lock.
         if case let .success(image) = result {
             cache.setObject(image, forKey: url as NSURL, cost: image.memoryCost)
         }
+        lock.unlock()
 
         for subscriber in request.subscribers.values {
             deliver(result, to: subscriber.token, completion: subscriber.completion)
@@ -173,7 +214,6 @@ final class ProgramImagePipeline: @unchecked Sendable {
     }
 
     private func makeResult(
-        url: URL,
         data: Data?,
         response: URLResponse?,
         error: Error?
@@ -185,9 +225,13 @@ final class ProgramImagePipeline: @unchecked Sendable {
             return .failure(.transport(error.localizedDescription))
         }
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.url == url
-        else {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return .failure(.invalidResponse)
+        }
+        // URLSession follows redirects transparently, so this URL is the final one and
+        // not the requested one. The attempt itself is already identified by its
+        // generation, so validate the host allowlist instead of exact equality.
+        guard let responseURL = httpResponse.url, Self.isPermitted(responseURL) else {
             return .failure(.invalidResponse)
         }
         guard (200 ..< 300).contains(httpResponse.statusCode) else {
@@ -207,17 +251,19 @@ final class ProgramImagePipeline: @unchecked Sendable {
         guard data.count <= maximumResponseBytes else {
             return .failure(.responseTooLarge(maximumBytes: maximumResponseBytes))
         }
-        guard let image = UIImage(data: data, scale: UIScreen.main.scale) else {
+        guard let image = UIImage(data: data, scale: screenScale) else {
             return .failure(.decodingFailed)
         }
-        return .success(image)
+        // Decode here, on the session queue. Otherwise the first draw of every thumbnail
+        // decodes on the main thread and drops frames while the guide is scrolling.
+        return .success(image.preparingForDisplay() ?? image)
     }
 
-    private func cancel(url: URL, requestID: UUID) {
+    private func cancel(url: URL, generation: UUID, requestID: UUID) {
         var taskToCancel: URLSessionDataTask?
 
         lock.lock()
-        if var request = inFlight[url] {
+        if var request = inFlight[url], request.generation == generation {
             request.subscribers.removeValue(forKey: requestID)
             if request.subscribers.isEmpty {
                 inFlight.removeValue(forKey: url)
