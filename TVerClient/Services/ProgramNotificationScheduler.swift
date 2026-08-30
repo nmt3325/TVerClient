@@ -272,6 +272,11 @@ actor ProgramNotificationScheduler {
         return request
     }
 
+    /// 開始時刻が変わった番組の通知を取り直す。
+    ///
+    /// 取り直せなかったときは古い開始時刻の予約を解除してから throw する。
+    /// 黙って消さないため、呼び出し側は isScheduled(programID:channelID:) で
+    /// 実態を見直し、解除されたことを画面と読み上げに出すこと。
     @discardableResult
     func update(
         program: TVerLiveProgram,
@@ -285,13 +290,11 @@ actor ProgramNotificationScheduler {
         // request would stay queued and fire for a start time this programme no longer has.
         do {
             return try await schedule(program: program, channel: channel, leadTime: leadTime, now: now)
-        } catch ProgramNotificationSchedulerError.notificationTimePassed {
-            // この予約はもう意味がないので消す。
-            await cancel(programID: program.id, channelID: channel.id)
-            throw ProgramNotificationSchedulerError.notificationTimePassed
         } catch {
-            // 許可切れや上限超えで失敗しただけのときに古い予約まで黙って消すと、
-            // 画面は「予約済み」のまま通知だけが消える。残して呼び出し側に状態を確かめさせる。
+            // 取り直せなかったのに古い予約を残すと、実際の放送とずれた時刻に通知が鳴る。
+            // 時刻切れでも許可切れでも上限超えでも危うさは同じなので、失敗した経路では必ず解除する。
+            // 解除したこと自体は、呼び出し側が予約状態を見直して利用者に伝える。
+            await cancel(programID: program.id, channelID: channel.id)
             throw error
         }
     }
