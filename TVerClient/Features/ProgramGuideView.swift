@@ -20,6 +20,9 @@ final class ProgramGuideViewModel: ObservableObject {
     @Published private(set) var freshness: LoadFreshness = .fresh(at: Date())
 
     private let service: any TVerProgramGuideServicing
+    /// 鮮度付きで返せるサービスならこちらを使う。キャッシュ代替表示を
+    /// 「最新の情報です」と言わないために、取得元と取得時刻ごと受け取る。
+    private let snapshotProvider: (any TVerProgramGuideSnapshotProviding)?
     private let usesPreviewFallback: Bool
     private let snapshotStore: ProgramGuideSnapshotStore?
     private let now: () -> Date
@@ -33,6 +36,7 @@ final class ProgramGuideViewModel: ObservableObject {
         now: @escaping () -> Date = Date.init
     ) {
         self.service = service
+        snapshotProvider = service as? any TVerProgramGuideSnapshotProviding
         self.usesPreviewFallback = usesPreviewFallback
         self.snapshotStore = snapshotStore
         self.now = now
@@ -77,7 +81,8 @@ final class ProgramGuideViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         do {
-            let response = try await service.fetchProgramGuide(forceRefresh: hasLoaded)
+            let snapshot = try await guideSnapshot(forceRefresh: hasLoaded)
+            let response = snapshot.channels
             #if DEBUG
                 let resolved = response.contains(where: { !$0.programs.isEmpty }) || !usesPreviewFallback
                     ? response : PreviewFixture.programGuide
@@ -86,12 +91,22 @@ final class ProgramGuideViewModel: ObservableObject {
             #endif
             guide = resolved
             hasLoaded = true
-            let updatedAt = now()
-            lastUpdatedAt = updatedAt
-            isShowingCachedData = false
-            freshness = .fresh(at: updatedAt)
-            if let snapshotStore, resolved.contains(where: { !$0.programs.isEmpty }) {
-                await snapshotStore.save(resolved, at: updatedAt)
+            // 取得元と取得時刻をそのまま反映する。キャッシュ代替を最新扱いにしない。
+            freshness = snapshot.freshness
+            switch snapshot.freshness {
+            case let .fresh(at):
+                lastUpdatedAt = at
+                isShowingCachedData = false
+                // 最新を取れたときだけ控えを取り直す。古い内容で上書きしない。
+                if let snapshotStore, resolved.contains(where: { !$0.programs.isEmpty }) {
+                    await snapshotStore.save(resolved, at: at)
+                }
+            case let .cached(at, _):
+                lastUpdatedAt = at
+                isShowingCachedData = true
+            case let .refreshFailed(lastGoodAt, _, _):
+                lastUpdatedAt = lastGoodAt ?? lastUpdatedAt
+                isShowingCachedData = !resolved.isEmpty
             }
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -111,6 +126,16 @@ final class ProgramGuideViewModel: ObservableObject {
             )
         }
         isLoading = false
+    }
+
+    /// 鮮度付きで返せるサービスならそのまま使い、そうでなければ取得できた時点を
+    /// 取得時刻として包む。
+    private func guideSnapshot(forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
+        if let snapshotProvider {
+            return try await snapshotProvider.fetchProgramGuideSnapshot(forceRefresh: forceRefresh)
+        }
+        let response = try await service.fetchProgramGuide(forceRefresh: forceRefresh)
+        return GuideChannelsSnapshot(channels: response, freshness: .fresh(at: now()))
     }
 }
 
