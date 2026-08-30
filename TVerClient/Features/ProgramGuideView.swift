@@ -123,6 +123,9 @@ enum ProgramGuideMetrics {
 struct ProgramGuideView: View {
     @StateObject private var viewModel: ProgramGuideViewModel
     @ObservedObject private var playbackController: PlaybackController
+    // Shared library store passed down from RootTabView. Wired here so the
+    // guide branch compiles standalone; the catch-up work owns its real use.
+    @ObservedObject private var libraryStore: ProgramLibraryStore
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedDate = ProgramGuideMetrics.calendar.startOfDay(for: Date())
     @State private var selectedProgram: ProgramGuideSelection?
@@ -131,10 +134,12 @@ struct ProgramGuideView: View {
     init(
         viewModel: ProgramGuideViewModel,
         playbackController: PlaybackController,
+        libraryStore: ProgramLibraryStore,
         notificationScheduler: ProgramNotificationScheduler = ProgramNotificationScheduler()
     ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.playbackController = playbackController
+        self.libraryStore = libraryStore
         self.notificationScheduler = notificationScheduler
     }
 
