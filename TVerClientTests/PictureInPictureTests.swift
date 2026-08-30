@@ -139,6 +139,65 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertTrue(layer.player === player)
     }
 
+    func testStopCancelsAStartThatTheDriverNeverConfirmed() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+
+        coordinator.start()
+        XCTAssertEqual(coordinator.state, .starting)
+
+        // The driver can drop a start without ever calling back, so the stop
+        // request has to cancel it instead of being ignored.
+        coordinator.stop()
+        XCTAssertEqual(driver.stopCount, 1)
+        XCTAssertEqual(coordinator.state, .inactive, "a pending start must not become a dead end")
+
+        coordinator.start()
+        XCTAssertEqual(coordinator.state, .starting, "the coordinator has to accept a new start")
+        XCTAssertEqual(driver.startCount, 2)
+    }
+
+    func testStopSettlesWhenTheSessionEndedWithoutADelegateCallback() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+        coordinator.start()
+        driver.simulateDidStart()
+        XCTAssertEqual(coordinator.state, .active)
+
+        // The session is gone but the delegate was never told about it.
+        driver.isPictureInPictureActive = false
+        coordinator.stop()
+
+        XCTAssertEqual(coordinator.state, .inactive, "stopping must not hang in .stopping forever")
+        coordinator.start()
+        XCTAssertEqual(coordinator.state, .starting)
+        XCTAssertEqual(driver.startCount, 2)
+    }
+
+    func testStartIsIgnoredWhileAStopIsStillInFlight() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+        coordinator.start()
+        driver.simulateDidStart()
+        coordinator.stop()
+        XCTAssertEqual(coordinator.state, .stopping)
+
+        coordinator.start()
+        XCTAssertEqual(driver.startCount, 1, "a start during teardown races the delegate callbacks")
+        XCTAssertEqual(coordinator.state, .stopping)
+
+        driver.simulateDidStop()
+        XCTAssertEqual(coordinator.state, .inactive)
+        coordinator.start()
+        XCTAssertEqual(driver.startCount, 2)
+    }
+
     private func makeCoordinator(
         driver: FakePictureInPictureDriver
     ) -> PictureInPictureCoordinator {
