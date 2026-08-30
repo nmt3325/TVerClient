@@ -123,19 +123,25 @@ enum ProgramGuideMetrics {
 struct ProgramGuideView: View {
     @StateObject private var viewModel: ProgramGuideViewModel
     @ObservedObject private var playbackController: PlaybackController
+    @ObservedObject private var libraryStore: ProgramLibraryStore
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedDate = ProgramGuideMetrics.calendar.startOfDay(for: Date())
     @State private var selectedProgram: ProgramGuideSelection?
     private let notificationScheduler: ProgramNotificationScheduler
+    private let catchUpLookup: GuideCatchUpLookup
 
     init(
         viewModel: ProgramGuideViewModel,
         playbackController: PlaybackController,
-        notificationScheduler: ProgramNotificationScheduler = ProgramNotificationScheduler()
+        libraryStore: ProgramLibraryStore,
+        notificationScheduler: ProgramNotificationScheduler = ProgramNotificationScheduler(),
+        catchUpService: any TVerCatchUpLookupServicing = TVerAPIClient()
     ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.playbackController = playbackController
+        self.libraryStore = libraryStore
         self.notificationScheduler = notificationScheduler
+        catchUpLookup = GuideCatchUpLookup(service: catchUpService)
     }
 
     var body: some View {
@@ -203,7 +209,9 @@ struct ProgramGuideView: View {
             ProgramGuideDetailSheet(
                 selection: selection,
                 playbackController: playbackController,
-                notificationScheduler: notificationScheduler
+                libraryStore: libraryStore,
+                notificationScheduler: notificationScheduler,
+                catchUpLookup: catchUpLookup
             )
             .presentationDetents([.medium, .large])
         }
@@ -352,7 +360,13 @@ private struct ProgramGuideAccessibleList: View {
                                 .accessibilityAddTraits(.isHeader)
 
                             ForEach(programs) { program in
-                                let isOnAir = program.startAt <= Date() && Date() < program.endAt
+                                let now = Date()
+                                let isOnAir = program.startAt <= now && now < program.endAt
+                                let isCatchUpAvailable = GuidePlaybackRouter.route(
+                                    for: program,
+                                    channelState: item.channel.state,
+                                    now: now
+                                ) == .catchUp
                                 Button {
                                     onSelect(item.channel, program)
                                 } label: {
@@ -364,6 +378,9 @@ private struct ProgramGuideAccessibleList: View {
                                                 Text("放送中")
                                                     .font(.subheadline.bold())
                                                     .foregroundStyle(.red)
+                                            }
+                                            if isCatchUpAvailable {
+                                                GuideCatchUpBadge()
                                             }
                                         }
                                         Text(program.seriesTitle)
@@ -391,7 +408,11 @@ private struct ProgramGuideAccessibleList: View {
                                         isOnAir: isOnAir
                                     )
                                 )
-                                .accessibilityHint("ダブルタップして番組詳細を開きます")
+                                .accessibilityHint(
+                                    isCatchUpAvailable
+                                        ? "ダブルタップして番組詳細を開き、見逃し配信を再生できます"
+                                        : "ダブルタップして番組詳細を開きます"
+                                )
                                 .accessibilityAddTraits(isOnAir ? .isSelected : [])
                             }
                         }
@@ -567,7 +588,12 @@ private struct ProgramGuideCanvas: View {
                 ProgramGuideBlock(
                     stationName: item.channel.name,
                     program: program,
-                    isOnAir: program.startAt <= now && now < program.endAt
+                    isOnAir: program.startAt <= now && now < program.endAt,
+                    isCatchUpAvailable: GuidePlaybackRouter.route(
+                        for: program,
+                        channelState: item.channel.state,
+                        now: now
+                    ) == .catchUp
                 ) {
                     onSelect(item.channel, program)
                 }
@@ -598,6 +624,7 @@ private struct ProgramGuideBlock: View {
     let stationName: String
     let program: TVerLiveProgram
     let isOnAir: Bool
+    let isCatchUpAvailable: Bool
     let action: () -> Void
 
     var body: some View {
@@ -611,6 +638,9 @@ private struct ProgramGuideBlock: View {
                             Text("放送中")
                                 .font(.caption2.bold())
                                 .foregroundStyle(.red)
+                        }
+                        if isCatchUpAvailable {
+                            GuideCatchUpBadge()
                         }
                     }
                     .lineLimit(1)
@@ -644,7 +674,11 @@ private struct ProgramGuideBlock: View {
             program: program,
             isOnAir: isOnAir
         ))
-        .accessibilityHint("ダブルタップして番組詳細を開きます")
+        .accessibilityHint(
+            isCatchUpAvailable
+                ? "ダブルタップして番組詳細を開き、見逃し配信を再生できます"
+                : "ダブルタップして番組詳細を開きます"
+        )
         .accessibilityInputLabels([program.seriesTitle, program.title])
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
     }
@@ -672,11 +706,15 @@ struct ProgramGuideSelection: Identifiable {
 private struct ProgramGuideDetailSheet: View {
     let selection: ProgramGuideSelection
     @ObservedObject var playbackController: PlaybackController
+    @ObservedObject var libraryStore: ProgramLibraryStore
     let notificationScheduler: ProgramNotificationScheduler
+    let catchUpLookup: GuideCatchUpLookup
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var requestedPlayback = false
+    @State private var catchUpState: GuideCatchUpState = .idle
+    @State private var catchUpPlayback: TVerProgram?
     @State private var selectedLeadTime: ProgramNotificationLeadTime
     @State private var isNotificationScheduled = false
     @State private var isUpdatingNotification = false
@@ -686,23 +724,26 @@ private struct ProgramGuideDetailSheet: View {
     init(
         selection: ProgramGuideSelection,
         playbackController: PlaybackController,
-        notificationScheduler: ProgramNotificationScheduler
+        libraryStore: ProgramLibraryStore,
+        notificationScheduler: ProgramNotificationScheduler,
+        catchUpLookup: GuideCatchUpLookup
     ) {
         self.selection = selection
         self.playbackController = playbackController
+        self.libraryStore = libraryStore
         self.notificationScheduler = notificationScheduler
+        self.catchUpLookup = catchUpLookup
         let preferredLeadTime: ProgramNotificationLeadTime = selection.program.startAt
             .addingTimeInterval(-ProgramNotificationLeadTime.fiveMinutes.rawValue) > Date()
             ? .fiveMinutes : .atStart
         _selectedLeadTime = State(initialValue: preferredLeadTime)
     }
 
-    private var canPlay: Bool {
-        let now = Date()
-        return !selection.program.isPause
-            && selection.program.startAt <= now
-            && now < selection.program.endAt
+    private var route: GuidePlaybackRoute {
+        GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state)
     }
+
+    private var canPlay: Bool { route == .live }
 
     private var playbackChannel: TVerLiveChannel {
         TVerLiveChannel(
@@ -781,25 +822,47 @@ private struct ProgramGuideDetailSheet: View {
                         }
                     } else {
                         Button {
-                            if requestedPlayback, playbackController.player.currentItem != nil {
-                                playbackController.togglePlayback()
-                            } else {
-                                DiagnosticLogStore.shared.record(
-                                    .info,
-                                    category: "playback",
-                                    message: "Guide live playback selected"
-                                )
-                                requestedPlayback = true
-                                Task { await playbackController.playLive(playbackChannel) }
-                            }
+                            handlePlayAction()
                         } label: {
-                            Label(playButtonTitle, systemImage: playButtonIcon)
+                            if playButtonState.isSearching {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                    Text(GuidePlaybackButtonState.catchUpSearchingTitle)
+                                }
                                 .frame(maxWidth: .infinity, minHeight: 44)
+                            } else {
+                                Label(playButtonState.title, systemImage: playButtonState.systemImage)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        .disabled(!canPlay || (requestedPlayback && playbackController.state == .resolving))
-                        .accessibilityHint(canPlay ? "現在放送中の番組を再生します" : "放送中のみ再生できます")
+                        .disabled(!playButtonState.isEnabled)
+                        .accessibilityIdentifier(GuideAccessibilityIdentifier.playButton)
+                        .accessibilityLabel(playButtonState.title)
+                        .accessibilityHint(playButtonHint)
+                    }
+
+                    if let catchUpMessage {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label(catchUpMessage, systemImage: "exclamationmark.magnifyingglass")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier(GuideAccessibilityIdentifier.catchUpNotFound)
+
+                            Button { openURL(selection.channel.webURL) } label: {
+                                Label("TVer公式ページで開く", systemImage: "safari")
+                                    .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .accessibilityElement(children: .contain)
                     }
 
                     if requestedPlayback {
@@ -836,6 +899,13 @@ private struct ProgramGuideDetailSheet: View {
                         )
                 }
             }
+        }
+        .sheet(item: $catchUpPlayback) { program in
+            PlaybackView(
+                program: program,
+                playbackController: playbackController,
+                libraryStore: libraryStore
+            )
         }
     }
 
@@ -982,17 +1052,214 @@ private struct ProgramGuideDetailSheet: View {
         }
     }
 
-    private var playButtonTitle: String {
-        guard canPlay else { return selection.program.startAt > Date() ? "放送開始後に再生" : "放送終了" }
-        if requestedPlayback, playbackController.state == .resolving { return "再生を準備中" }
-        if requestedPlayback, playbackController.player.currentItem != nil {
-            return playbackController.isPlaying ? "一時停止" : "再生"
-        }
-        return "ライブを再生"
+    private var playButtonState: GuidePlaybackButtonState {
+        GuidePlaybackButtonState.make(
+            route: route,
+            program: selection.program,
+            catchUpState: catchUpState,
+            isLivePlaybackRequested: requestedPlayback,
+            isLiveResolving: playbackController.state == .resolving,
+            isLivePlaying: playbackController.isPlaying,
+            hasLivePlayerItem: playbackController.player.currentItem != nil
+        )
     }
 
-    private var playButtonIcon: String {
-        requestedPlayback && playbackController.isPlaying ? "pause.fill" : "play.fill"
+    private var playButtonHint: String {
+        switch route {
+        case .live:
+            return "現在放送中の番組を再生します"
+        case .catchUp:
+            return "この放送回の見逃し配信を探して再生します"
+        case .unavailable:
+            return selection.program.isPause ? "配信休止中のため再生できません" : "放送開始後に再生できます"
+        }
+    }
+
+    private var catchUpMessage: String? {
+        guard route == .catchUp else { return nil }
+        switch catchUpState {
+        case .notFound:
+            return GuideCatchUpLookup.notFoundMessage
+        case let .failed(message):
+            return message
+        default:
+            return nil
+        }
+    }
+
+    private func handlePlayAction() {
+        switch route {
+        case .live:
+            if requestedPlayback, playbackController.player.currentItem != nil {
+                playbackController.togglePlayback()
+            } else {
+                DiagnosticLogStore.shared.record(
+                    .info,
+                    category: "playback",
+                    message: "Guide live playback selected"
+                )
+                requestedPlayback = true
+                Task { await playbackController.playLive(playbackChannel) }
+            }
+        case .catchUp:
+            startCatchUpPlayback()
+        case .unavailable:
+            break
+        }
+    }
+
+    private func startCatchUpPlayback() {
+        if case let .found(episode) = catchUpState {
+            catchUpPlayback = episode
+            return
+        }
+        guard catchUpState != .searching else { return }
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "playback",
+            message: "Guide catch-up playback selected",
+            metadata: ["channel": selection.channel.id, "slot": selection.program.id]
+        )
+        catchUpState = .searching
+        Task {
+            let result = await catchUpLookup.resolve(
+                channelID: selection.channel.id,
+                program: selection.program
+            )
+            catchUpState = result
+            switch result {
+            case let .found(episode):
+                catchUpPlayback = episode
+            case .notFound:
+                UIAccessibility.post(notification: .announcement, argument: GuideCatchUpLookup.notFoundMessage)
+            case let .failed(message):
+                UIAccessibility.post(notification: .announcement, argument: message)
+            default:
+                break
+            }
+        }
+    }
+}
+
+enum GuideAccessibilityIdentifier {
+    static let playButton = "guide.play.button"
+    static let catchUpNotFound = "guide.catchup.notfound"
+    static let catchUpBadge = "guide.catchup.badge"
+}
+
+/// Outcome of looking up the catch-up (見逃し配信) episode for a finished broadcast slot.
+enum GuideCatchUpState: Equatable, Sendable {
+    case idle
+    case searching
+    case found(TVerProgram)
+    case notFound
+    case failed(String)
+}
+
+/// Testable wrapper that turns `TVerCatchUpLookupServicing` results into `GuideCatchUpState`.
+struct GuideCatchUpLookup: Sendable {
+    static let notFoundMessage = "この放送の見逃し配信は見つかりませんでした"
+
+    let service: any TVerCatchUpLookupServicing
+
+    init(service: any TVerCatchUpLookupServicing = TVerAPIClient()) {
+        self.service = service
+    }
+
+    func resolve(channelID: String, program: TVerLiveProgram) async -> GuideCatchUpState {
+        do {
+            if let episode = try await service.findCatchUpProgram(channelID: channelID, program: program) {
+                return .found(episode)
+            }
+            return .notFound
+        } catch {
+            return .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+        }
+    }
+}
+
+/// Presentation of the program-guide detail sheet primary playback button.
+struct GuidePlaybackButtonState: Equatable, Sendable {
+    static let catchUpTitle = "見逃し配信を再生"
+    static let catchUpSearchingTitle = "見逃し配信を検索中"
+    static let catchUpSystemImage = "play.rectangle.on.rectangle"
+
+    let title: String
+    let systemImage: String
+    let isEnabled: Bool
+    let isSearching: Bool
+
+    static func make(
+        route: GuidePlaybackRoute,
+        program: TVerLiveProgram,
+        catchUpState: GuideCatchUpState,
+        isLivePlaybackRequested: Bool = false,
+        isLiveResolving: Bool = false,
+        isLivePlaying: Bool = false,
+        hasLivePlayerItem: Bool = false,
+        now: Date = Date()
+    ) -> GuidePlaybackButtonState {
+        switch route {
+        case .live:
+            if isLivePlaybackRequested, isLiveResolving {
+                return GuidePlaybackButtonState(
+                    title: "再生を準備中",
+                    systemImage: "play.fill",
+                    isEnabled: false,
+                    isSearching: false
+                )
+            }
+            if isLivePlaybackRequested, hasLivePlayerItem {
+                return GuidePlaybackButtonState(
+                    title: isLivePlaying ? "一時停止" : "再生",
+                    systemImage: isLivePlaying ? "pause.fill" : "play.fill",
+                    isEnabled: true,
+                    isSearching: false
+                )
+            }
+            return GuidePlaybackButtonState(
+                title: "ライブを再生",
+                systemImage: "play.fill",
+                isEnabled: true,
+                isSearching: false
+            )
+        case .catchUp:
+            if catchUpState == .searching {
+                return GuidePlaybackButtonState(
+                    title: catchUpSearchingTitle,
+                    systemImage: catchUpSystemImage,
+                    isEnabled: false,
+                    isSearching: true
+                )
+            }
+            return GuidePlaybackButtonState(
+                title: catchUpTitle,
+                systemImage: catchUpSystemImage,
+                isEnabled: true,
+                isSearching: false
+            )
+        case .unavailable:
+            let isUpcoming = !program.isPause && program.startAt > now
+            return GuidePlaybackButtonState(
+                title: isUpcoming ? "放送前" : "配信休止",
+                systemImage: isUpcoming ? "clock" : "pause.circle",
+                isEnabled: false,
+                isSearching: false
+            )
+        }
+    }
+}
+
+/// Badge shown on program-guide slots whose broadcast already finished.
+struct GuideCatchUpBadge: View {
+    var body: some View {
+        Text("見逃し")
+            .font(.caption2.weight(.bold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .foregroundStyle(Color.accentColor)
+            .background(Color.accentColor.opacity(0.16), in: Capsule())
+            .accessibilityIdentifier(GuideAccessibilityIdentifier.catchUpBadge)
     }
 }
 

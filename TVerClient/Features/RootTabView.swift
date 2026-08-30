@@ -11,7 +11,8 @@ struct RootTabView: View {
         TabView {
             ProgramGuideView(
                 viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
-                playbackController: playbackController
+                playbackController: playbackController,
+                libraryStore: libraryStore
             )
             .tabItem {
                 Label("番組表", systemImage: "rectangle.grid.3x2")
@@ -820,7 +821,7 @@ private struct CardButtonStyle: ButtonStyle {
     }
 }
 
-private struct PlaybackView: View {
+struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
     @ObservedObject var libraryStore: ProgramLibraryStore
