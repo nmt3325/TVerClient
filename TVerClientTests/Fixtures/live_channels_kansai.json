@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "channel",
+        "content": { "id": "kansai01", "version": 1, "name": "近畿テスト1" },
+        "video": {
+          "apiKey": "kansai01",
+          "projectID": "placeholder-simul-kansai01",
+          "mediaID": "ref:placeholder-simul-kansai01"
+        }
+      }
+    ]
+  }
+}

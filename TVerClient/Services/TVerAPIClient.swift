@@ -60,6 +60,9 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private let staleIfErrorTTL: TimeInterval
     private let dateProvider: @Sendable () -> Date
     private let healthReporter: EndpointHealthReporting
+    /// エリア別のデコード済み結果。HTTP 層のキャッシュキーは host + path だけなので
+    /// （クエリにはトークンが載るため意図的に除外されている）、エリアの出し分けはここで持つしかない。
+    private let areaCache: TVerAreaResultCache
 
     init(
         session: URLSession = TVerNetworking.makeEphemeralSession(),
@@ -67,7 +70,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         cacheTTL: TimeInterval = 60,
         staleIfErrorTTL: TimeInterval = 15 * 60,
         dateProvider: @escaping @Sendable () -> Date = { Date() },
-        healthReporter: EndpointHealthReporting = NoopEndpointHealthReporter.shared
+        healthReporter: EndpointHealthReporting = NoopEndpointHealthReporter.shared,
+        areaCacheTTL: TimeInterval = 60
     ) {
         self.session = session
         self.responseCache = responseCache
@@ -75,6 +79,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         self.staleIfErrorTTL = max(0, staleIfErrorTTL)
         self.dateProvider = dateProvider
         self.healthReporter = healthReporter
+        areaCache = TVerAreaResultCache(ttl: areaCacheTTL)
     }
 
     func fetchSchedule() async throws -> [ProgramDay] {
@@ -1753,5 +1758,107 @@ extension TVerAPIClient {
     /// Catch-up candidates built from decoded episodes.
     func catchUpCandidates(fromEpisodes episodes: [EpisodeContent]) -> [CatchUpEpisodeCandidate] {
         Self.catchUpCandidates(from: episodes)
+    }
+}
+
+// MARK: - Area aware catalog
+
+/// エリアごとに分けたデコード済み結果のキャッシュ。
+///
+/// 同じエリアを連続で開いたときは再デコードしないで済ませ、エリアを切り替えたら
+/// そのエリアの箱を見にいく。箱を分けておけば、将来 TVer がエリア別の内容を返すように
+/// なっても呼び出し側は変えなくていい。
+actor TVerAreaResultCache {
+    private var liveChannels: [String: (storedAt: Date, value: [TVerLiveChannel])] = [:]
+    private var programGuide: [String: (storedAt: Date, value: [TVerGuideChannel])] = [:]
+    private let ttl: TimeInterval
+
+    init(ttl: TimeInterval) {
+        self.ttl = max(0, ttl)
+    }
+
+    func channels(forAreaCode code: String, at date: Date) -> [TVerLiveChannel]? {
+        guard let entry = liveChannels[code], isFresh(entry.storedAt, at: date) else { return nil }
+        return entry.value
+    }
+
+    func store(channels: [TVerLiveChannel], forAreaCode code: String, at date: Date) {
+        liveChannels[code] = (storedAt: date, value: channels)
+    }
+
+    func guide(forAreaCode code: String, at date: Date) -> [TVerGuideChannel]? {
+        guard let entry = programGuide[code], isFresh(entry.storedAt, at: date) else { return nil }
+        return entry.value
+    }
+
+    func store(guide: [TVerGuideChannel], forAreaCode code: String, at date: Date) {
+        programGuide[code] = (storedAt: date, value: guide)
+    }
+
+    func removeAll() {
+        liveChannels.removeAll()
+        programGuide.removeAll()
+    }
+
+    /// 今何エリア分を抱えているか。検証用。
+    func cachedAreaCodes() -> [String] {
+        Array(Set(liveChannels.keys).union(programGuide.keys)).sorted()
+    }
+
+    private func isFresh(_ storedAt: Date, at date: Date) -> Bool {
+        let age = date.timeIntervalSince(storedAt)
+        return age >= 0 && age <= ttl
+    }
+}
+
+extension TVerAPIClient {
+    /// エリア未指定の呼び出しを入れる箱。都道府県コードと衝突しない名前にする。
+    private static let nationwideAreaCacheKey = "__nationwide__"
+
+    private static func areaCacheKey(for area: TVerArea?) -> String {
+        guard let area, !area.code.isEmpty else { return nationwideAreaCacheKey }
+        return area.code
+    }
+
+    /// エリア付きのライブチャンネル取得。
+    ///
+    /// TVer の API にエリアパラメータは無いのでリクエストには何も付加しない（付けても
+    /// 無視されるだけで、利用者の居住地を第三者に渡す分だけ損をする）。エリアは
+    /// キャッシュの箱と表示文脈を分けるために使う。
+    func fetchLiveChannels(area: TVerArea?, forceRefresh: Bool) async throws -> [TVerLiveChannel] {
+        let key = Self.areaCacheKey(for: area)
+        if !forceRefresh, let cached = await areaCache.channels(forAreaCode: key, at: dateProvider()) {
+            return cached
+        }
+        let channels = try await fetchLiveChannels(forceRefresh: forceRefresh)
+        await areaCache.store(channels: channels, forAreaCode: key, at: dateProvider())
+        return channels
+    }
+
+    /// エリア付きの番組表取得。キャッシュの扱いはライブチャンネルと同じ。
+    func fetchProgramGuide(area: TVerArea?, forceRefresh: Bool) async throws -> [TVerGuideChannel] {
+        let key = Self.areaCacheKey(for: area)
+        if !forceRefresh, let cached = await areaCache.guide(forAreaCode: key, at: dateProvider()) {
+            return cached
+        }
+        let guide = try await fetchProgramGuide(forceRefresh: forceRefresh)
+        await areaCache.store(guide: guide, forAreaCode: key, at: dateProvider())
+        return guide
+    }
+
+    /// TVer にエリア一覧 API は無い（callArea 系はすべて 404）ので、内蔵カタログを返す。
+    /// ネットワークには触らないのでオフラインでもピッカーは埋まる。
+    func availableAreas() async -> [TVerArea] {
+        TVerArea.builtIn
+    }
+
+    /// エリア別キャッシュを破棄する。
+    func clearAreaCache() async {
+        await areaCache.removeAll()
+    }
+
+    /// キャッシュを持っているエリアコード。検証用。
+    func cachedAreaCodes() async -> [String] {
+        await areaCache.cachedAreaCodes()
     }
 }

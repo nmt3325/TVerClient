@@ -1,0 +1,11 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "pause",
+        "content": { "id": "", "version": 0, "startAt": 1893456000, "endAt": 1893459600 }
+      }
+    ]
+  }
+}
