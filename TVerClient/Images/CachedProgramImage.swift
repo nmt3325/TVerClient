@@ -10,6 +10,7 @@ struct CachedProgramImage<Placeholder: View>: View {
     private let placeholder: () -> Placeholder
 
     @StateObject private var loader = CachedProgramImageLoader()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         url: URL?,
@@ -32,10 +33,17 @@ struct CachedProgramImage<Placeholder: View>: View {
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
                     .accessibilityLabel(accessibilityLabel ?? "番組画像")
+                    .transition(.opacity)
             } else {
                 placeholder()
+                    .transition(.opacity)
             }
         }
+        // Decoded artwork should fade in rather than pop over the placeholder.
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: DS.Motion.fadeInDuration),
+            value: loader.image != nil
+        )
         .onAppear {
             loader.load(url, using: pipeline)
         }
