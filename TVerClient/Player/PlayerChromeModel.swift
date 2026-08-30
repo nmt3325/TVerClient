@@ -63,6 +63,16 @@ final class PlayerChromeModel: ObservableObject {
         }
     }
 
+    /// 指が触れ続けている操作（精密スクラブなど）の最中かどうか。
+    ///
+    /// 一時停止や VoiceOver による停止とは別に持つ。ひとつのフラグを
+    /// 共有すると、スクラブが終わった拍子に「一時停止中は消さない」まで
+    /// 一緒に解除されてしまう。
+    @Published private(set) var isInteractionHeld = false
+
+    /// この間は自動非表示のカウントダウンを始めない。
+    private var shouldStayVisible: Bool { isAutoHideSuspended || isInteractionHeld }
+
     let autoHideDelay: TimeInterval
     let skipFeedbackDelay: TimeInterval
     private let waitForAutoHide: @Sendable (TimeInterval) async throws -> Void
@@ -129,6 +139,21 @@ final class PlayerChromeModel: ObservableObject {
         autoHideTask = nil
     }
 
+    /// 指が触れ続ける操作の開始。シークバーを掴んだまま3秒経つと
+    /// コントロールごと消えて、狙った位置が分からなくなるのを防ぐ。
+    func beginHeldInteraction() {
+        guard !isInteractionHeld else { return }
+        isInteractionHeld = true
+        showControls()
+    }
+
+    /// 指を離した。カウントダウンはここから数え直す。
+    func endHeldInteraction() {
+        guard isInteractionHeld else { return }
+        isInteractionHeld = false
+        showControls()
+    }
+
     /// Registers one double-tap skip and returns the offset to seek by.
     /// Repeated taps on the same side accumulate (10, 20, 30 ...).
     @discardableResult
@@ -172,7 +197,7 @@ final class PlayerChromeModel: ObservableObject {
     private func scheduleAutoHide() {
         autoHideTask?.cancel()
         autoHideTask = nil
-        guard !isAutoHideSuspended else { return }
+        guard !shouldStayVisible else { return }
         let delay = autoHideDelay
         let wait = waitForAutoHide
         autoHideTask = Task { @MainActor [weak self] in
@@ -181,7 +206,7 @@ final class PlayerChromeModel: ObservableObject {
             } catch {
                 return
             }
-            guard !Task.isCancelled, let self, !self.isAutoHideSuspended else { return }
+            guard !Task.isCancelled, let self, !self.shouldStayVisible else { return }
             self.areControlsVisible = false
             self.autoHideTask = nil
         }
