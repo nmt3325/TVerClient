@@ -45,6 +45,9 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var isSeeking = false
     /// True while a finger is on the scrubber.
     @Published private(set) var isScrubbing = false
+    /// 自分で止めたのではないのに再生が止まったときの理由と次の一手。
+    /// nil は「黙って止まった経路がひとつも無い」という意味。
+    @Published private(set) var continuityNotice: PlaybackContinuityNotice?
     @Published private(set) var playbackSpeed: PlaybackSpeed = .normal
     @Published private(set) var subtitleOptions: [MediaSelectionEntry] = []
     @Published private(set) var audioOptions: [MediaSelectionEntry] = []
@@ -69,6 +72,12 @@ final class PlaybackController: ObservableObject {
     /// Set only when the system suspended playback that we had asked for, so
     /// the end of an interruption restores those sessions and nothing else.
     private var shouldResumeAfterInterruption = false
+    /// 画面が用意した Picture in Picture。停止したときに小窓だけが生き残る
+    /// 経路を作らないよう、弱参照で覚えておいて一緒に畳む。
+    private weak var pictureInPicture: PictureInPictureCoordinator?
+    /// ドラッグ追従用の許容。ゼロ許容はフレーム単位で正確な代わりに遅く、
+    /// 指に付いてこない。確定シークだけがゼロ許容。
+    private static let scrubTolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
 
     init(
         resolver: any TVerStreamResolving = BrightcoveStreamResolver(),
@@ -103,6 +112,34 @@ final class PlaybackController: ObservableObject {
     var canSeek: Bool { !isLive && (duration ?? 0) > 0 }
     var chaseTime: CMTime { seeker.chaseTime }
     var isSeekInProgress: Bool { seeker.isSeekInProgress }
+
+    /// 何かが鳴っている、あるいはこれから鳴らそうとしている状態。
+    ///
+    /// タブの上に出る再生中バーはこれだけを根拠にする。失敗して再生項目を
+    /// 手放したあとは、押しても何も起きないバーになるので false を返す。
+    var hasActivePlayback: Bool {
+        switch state {
+        case .idle:
+            return false
+        case .failed:
+            return player.currentItem != nil
+        case .resolving, .playing, .paused, .ended:
+            return true
+        }
+    }
+
+    /// この番組をすでに読み込み済みか。再生画面を開き直しただけで最初から
+    /// 再生し直してしまうのを防ぐための判定。
+    func isLoaded(_ program: TVerProgram) -> Bool {
+        guard currentProgram?.id == program.id, player.currentItem != nil else { return false }
+        if case .failed = state { return false }
+        return true
+    }
+
+    /// 画面が持っている Picture in Picture を預かる。`stop()` は必ずこれも畳む。
+    func bindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
+        pictureInPicture = coordinator
+    }
 
     func play(_ program: TVerProgram) async {
         beginRequest(program: program, liveChannel: nil)
@@ -144,6 +181,7 @@ final class PlaybackController: ObservableObject {
             try activateAudioSession()
             wantsPlayback = true
             error = nil
+            continuityNotice = nil
             // AVPlayer ignores `play()` while the playhead sits at the end of
             // the item. Without this rewind the state machine, the transport
             // controls and the lock screen all report playback while the
@@ -160,7 +198,8 @@ final class PlaybackController: ObservableObject {
                 transition(to: .resolving)
             }
         } catch {
-            applyPlaybackFailure(error)
+            // 項目は生きている。位置を捨てずに、そのまま再開できる形で残す。
+            applyPlaybackFailure(error, discardingItem: false)
         }
     }
 
@@ -168,27 +207,59 @@ final class PlaybackController: ObservableObject {
         wantsPlayback = false
         // An explicit pause outranks a pending interruption restore.
         shouldResumeAfterInterruption = false
+        continuityNotice = nil
         player.pause()
         transition(to: .paused)
     }
 
+    /// 再生を完全に終わらせる。
+    ///
+    /// 音を止めるだけでは足りない。Now Playing、オーディオセッション、
+    /// Picture in Picture、周期タイムオブザーバまで解除しないと、ロック画面や
+    /// 小窓に「まだ鳴っている」痕跡が残り、止める場所がどこにも無い状態へ
+    /// 逆戻りする。
     func stop() {
         requestGeneration += 1
-        wantsPlayback = false
-        shouldResumeAfterInterruption = false
-        itemStatusObservation?.invalidate()
-        itemStatusObservation = nil
-        player.pause()
-        player.replaceCurrentItem(with: nil)
-        resetTimingState()
+        releasePlaybackResources()
         currentProgram = nil
         currentLiveChannel = nil
         error = nil
+        continuityNotice = nil
         transition(to: .idle, updateNowPlaying: false)
         configureRemoteCommandsForCurrentItem()
+        clearNowPlayingInfo()
+        deactivateAudioSession()
+    }
+
+    /// 再生に紐づく資源をまとめて手放す。`stop()` と失敗経路が共有する。
+    private func releasePlaybackResources() {
+        wantsPlayback = false
+        shouldResumeAfterInterruption = false
+        pictureInPicture?.stop()
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        removeTimeObserver()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        resetTimingState()
+    }
+
+    private func clearNowPlayingInfo() {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
-        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private func deactivateAudioSession() {
+        do {
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            DiagnosticLogStore.shared.record(
+                .warning,
+                category: "playback",
+                message: "Audio session could not be deactivated",
+                metadata: ["error": error.localizedDescription]
+            )
+        }
     }
 
     func togglePlayback() { isPlaying ? pause() : resume() }
@@ -216,10 +287,10 @@ final class PlaybackController: ObservableObject {
     /// chased from the completion handler. Issuing a seek per drag update
     /// instead cancels the previous one forever and the picture never
     /// catches up with the finger.
-    func seekToTime(_ time: CMTime) {
-        guard let next = seeker.request(time) else { return }
+    func seekToTime(_ time: CMTime, tolerance: CMTime = .zero) {
+        guard let next = seeker.request(time, tolerance: tolerance) else { return }
         isSeeking = true
-        performSeek(to: next)
+        performSeek(to: next, tolerance: seeker.chaseTolerance)
     }
 
     /// Freezes the published playhead while the scrubber is being dragged.
@@ -228,15 +299,39 @@ final class PlaybackController: ObservableObject {
         isScrubbing = true
     }
 
+    /// ドラッグ中の逐次シーク。
+    ///
+    /// 公開している再生位置を書き換えるだけでは、映像も音声も指に付いて
+    /// こない。ChaseTimeSeeker 越しに常に1本だけシークを走らせ、緩い許容で
+    /// フレームを追従させる。確定は `endScrubbing(at:)`。
     func previewScrub(to seconds: TimeInterval) {
         guard isScrubbing else { return }
-        currentTime = ScrubberMath.clamped(seconds, duration: duration ?? 0)
+        let target = ScrubberMath.clamped(seconds, duration: duration ?? 0)
+        currentTime = target
+        seekToTime(
+            CMTime(seconds: target, preferredTimescale: 600),
+            tolerance: Self.scrubTolerance
+        )
     }
 
     func endScrubbing(at seconds: TimeInterval) {
         guard isScrubbing else { return }
         isScrubbing = false
+        // 確定はゼロ許容で投げ直す。緩い許容のままだと、指を離した位置と
+        // 実際の再生位置が最大 0.25 秒ずれたまま残る。
         seek(to: seconds)
+    }
+
+    /// 告知に添えた操作を実行する。
+    func recoverFromContinuityNotice() {
+        guard continuityNotice != nil else { return }
+        continuityNotice = nil
+        // 終端まで再生していれば `resume()` が巻き戻してから再生する。
+        resume()
+    }
+
+    func dismissContinuityNotice() {
+        continuityNotice = nil
     }
 
     func setPlaybackSpeed(_ speed: PlaybackSpeed) {
@@ -267,12 +362,12 @@ final class PlaybackController: ObservableObject {
         updateMediaSelectionEntries()
     }
 
-    private func performSeek(to time: CMTime) {
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+    private func performSeek(to time: CMTime, tolerance: CMTime) {
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let next = self.seeker.complete(time) {
-                    self.performSeek(to: next)
+                if let next = self.seeker.complete(time, tolerance: tolerance) {
+                    self.performSeek(to: next, tolerance: self.seeker.chaseTolerance)
                 } else {
                     self.isSeeking = false
                     self.refreshTimingState()
@@ -379,6 +474,7 @@ final class PlaybackController: ObservableObject {
         currentProgram = program
         currentLiveChannel = liveChannel
         error = nil
+        continuityNotice = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         player.pause()
@@ -405,6 +501,8 @@ final class PlaybackController: ObservableObject {
     /// `rate` is only honoured once playback has started, so the selected
     /// speed is applied right after `play()`.
     private func startPlayback() {
+        // `stop()` で外したオブザーバを、鳴らし始める前に必ず戻す。
+        installTimeObserver()
         player.play()
         player.rate = Float(playbackSpeed.rawValue)
     }
@@ -440,23 +538,36 @@ final class PlaybackController: ObservableObject {
 
     private func finishWithError(_ sourceError: Error, generation: Int) {
         guard generation == requestGeneration else { return }
-        itemStatusObservation?.invalidate()
-        itemStatusObservation = nil
-        player.replaceCurrentItem(with: nil)
-        wantsPlayback = false
         let normalized = TVerClientError.normalized(from: sourceError, playback: true)
+        // 失敗したら資源も手放す。鳴っていないのに再生中バーだけが残って、
+        // 押しても何も起きない状態を作らないため。
+        releasePlaybackResources()
+        clearNowPlayingInfo()
+        deactivateAudioSession()
+        continuityNotice = nil
         error = normalized
-        transition(to: .failed(normalized))
+        transition(to: .failed(normalized), updateNowPlaying: false)
         recordPlaybackFailure(normalized, phase: "stream-resolution")
     }
 
-    private func applyPlaybackFailure(_ sourceError: Error) {
+    /// - Parameter discardingItem: 再生項目ごと捨てるかどうか。項目そのものが
+    ///   壊れているときは捨てる。オーディオセッションを取れなかっただけなら
+    ///   位置を残し、そのまま再開できる形で失敗を伝える。
+    private func applyPlaybackFailure(_ sourceError: Error, discardingItem: Bool = true) {
         let normalized = TVerClientError.normalized(from: sourceError, playback: true)
-        wantsPlayback = false
-        player.pause()
+        if discardingItem {
+            releasePlaybackResources()
+            clearNowPlayingInfo()
+            deactivateAudioSession()
+        } else {
+            wantsPlayback = false
+            shouldResumeAfterInterruption = false
+            player.pause()
+        }
+        continuityNotice = nil
         error = normalized
-        transition(to: .failed(normalized))
-        recordPlaybackFailure(normalized, phase: "player")
+        transition(to: .failed(normalized), updateNowPlaying: !discardingItem)
+        recordPlaybackFailure(normalized, phase: discardingItem ? "player" : "audio-session")
     }
 
     private func recordPlaybackCheckpoint(_ message: String) {
@@ -493,7 +604,10 @@ final class PlaybackController: ObservableObject {
         try audioSession.setActive(true, options: [])
     }
 
-    private func installPlayerObservers() {
+    /// 周期タイムオブザーバ。停止したら外し、鳴らし始めるときに戻す。
+    /// 付けっぱなしだと、止めたあとも 0.5 秒ごとに Now Playing を書き戻す。
+    private func installTimeObserver() {
+        guard timeObserver == nil else { return }
         // Twice a second keeps the scrubber smooth without burning CPU.
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
@@ -501,11 +615,23 @@ final class PlaybackController: ObservableObject {
         ) { [weak self] time in
             Task { @MainActor [weak self] in self?.handlePeriodicTime(time) }
         }
+    }
+
+    private func removeTimeObserver() {
+        guard let timeObserver else { return }
+        player.removeTimeObserver(timeObserver)
+        self.timeObserver = nil
+    }
+
+    private func installPlayerObservers() {
+        installTimeObserver()
         endObserver = notificationCenter.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
                 self.wantsPlayback = false
                 self.transition(to: .ended)
+                // 終わったことと、ここからできることを必ず画面に出す。
+                self.continuityNotice = PlaybackContinuityNotice(reason: .playedToEnd)
             }
         }
         failedObserver = notificationCenter.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
@@ -556,6 +682,7 @@ final class PlaybackController: ObservableObject {
             wantsPlayback = false
             player.pause()
             transition(to: .paused)
+            continuityNotice = PlaybackContinuityNotice(reason: .interrupted)
             DiagnosticLogStore.shared.record(
                 .warning,
                 category: "playback",
@@ -569,6 +696,9 @@ final class PlaybackController: ObservableObject {
             shouldResumeAfterInterruption = false
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsRawValue)
             guard options.contains(.shouldResume) else {
+                // 自動で戻してはいけないと言われた場合。黙って止まったままに
+                // せず、自分で戻す手段を画面に出す。
+                continuityNotice = PlaybackContinuityNotice(reason: .interruptionEndedWithoutResume)
                 DiagnosticLogStore.shared.record(
                     .warning,
                     category: "playback",
@@ -605,6 +735,7 @@ final class PlaybackController: ObservableObject {
         wantsPlayback = false
         player.pause()
         transition(to: .paused)
+        continuityNotice = PlaybackContinuityNotice(reason: .audioRouteLost)
         DiagnosticLogStore.shared.record(
             .warning,
             category: "playback",

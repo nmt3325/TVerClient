@@ -6,7 +6,9 @@ import Foundation
 /// 鳴っていないときだけ、という意味を変えないこと。
 extension PlaybackController: PlaybackPresenceControlling {
     var presence: PlaybackPresence? {
-        guard state != .idle else { return nil }
+        // nil にするのは本当に何も鳴っていないときだけ。`.idle` に加えて、
+        // 再生項目ごと手放した失敗後も「鳴っていない」側として扱う。
+        guard hasActivePlayback else { return nil }
         if let channel = currentLiveChannel {
             return PlaybackPresence(
                 source: .live(channelID: channel.id),
