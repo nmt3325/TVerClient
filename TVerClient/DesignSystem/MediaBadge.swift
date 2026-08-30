@@ -10,14 +10,16 @@ enum MediaBadgeKind: String, Equatable, Hashable, Sendable {
     case downloading
     case expiringSoon
 
+    /// 文言は画面ごとに持たず、契約の `Vocabulary` に寄せる。
+    /// 同じ状態を「見逃し」「キャッチアップ」「保存済み」と呼び分けないため。
     var defaultText: String {
         switch self {
-        case .live: return "配信中"
-        case .catchUp: return "見逃し"
-        case .catchUpChecking: return "確認中"
-        case .noCatchUp: return "見逃しなし"
-        case .downloaded: return "保存済み"
-        case .downloading: return "保存中"
+        case .live: return Vocabulary.Live.onAir
+        case .catchUp: return Vocabulary.CatchUp.available
+        case .catchUpChecking: return Vocabulary.CatchUp.checking
+        case .noCatchUp: return Vocabulary.CatchUp.none
+        case .downloaded: return Vocabulary.Download.completed
+        case .downloading: return Vocabulary.Download.running
         case .expiringSoon: return "まもなく終了"
         }
     }
@@ -77,6 +79,12 @@ struct MediaBadge: View, Equatable, Hashable {
         .padding(.vertical, DS.Spacing.xxs)
         .foregroundStyle(kind.tint)
         .background(kind.tint.opacity(kind.isLowEmphasis ? 0.10 : 0.14), in: Capsule())
+        // 強弱を色の濃さだけではなく、塗りつぶしと線の違いでも表す。
+        // 色覚異常やグレースケール表示でも区別が残るようにするため。
+        .overlay(
+            Capsule()
+                .strokeBorder(kind.tint.opacity(kind.isLowEmphasis ? 0.45 : 0), lineWidth: 1)
+        )
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel(label)
     }
