@@ -19,7 +19,8 @@ final class OfflineCacheGuideTests: XCTestCase {
         XCTAssertNil(raw.range(of: Data("project-1234".utf8)))
         XCTAssertNil(raw.range(of: Data("media-5678".utf8)))
 
-        let restored = try XCTUnwrap(await store.load(at: savedAt.addingTimeInterval(60)))
+        let loaded = await store.load(at: savedAt.addingTimeInterval(60))
+        let restored = try XCTUnwrap(loaded)
         XCTAssertEqual(restored.guide.first?.channel.apiKey, "")
         XCTAssertEqual(restored.guide.first?.channel.projectID, "")
         XCTAssertEqual(restored.guide.first?.channel.mediaID, "")
@@ -92,7 +93,8 @@ final class OfflineCacheGuideTests: XCTestCase {
         XCTAssertFalse(viewModel.isShowingCachedData)
         XCTAssertNil(viewModel.offlineNotice)
         XCTAssertEqual(viewModel.lastUpdatedAt, now)
-        XCTAssertNotNil(await store.load(at: now))
+        let persistedSnapshot = await store.load(at: now)
+        XCTAssertNotNil(persistedSnapshot)
     }
 
     @MainActor

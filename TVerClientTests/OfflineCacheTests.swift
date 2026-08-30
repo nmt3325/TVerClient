@@ -149,7 +149,8 @@ final class OfflineCacheTests: XCTestCase {
         await store.save(index, at: savedAt)
 
         let reopened = ProgramSearchIndexStore(directory: directory)
-        let restored = try XCTUnwrap(await reopened.restoredIndex(at: savedAt.addingTimeInterval(3_600)))
+        let reopenedIndex = await reopened.restoredIndex(at: savedAt.addingTimeInterval(3_600))
+        let restored = try XCTUnwrap(reopenedIndex)
 
         XCTAssertEqual(restored.count, 2)
         XCTAssertEqual(restored.search(query: "ニュース").map(\.id), ["guide:ex:1"])

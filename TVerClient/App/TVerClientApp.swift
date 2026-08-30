@@ -11,6 +11,7 @@ struct TVerClientApp: App {
                         category: "lifecycle",
                         message: "Root interface appeared"
                     )
+                    await StartupSelfCheck.run()
                 }
         }
     }

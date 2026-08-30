@@ -7,10 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00FE6BC19811DAFF579786E9 /* platform_series_episodes.json in Resources */ = {isa = PBXBuildFile; fileRef = AA6690C7A971DC4367AD526C /* platform_series_episodes.json */; };
 		09D65C4953364F7121B68964 /* CachedProgramImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CEA04EF0EEB9A49C163E92 /* CachedProgramImage.swift */; };
 		0C09E8151A45E665FE8CC551 /* PlayerLayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DF009DC4BD0B9E186B1461E /* PlayerLayerView.swift */; };
 		10F35AAD9989DA4237AA1D05 /* ProgramGuideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C62F312991CBB58C678574C /* ProgramGuideTests.swift */; };
 		13DAB4C6071EE8E2A8F44525 /* FeatureContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 697A5C903241AFD8F9582508 /* FeatureContracts.swift */; };
+		1AFB131B0CB6E95E4C9BF4F5 /* platform_live_channel.json in Resources */ = {isa = PBXBuildFile; fileRef = FBAA6BCD36A6A53A032E2328 /* platform_live_channel.json */; };
+		1BD2868D9C4264C51BD95AD5 /* platform_browser_create.json in Resources */ = {isa = PBXBuildFile; fileRef = 143F717AC04870996D58E2D4 /* platform_browser_create.json */; };
 		1FC3EB6AB14FC55854CD4D61 /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CE4CD30A8BF61883A3A0CC2 /* DiagnosticsView.swift */; };
 		2081C1FB6DBB34719DB46A27 /* LiveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56076CA99E17730103B2AA70 /* LiveStreamResolver.swift */; };
 		214613217C884666D3639287 /* GuideCatchUpRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CABABC4CFC852BC8409202C /* GuideCatchUpRoutingTests.swift */; };
@@ -18,10 +21,13 @@
 		27DD9758EF6268FBAA96B481 /* AccessibilityCoverageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 849A4EE822663B98C82CAE0A /* AccessibilityCoverageTests.swift */; };
 		2A1D9966C0F46D86A110248E /* NetworkDiagnosticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB0C90A6A540D1394D4F821D /* NetworkDiagnosticsService.swift */; };
 		38E208A5AE5D467BF2FE8C9E /* ProgramSearchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B7FEF1C55CD936A6F922845 /* ProgramSearchViewModel.swift */; };
+		45C7DE46716A521CF053F271 /* OfflineCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71A054DB35A68D475EE5D46 /* OfflineCacheTests.swift */; };
 		4809049C543015B4C4CA0BDA /* ProgramNotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8FAB25B4CDE509542D290C /* ProgramNotificationScheduler.swift */; };
 		4BA044543ED44CF87A37EE5E /* PictureInPictureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */; };
+		582A3C27AF8A789621B68A4C /* platform_live_timeline.json in Resources */ = {isa = PBXBuildFile; fileRef = 181A03CAC399D6ECFC86B0E2 /* platform_live_timeline.json */; };
 		593A1116BD21A802A4B02FDA /* PreviewFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */; };
 		5B63CE0ADE4052C5E2F44FF9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26DFE41E5BF9011519303CBB /* Assets.xcassets */; };
+		5BED583FE35E6783909CB643 /* streaks_live_playback.json in Resources */ = {isa = PBXBuildFile; fileRef = FE85B2201FAF13AF6335ADA3 /* streaks_live_playback.json */; };
 		5C1C55F43A02F7EA0D90F3D8 /* BrightcoveStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B037BCAAE8FA70B3D86638 /* BrightcoveStreamResolver.swift */; };
 		5FD462579134FAEFD353C2A9 /* DiagnosticLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64369F0A94B494F3F6F2AC6F /* DiagnosticLogStore.swift */; };
 		61E4D59902FB5FF9C4A64FAD /* ProgramImagePipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12A14931282466CB20FBE8FE /* ProgramImagePipeline.swift */; };
@@ -30,15 +36,19 @@
 		6F4775D1C3B2444D9254128F /* TVerResponseCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */; };
 		6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */; };
 		76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98541A0DE8DC22D472A22948 /* LiveTVTests.swift */; };
+		792BC51251F8E1E2C8C0E9DD /* service_keyword_search.json in Resources */ = {isa = PBXBuildFile; fileRef = D0281BEE9E9BAEC315C0A88F /* service_keyword_search.json */; };
 		85DA1ECF2703B7ECFBA2749A /* LivePlaybackSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0432F314A0AE04A2F05B02 /* LivePlaybackSmokeTests.swift */; };
 		86E6923A8741F2B70ADAC895 /* LiveOfficialPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */; };
+		8ADF5E18D038174683BA3B64 /* platform_episode_ranking.json in Resources */ = {isa = PBXBuildFile; fileRef = EFD8B176B1BCF7AEC61B4639 /* platform_episode_ranking.json */; };
 		8FB4F5C69927BE3AA196012B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C65634372978E5370261875 /* Models.swift */; };
 		9341A785DBD70A206C583341 /* ProgramSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B17459506284E16C8F1197 /* ProgramSearchTests.swift */; };
 		9815AF8B956628DB44551468 /* CatchUpLookupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498CB0C470BF48032A2B22D6 /* CatchUpLookupTests.swift */; };
+		9A37F1BDE5195C1AEC1067EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = D43D539C45C25127AA5B45AC /* README.md */; };
 		9A6D73CFCDFD9E41F3B3EE1A /* FullScreenPlaybackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B5E2C13474DE93AD2ECB2DB /* FullScreenPlaybackView.swift */; };
 		A639341EF4079C4945D80801 /* PlaybackSupportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D724867F055BF95F468C548F /* PlaybackSupportViews.swift */; };
 		A797F94513B4E43294A549D1 /* ProgramImagePipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7221131F4842AB294C43DB2 /* ProgramImagePipelineTests.swift */; };
 		B7C7EC271A75EC1A2E61EDCA /* AccessibilityTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54500B4EAA52ED53A69EDA53 /* AccessibilityTestSupport.swift */; };
+		B817F97830869F951CAB21DB /* platform_live_channel_snake.json in Resources */ = {isa = PBXBuildFile; fileRef = 96FD0800831EEA59969D76A7 /* platform_live_channel_snake.json */; };
 		BEDEFF5EBF59AABF2D269BBA /* AppRuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F2299BDF182A9F1E9D46F50 /* AppRuntimeEnvironment.swift */; };
 		BEFDCA83E0968C4C675DC611 /* PictureInPictureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB95878D02318C092E70FB9 /* PictureInPictureCoordinator.swift */; };
 		CF226E96D743E2E798483358 /* ProgramSearchIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6518FEAB10E70D5B84B7C7A9 /* ProgramSearchIndex.swift */; };
@@ -46,15 +56,19 @@
 		D610C1310AFE5B6B76C0C452 /* TVerClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */; };
 		D791FCB8DCF1E264A281EFCD /* DiagnosticLogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E661CB17A220637A10F71949 /* DiagnosticLogStoreTests.swift */; };
 		DB0B324E144F1D66D1CD359F /* RuntimeHealthContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55AD37967460957B51A66969 /* RuntimeHealthContracts.swift */; };
+		DB93BF603568BB025095CDEF /* OfflineCacheGuideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4968A840A1B8D7986195EA36 /* OfflineCacheGuideTests.swift */; };
 		DF63189119EBBED42C1235AB /* UsabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36207CBF65F4346306A8B03C /* UsabilityTests.swift */; };
 		E128732BF26ECBCE412CC806 /* UsabilityModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B694A98CF622006290A9BB2 /* UsabilityModels.swift */; };
+		E40EC5A372BE22AB82911D48 /* FixtureMutationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADDEF032D51935B115EA9865 /* FixtureMutationTests.swift */; };
 		E8144F8465B6938C94CFB212 /* NetworkDiagnosticsServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */; };
 		ED0FE3115DE2C7F695B210BA /* TVerAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AC98889C8008622C1031D7 /* TVerAPIClient.swift */; };
 		EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */; };
 		EEBC37723CA91878772FB161 /* ProgramLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */; };
 		EECD3E2292B469DFF79248DA /* ProgramGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8400D2B1B6B7406F0B6900F9 /* ProgramGuideView.swift */; };
+		F1BD58C81CF954DC73656BDB /* TVerAPIDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C37E66A7D94C0D627C19A09 /* TVerAPIDecodingTests.swift */; };
 		F9891FBF03F1548A10B5C3EC /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 646EC583681606D172A307BB /* RootTabView.swift */; };
 		FB147CD4A373203C22A29119 /* StreamResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02C18B0B716361203794AA7E /* StreamResolverTests.swift */; };
+		FB178198C4349254500231F4 /* platform_ranking.json in Resources */ = {isa = PBXBuildFile; fileRef = DCE8C68CF1A21088AB89A3DA /* platform_ranking.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -72,14 +86,18 @@
 		03623DC4DD82D5ABE6602F98 /* TVerClientApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerClientApp.swift; sourceTree = "<group>"; };
 		0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveOfficialPayloadTests.swift; sourceTree = "<group>"; };
 		12A14931282466CB20FBE8FE /* ProgramImagePipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramImagePipeline.swift; sourceTree = "<group>"; };
+		143F717AC04870996D58E2D4 /* platform_browser_create.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_browser_create.json; sourceTree = "<group>"; };
+		181A03CAC399D6ECFC86B0E2 /* platform_live_timeline.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_live_timeline.json; sourceTree = "<group>"; };
 		26DFE41E5BF9011519303CBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2B7FEF1C55CD936A6F922845 /* ProgramSearchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramSearchViewModel.swift; sourceTree = "<group>"; };
 		2F2299BDF182A9F1E9D46F50 /* AppRuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntimeEnvironment.swift; sourceTree = "<group>"; };
 		338A0CC484D947587CD26EEE /* FullScreenPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullScreenPlaybackTests.swift; sourceTree = "<group>"; };
 		36207CBF65F4346306A8B03C /* UsabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityTests.swift; sourceTree = "<group>"; };
+		3C37E66A7D94C0D627C19A09 /* TVerAPIDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIDecodingTests.swift; sourceTree = "<group>"; };
 		3DF009DC4BD0B9E186B1461E /* PlayerLayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerLayerView.swift; sourceTree = "<group>"; };
 		3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramLibraryStore.swift; sourceTree = "<group>"; };
 		40CEA04EF0EEB9A49C163E92 /* CachedProgramImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedProgramImage.swift; sourceTree = "<group>"; };
+		4968A840A1B8D7986195EA36 /* OfflineCacheGuideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCacheGuideTests.swift; sourceTree = "<group>"; };
 		498CB0C470BF48032A2B22D6 /* CatchUpLookupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpLookupTests.swift; sourceTree = "<group>"; };
 		4C65634372978E5370261875 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		54500B4EAA52ED53A69EDA53 /* AccessibilityTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTestSupport.swift; sourceTree = "<group>"; };
@@ -102,22 +120,32 @@
 		8AB95878D02318C092E70FB9 /* PictureInPictureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureInPictureCoordinator.swift; sourceTree = "<group>"; };
 		8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerAPIClientCacheTests.swift; sourceTree = "<group>"; };
 		8B5E2C13474DE93AD2ECB2DB /* FullScreenPlaybackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullScreenPlaybackView.swift; sourceTree = "<group>"; };
+		96FD0800831EEA59969D76A7 /* platform_live_channel_snake.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_live_channel_snake.json; sourceTree = "<group>"; };
 		98541A0DE8DC22D472A22948 /* LiveTVTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTVTests.swift; sourceTree = "<group>"; };
 		9B694A98CF622006290A9BB2 /* UsabilityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsabilityModels.swift; sourceTree = "<group>"; };
 		9E0432F314A0AE04A2F05B02 /* LivePlaybackSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePlaybackSmokeTests.swift; sourceTree = "<group>"; };
 		9F9C4DECAB31CF31D59BF340 /* TVerResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVerResponseCache.swift; sourceTree = "<group>"; };
 		A7221131F4842AB294C43DB2 /* ProgramImagePipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramImagePipelineTests.swift; sourceTree = "<group>"; };
 		A7D57C1EF91D7CC418CFBF73 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		AA6690C7A971DC4367AD526C /* platform_series_episodes.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_series_episodes.json; sourceTree = "<group>"; };
+		ADDEF032D51935B115EA9865 /* FixtureMutationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureMutationTests.swift; sourceTree = "<group>"; };
 		B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnosticsServiceTests.swift; sourceTree = "<group>"; };
 		C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
 		C9E30ED5B7FD9E2230C68B1A /* PreviewFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixture.swift; sourceTree = "<group>"; };
 		CA8FAB25B4CDE509542D290C /* ProgramNotificationScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramNotificationScheduler.swift; sourceTree = "<group>"; };
 		CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureInPictureTests.swift; sourceTree = "<group>"; };
+		D0281BEE9E9BAEC315C0A88F /* service_keyword_search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = service_keyword_search.json; sourceTree = "<group>"; };
+		D43D539C45C25127AA5B45AC /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		D724867F055BF95F468C548F /* PlaybackSupportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSupportViews.swift; sourceTree = "<group>"; };
 		DB0C90A6A540D1394D4F821D /* NetworkDiagnosticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnosticsService.swift; sourceTree = "<group>"; };
+		DCE8C68CF1A21088AB89A3DA /* platform_ranking.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_ranking.json; sourceTree = "<group>"; };
 		DD25442B14D224D0EB3807B0 /* ProgramNotificationSchedulerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramNotificationSchedulerTests.swift; sourceTree = "<group>"; };
 		E661CB17A220637A10F71949 /* DiagnosticLogStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogStoreTests.swift; sourceTree = "<group>"; };
+		EFD8B176B1BCF7AEC61B4639 /* platform_episode_ranking.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_episode_ranking.json; sourceTree = "<group>"; };
+		F71A054DB35A68D475EE5D46 /* OfflineCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCacheTests.swift; sourceTree = "<group>"; };
 		FB028B37C45A52314CECCF58 /* TVerClient.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TVerClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FBAA6BCD36A6A53A032E2328 /* platform_live_channel.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = platform_live_channel.json; sourceTree = "<group>"; };
+		FE85B2201FAF13AF6335ADA3 /* streaks_live_playback.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = streaks_live_playback.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -172,6 +200,7 @@
 				54500B4EAA52ED53A69EDA53 /* AccessibilityTestSupport.swift */,
 				498CB0C470BF48032A2B22D6 /* CatchUpLookupTests.swift */,
 				E661CB17A220637A10F71949 /* DiagnosticLogStoreTests.swift */,
+				ADDEF032D51935B115EA9865 /* FixtureMutationTests.swift */,
 				338A0CC484D947587CD26EEE /* FullScreenPlaybackTests.swift */,
 				5CABABC4CFC852BC8409202C /* GuideCatchUpRoutingTests.swift */,
 				0F84EF694F22B85C4FB07ADF /* LiveOfficialPayloadTests.swift */,
@@ -179,6 +208,8 @@
 				98541A0DE8DC22D472A22948 /* LiveTVTests.swift */,
 				C28C84466EC1EBFC40A1BD45 /* ModelsTests.swift */,
 				B04C4417544E0E8EAE446F67 /* NetworkDiagnosticsServiceTests.swift */,
+				4968A840A1B8D7986195EA36 /* OfflineCacheGuideTests.swift */,
+				F71A054DB35A68D475EE5D46 /* OfflineCacheTests.swift */,
 				CE0FC532CB242044E67B7CE2 /* PictureInPictureTests.swift */,
 				7C62F312991CBB58C678574C /* ProgramGuideTests.swift */,
 				A7221131F4842AB294C43DB2 /* ProgramImagePipelineTests.swift */,
@@ -186,7 +217,9 @@
 				71B17459506284E16C8F1197 /* ProgramSearchTests.swift */,
 				02C18B0B716361203794AA7E /* StreamResolverTests.swift */,
 				8B37B5AD819B40999C294E2E /* TVerAPIClientCacheTests.swift */,
+				3C37E66A7D94C0D627C19A09 /* TVerAPIDecodingTests.swift */,
 				36207CBF65F4346306A8B03C /* UsabilityTests.swift */,
+				A51D59DFF9EF2146E84A2899 /* Fixtures */,
 			);
 			path = TVerClientTests;
 			sourceTree = "<group>";
@@ -223,6 +256,23 @@
 				9B694A98CF622006290A9BB2 /* UsabilityModels.swift */,
 			);
 			path = Contracts;
+			sourceTree = "<group>";
+		};
+		A51D59DFF9EF2146E84A2899 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				143F717AC04870996D58E2D4 /* platform_browser_create.json */,
+				EFD8B176B1BCF7AEC61B4639 /* platform_episode_ranking.json */,
+				96FD0800831EEA59969D76A7 /* platform_live_channel_snake.json */,
+				FBAA6BCD36A6A53A032E2328 /* platform_live_channel.json */,
+				181A03CAC399D6ECFC86B0E2 /* platform_live_timeline.json */,
+				DCE8C68CF1A21088AB89A3DA /* platform_ranking.json */,
+				AA6690C7A971DC4367AD526C /* platform_series_episodes.json */,
+				D43D539C45C25127AA5B45AC /* README.md */,
+				D0281BEE9E9BAEC315C0A88F /* service_keyword_search.json */,
+				FE85B2201FAF13AF6335ADA3 /* streaks_live_playback.json */,
+			);
+			path = Fixtures;
 			sourceTree = "<group>";
 		};
 		A852B85A63DED680716132EE /* App */ = {
@@ -283,6 +333,7 @@
 			buildConfigurationList = A0A064EC4DC3F0D999446580 /* Build configuration list for PBXNativeTarget "TVerClientTests" */;
 			buildPhases = (
 				340C96CD896DE12BEECFE4E9 /* Sources */,
+				E3AD9F97B4127EC393687956 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -345,6 +396,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E3AD9F97B4127EC393687956 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A37F1BDE5195C1AEC1067EC /* README.md in Resources */,
+				1BD2868D9C4264C51BD95AD5 /* platform_browser_create.json in Resources */,
+				8ADF5E18D038174683BA3B64 /* platform_episode_ranking.json in Resources */,
+				1AFB131B0CB6E95E4C9BF4F5 /* platform_live_channel.json in Resources */,
+				B817F97830869F951CAB21DB /* platform_live_channel_snake.json in Resources */,
+				582A3C27AF8A789621B68A4C /* platform_live_timeline.json in Resources */,
+				FB178198C4349254500231F4 /* platform_ranking.json in Resources */,
+				00FE6BC19811DAFF579786E9 /* platform_series_episodes.json in Resources */,
+				792BC51251F8E1E2C8C0E9DD /* service_keyword_search.json in Resources */,
+				5BED583FE35E6783909CB643 /* streaks_live_playback.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -356,6 +424,7 @@
 				B7C7EC271A75EC1A2E61EDCA /* AccessibilityTestSupport.swift in Sources */,
 				9815AF8B956628DB44551468 /* CatchUpLookupTests.swift in Sources */,
 				D791FCB8DCF1E264A281EFCD /* DiagnosticLogStoreTests.swift in Sources */,
+				E40EC5A372BE22AB82911D48 /* FixtureMutationTests.swift in Sources */,
 				688F7BA164DF88ECE7B78D4D /* FullScreenPlaybackTests.swift in Sources */,
 				214613217C884666D3639287 /* GuideCatchUpRoutingTests.swift in Sources */,
 				86E6923A8741F2B70ADAC895 /* LiveOfficialPayloadTests.swift in Sources */,
@@ -363,6 +432,8 @@
 				76819A45B46C7A62DB5C8AF4 /* LiveTVTests.swift in Sources */,
 				EE95183E874CE99AD145329F /* ModelsTests.swift in Sources */,
 				E8144F8465B6938C94CFB212 /* NetworkDiagnosticsServiceTests.swift in Sources */,
+				DB93BF603568BB025095CDEF /* OfflineCacheGuideTests.swift in Sources */,
+				45C7DE46716A521CF053F271 /* OfflineCacheTests.swift in Sources */,
 				4BA044543ED44CF87A37EE5E /* PictureInPictureTests.swift in Sources */,
 				10F35AAD9989DA4237AA1D05 /* ProgramGuideTests.swift in Sources */,
 				A797F94513B4E43294A549D1 /* ProgramImagePipelineTests.swift in Sources */,
@@ -370,6 +441,7 @@
 				9341A785DBD70A206C583341 /* ProgramSearchTests.swift in Sources */,
 				FB147CD4A373203C22A29119 /* StreamResolverTests.swift in Sources */,
 				6FDE6C32C5B8CD95DB2EB443 /* TVerAPIClientCacheTests.swift in Sources */,
+				F1BD58C81CF954DC73656BDB /* TVerAPIDecodingTests.swift in Sources */,
 				DF63189119EBBED42C1235AB /* UsabilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

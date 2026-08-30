@@ -56,7 +56,10 @@ final class ProgramLibraryStore: ObservableObject {
         self.now = now
 
         let storedData = defaults.data(forKey: storageKey)
-        let storedSnapshot = storedData.flatMap { try? decoder.decode(Snapshot.self, from: $0) }
+        // `decoder` is a stored property, so it cannot be captured by a closure
+        // before every member is initialized. Decode with a local instance.
+        let snapshotDecoder = JSONDecoder()
+        let storedSnapshot = storedData.flatMap { try? snapshotDecoder.decode(Snapshot.self, from: $0) }
 
         if let snapshot = storedSnapshot {
             let storedFavorites = snapshot.favoritePrograms ?? []
