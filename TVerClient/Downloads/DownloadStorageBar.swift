@@ -43,7 +43,11 @@ struct DownloadStorageBar: View {
             .clipShape(Capsule())
 
             HStack(alignment: .top, spacing: DS.Spacing.l) {
-                legend(DS.Palette.downloaded, title: "ダウンロード済み", bytes: usage.usedBytes)
+                legend(
+                    DS.Palette.downloaded,
+                    title: Vocabulary.Library.downloads,
+                    bytes: usage.usedBytes
+                )
                 legend(Color.secondary.opacity(0.35), title: "その他", bytes: otherBytes)
                 legend(DS.Palette.separator, title: "空き", bytes: usage.availableBytes)
                 Spacer(minLength: 0)
@@ -85,7 +89,7 @@ struct DownloadStorageBar: View {
         let used = Self.formatted(usage.usedBytes)
         let other = Self.formatted(otherBytes)
         let free = Self.formatted(usage.availableBytes)
-        return "保存容量、ダウンロード済み \(used)、その他 \(other)、空き \(free)"
+        return "端末の容量。\(Vocabulary.Library.downloads) \(used)、その他 \(other)、空き \(free)"
     }
 
     static func formatted(_ bytes: Int64) -> String {
