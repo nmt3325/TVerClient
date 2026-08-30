@@ -50,9 +50,32 @@ final class DownloadNetworkMonitor {
 
 /// Emitted by the download driver while an offline copy is produced.
 enum DownloadDriverEvent: Equatable, Sendable {
+    /// 保存先が決まった時点の通知。完了を待たずに控えておかないと、アプリを
+    /// 落とされたときに書きかけの実体を見失い、容量だけが残る。
+    case willDownload(programID: String, location: URL)
     case progress(programID: String, fraction: Double)
     case finished(programID: String, location: URL)
     case failed(programID: String, message: String)
+}
+
+/// 転送が終わった理由。利用者が止めた中断を、失敗と同じ扱いにしないために分ける。
+enum AssetDownloadOutcome: Equatable, Sendable {
+    case succeeded
+    case cancelled
+    case failed(message: String)
+
+    init(error: Error?) {
+        guard let error else {
+            self = .succeeded
+            return
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            self = .cancelled
+        } else {
+            self = .failed(message: DownloadFailureText.message(for: error))
+        }
+    }
 }
 
 /// Abstracts `AVAssetDownloadURLSession` so the state machine can be exercised
@@ -68,13 +91,25 @@ protocol OfflineDownloadDriving: AnyObject {
     func pause(programID: String)
     func resume(programID: String)
     func cancel(programID: String)
+
+    /// 前回の起動から生き残った転送を拾い直し、操作を取り戻せた番組IDを返す。
+    ///
+    /// バックグラウンドセッションのタスクはプロセスをまたいで生き残るのに、
+    /// 参照を捨てていたせいで「一時停止中」から二度と動かなくなっていた。
+    func adoptRunningTasks(knownLocations: [String: URL]) async -> Set<String>
+}
+
+extension OfflineDownloadDriving {
+    /// 拾い直しの仕組みを持たないドライバは「拾えるものは無い」と答える。
+    /// 呼び出し側はその場合、やり直せる状態へ戻す。
+    func adoptRunningTasks(knownLocations _: [String: URL]) async -> Set<String> { [] }
 }
 
 /// Forwards `AVAssetDownloadURLSession` callbacks out of the delegate queue.
 private final class AssetDownloadDelegate: NSObject, AVAssetDownloadDelegate {
     var onWillDownload: (@Sendable (String, URL) -> Void)?
     var onProgress: (@Sendable (String, Double) -> Void)?
-    var onComplete: (@Sendable (String, String?) -> Void)?
+    var onComplete: (@Sendable (String, AssetDownloadOutcome) -> Void)?
 
     func urlSession(
         _ session: URLSession,
@@ -104,7 +139,7 @@ private final class AssetDownloadDelegate: NSObject, AVAssetDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let identifier = task.taskDescription else { return }
-        onComplete?(identifier, error?.localizedDescription)
+        onComplete?(identifier, AssetDownloadOutcome(error: error))
     }
 }
 
@@ -122,7 +157,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
 
     var unavailableReason: String? {
         #if targetEnvironment(simulator)
-            return "シミュレータではオフライン保存を実行できません。実機でお試しください。"
+            return "シミュレータでは\(Vocabulary.Download.action)を実行できません。実機でお試しください。"
         #else
             return nil
         #endif
@@ -137,15 +172,18 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     init(configurationIdentifier: String = "dev.nmt3325.TVerClient.downloads") {
         self.configurationIdentifier = configurationIdentifier
         delegate.onWillDownload = { [weak self] programID, location in
-            Task { @MainActor in self?.locations[programID] = location }
+            Task { @MainActor in
+                self?.locations[programID] = location
+                self?.onEvent?(.willDownload(programID: programID, location: location))
+            }
         }
         delegate.onProgress = { [weak self] programID, fraction in
             Task { @MainActor in
                 self?.onEvent?(.progress(programID: programID, fraction: fraction))
             }
         }
-        delegate.onComplete = { [weak self] programID, message in
-            Task { @MainActor in self?.complete(programID: programID, message: message) }
+        delegate.onComplete = { [weak self] programID, outcome in
+            Task { @MainActor in self?.complete(programID: programID, outcome: outcome) }
         }
     }
 
@@ -164,7 +202,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
             ) else {
                 self.onEvent?(.failed(
                     programID: programID,
-                    message: "この番組はオフライン保存に対応していません。"
+                    message: "この番組は\(Vocabulary.Download.action)に対応していません。ストリーミングでご覧ください。"
                 ))
                 return
             }
@@ -184,16 +222,48 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         locations[programID] = nil
     }
 
-    private func complete(programID: String, message: String?) {
+    /// バックグラウンドセッションに残っているタスクを拾い直す。
+    ///
+    /// アプリを終了しても転送自体は続いている（または中断状態で残っている）ので、
+    /// 参照さえ取り戻せば一時停止・再開・中止がそのまま効く。
+    func adoptRunningTasks(knownLocations: [String: URL]) async -> Set<String> {
+        for (programID, location) in knownLocations where locations[programID] == nil {
+            locations[programID] = location
+        }
+        var adopted: Set<String> = []
+        for allowsCellularAccess in [false, true] {
+            let session = session(allowsCellularAccess: allowsCellularAccess)
+            let existing = await session.allTasks
+            for task in existing {
+                guard let identifier = task.taskDescription,
+                      let aggregate = task as? AVAggregateAssetDownloadTask
+                else { continue }
+                tasks[identifier] = aggregate
+                adopted.insert(identifier)
+            }
+        }
+        return adopted
+    }
+
+    private func complete(programID: String, outcome: AssetDownloadOutcome) {
         let location = locations[programID]
         tasks[programID] = nil
         locations[programID] = nil
-        if let message {
+        switch outcome {
+        case .cancelled:
+            // 利用者が止めた分。すでに記録は畳んであるので何も言わない。
+            return
+        case let .failed(message):
             onEvent?(.failed(programID: programID, message: message))
-        } else if let location {
-            onEvent?(.finished(programID: programID, location: location))
-        } else {
-            onEvent?(.failed(programID: programID, message: "保存先を特定できませんでした。"))
+        case .succeeded:
+            if let location {
+                onEvent?(.finished(programID: programID, location: location))
+            } else {
+                onEvent?(.failed(
+                    programID: programID,
+                    message: "\(Vocabulary.Download.failed)。保存先を特定できませんでした。もう一度\(Vocabulary.Download.action)してください。"
+                ))
+            }
         }
     }
 
@@ -222,6 +292,9 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
 /// phase is flattened here instead.
 struct DownloadPersistedRecord: Codable, Equatable {
     enum Phase: String, Codable {
+        /// 走っている最中に落ちた分。復帰後に自動で続けたい。
+        case downloading
+        /// 利用者が自分で止めた分。復帰後に勝手に動かしてはいけない。
         case paused
         case failed
         case downloaded
@@ -247,6 +320,12 @@ final class DownloadCenter: ObservableObject {
     struct Rejection: Equatable, Identifiable, Sendable {
         let programID: String
         let message: String
+        /// 次に何をすればよいか。理由だけを出して終わらせない。
+        var recovery: String?
+        /// Wi-Fi制限で止めたときだけ「今回だけ進める」を提示する。
+        var canRetryOnCellular = false
+        /// やり直しの導線をお知らせから直接押せるようにしておく。
+        var program: TVerProgram?
         var id: String { programID }
     }
 
@@ -254,10 +333,20 @@ final class DownloadCenter: ObservableObject {
     @Published private(set) var storage: DownloadStorageUsage = .empty
     @Published private(set) var lastRejection: Rejection?
 
+    /// 黙って消さない・黙って失敗しないためのお知らせ。ライブラリ一覧の上に出す。
+    @Published private(set) var notices: [DownloadNotice] = []
+
+    /// 容量表示の鮮度。測れなかったときに古い値を黙って出し続けない。
+    @Published private(set) var freshness: LoadFreshness = .fresh(at: Date())
+
+    /// アプリの終了で転送が切れ、続きから再開できない番組。
+    @Published private(set) var interruptedIDs: Set<String> = []
+
     @Published var wifiOnly = true {
         didSet {
             guard !isApplyingStoredSettings else { return }
             defaults.set(wifiOnly, forKey: wifiOnlyKey)
+            enforceCellularRestriction()
         }
     }
 
@@ -279,6 +368,9 @@ final class DownloadCenter: ObservableObject {
     private var bookmarks: [String: Data] = [:]
     private var resolutions: [String: Task<Void, Never>] = [:]
     private var isApplyingStoredSettings = false
+    /// 走っている最中に落ちた分。拾い直せたら自動で続きを進める。
+    private var pendingAutoResumeIDs: Set<String> = []
+    private var lastStorageCheck: Date?
 
     private var wifiOnlyKey: String { settingsKey + ".wifiOnly" }
     private var deleteAfterWatchingKey: String { settingsKey + ".deleteAfterWatching" }
@@ -326,8 +418,19 @@ final class DownloadCenter: ObservableObject {
         offlineAssetURL(for: programID) != nil
     }
 
+    /// 一時停止中に見えて、実は続きから戻せない状態かどうか。
+    ///
+    /// ここを区別しないと、押しても進まない「再開」ボタンを廖に出し続けてしまう。
+    func isInterrupted(_ programID: String) -> Bool {
+        interruptedIDs.contains(programID)
+    }
+
     func clearRejection() {
         lastRejection = nil
+    }
+
+    func dismissNotice(_ noticeID: String) {
+        notices.removeAll { notice in notice.id == noticeID }
     }
 
     /// Awaits every in-flight stream resolution so a caller can observe the
@@ -341,28 +444,39 @@ final class DownloadCenter: ObservableObject {
     // MARK: - Commands
 
     @discardableResult
-    func start(_ program: TVerProgram) -> DownloadStartResult {
+    func start(_ program: TVerProgram, allowingCellular: Bool = false) -> DownloadStartResult {
         let current = state(for: program.id)
         if current.isFinished || current.isInFlight { return .alreadyPresent }
 
         if let reason = driver.unavailableReason {
-            lastRejection = Rejection(programID: program.id, message: reason)
+            lastRejection = Rejection(programID: program.id, message: reason, program: program)
             return .rejected(reason: reason)
         }
 
-        if wifiOnly, networkStatus() == .cellular {
+        // 圈外では黙って始めても失敗するだけなので、始める前に理由を返す。
+        if networkStatus() == .unavailable {
+            let message = "オフラインのため\(Vocabulary.Download.action)を開始できませんでした。"
             lastRejection = Rejection(
                 programID: program.id,
-                message: "Wi-Fi接続時のみ保存する設定です。設定を変えるかWi-Fiに接続してください。"
+                message: message,
+                recovery: "Wi-Fiまたはモバイル通信に接続してから、もう一度お試しください。",
+                program: program
             )
+            return .rejected(reason: message)
+        }
+
+        if let rejection = cellularRejection(for: program, allowingCellular: allowingCellular) {
+            lastRejection = rejection
             return .blockedByCellular
         }
 
         lastRejection = nil
+        interruptedIDs.remove(program.id)
+        dismissNotice(Self.failureNoticeID(program.id))
         upsert(program: program, state: .queued)
 
-        let allowsCellularAccess = !wifiOnly
-        let title = program.seriesTitle.isEmpty ? program.title : program.seriesTitle
+        let allowsCellularAccess = !wifiOnly || allowingCellular
+        let title = Self.displayTitle(program)
         resolutions[program.id]?.cancel()
         resolutions[program.id] = Task { [weak self] in
             guard let self else { return }
@@ -380,7 +494,7 @@ final class DownloadCenter: ObservableObject {
                 return
             } catch {
                 let presentation = TVerClientError.normalized(from: error).presentation
-                self.update(program.id, to: .failed(message: presentation.message))
+                self.fail(program.id, message: presentation.message)
             }
             self.resolutions[program.id] = nil
         }
@@ -393,8 +507,25 @@ final class DownloadCenter: ObservableObject {
         update(programID, to: .paused(progress: progress))
     }
 
-    func resume(_ programID: String) {
+    /// 一時停止からの再開。
+    ///
+    /// 拾い直せなかった転送はここで無言に行き止まるのではなく、最初からやり直す。
+    /// Wi-Fi限定の判定も、開始時だけでなく再開時にも必ず通す。
+    func resume(_ programID: String, allowingCellular: Bool = false) {
         guard case let .paused(progress) = state(for: programID) else { return }
+        guard let record = records.first(where: { entry in entry.id == programID }) else { return }
+
+        if interruptedIDs.contains(programID) {
+            restart(record.program, allowingCellular: allowingCellular)
+            return
+        }
+
+        if let rejection = cellularRejection(for: record.program, allowingCellular: allowingCellular) {
+            lastRejection = rejection
+            return
+        }
+
+        lastRejection = nil
         driver.resume(programID: programID)
         update(programID, to: .downloading(progress: progress))
     }
@@ -403,32 +534,67 @@ final class DownloadCenter: ObservableObject {
         resolutions[programID]?.cancel()
         resolutions[programID] = nil
         driver.cancel(programID: programID)
+        interruptedIDs.remove(programID)
+        dismissNotice(Self.failureNoticeID(programID))
         guard let index = records.firstIndex(where: { record in record.id == programID }) else {
             return
         }
         guard !records[index].state.isFinished else { return }
+        // 途中まで受け取った実体を残すと、一覧から消えたのに容量だけ占有される。
+        removeStoredAsset(for: programID)
         records.remove(at: index)
         persistRecords()
+        refreshStorage()
     }
 
     func delete(_ programID: String) {
         resolutions[programID]?.cancel()
         resolutions[programID] = nil
         driver.cancel(programID: programID)
-        if let assetURL = assetURLs[programID] {
-            try? FileManager.default.removeItem(at: assetURL)
-        }
-        assetURLs[programID] = nil
-        bookmarks[programID] = nil
+        interruptedIDs.remove(programID)
+        dismissNotice(Self.failureNoticeID(programID))
+        removeStoredAsset(for: programID)
         records.removeAll { record in record.id == programID }
         persistRecords()
         refreshStorage()
     }
 
+    /// 残骸を片付けてから最初からやり直す。中断した転送の唯一の出口。
+    @discardableResult
+    func restart(_ program: TVerProgram, allowingCellular: Bool = false) -> DownloadStartResult {
+        let programID = program.id
+        resolutions[programID]?.cancel()
+        resolutions[programID] = nil
+        driver.cancel(programID: programID)
+        removeStoredAsset(for: programID)
+        interruptedIDs.remove(programID)
+        pendingAutoResumeIDs.remove(programID)
+        dismissNotice(Self.failureNoticeID(programID))
+        records.removeAll { entry in entry.id == programID }
+        persistRecords()
+        return start(program, allowingCellular: allowingCellular)
+    }
+
     func retry(_ programID: String) {
         guard let record = records.first(where: { entry in entry.id == programID }) else { return }
-        records.removeAll { entry in entry.id == programID }
-        start(record.program)
+        restart(record.program)
+    }
+
+    /// お知らせの「最初からやり直す」からまとめて呼ばれる。
+    func restartAll(_ programIDs: [String]) {
+        for programID in programIDs {
+            guard let record = records.first(where: { entry in entry.id == programID }) else {
+                continue
+            }
+            restart(record.program)
+        }
+    }
+
+    /// Wi-Fi制限で止めた分を、今回だけモバイル通信で進める。
+    func resumeAllAllowingCellular(_ programIDs: [String]) {
+        for programID in programIDs {
+            resume(programID, allowingCellular: true)
+        }
     }
 
     /// Drops a saved copy once it has been watched, when the preference asks
@@ -442,6 +608,12 @@ final class DownloadCenter: ObservableObject {
 
     private func handle(_ event: DownloadDriverEvent) {
         switch event {
+        case let .willDownload(programID, location):
+            guard records.contains(where: { record in record.id == programID }) else { return }
+            // 完了前でも位置を残す。これが無いと、中断分の実体を二度と消せない。
+            assetURLs[programID] = location
+            bookmarks[programID] = try? location.bookmarkData()
+            persistRecords()
         case let .progress(programID, fraction):
             guard state(for: programID).isInFlight else { return }
             update(programID, to: .downloading(progress: Self.clamp(fraction)))
@@ -449,21 +621,76 @@ final class DownloadCenter: ObservableObject {
             guard records.contains(where: { record in record.id == programID }) else { return }
             assetURLs[programID] = location
             bookmarks[programID] = try? location.bookmarkData()
+            interruptedIDs.remove(programID)
             update(programID, to: .downloaded(bytes: Self.directorySize(at: location)))
             refreshStorage()
         case let .failed(programID, message):
-            guard let current = records.first(where: { record in record.id == programID }) else {
-                return
-            }
-            guard !current.state.isFinished else { return }
-            update(programID, to: .failed(message: message))
+            fail(programID, message: message)
         }
+    }
+
+    /// 失敗を行の小さな添え字だけで済ませない。理由と再試行手段をお知らせにも出す。
+    private func fail(_ programID: String, message: String) {
+        guard let current = records.first(where: { record in record.id == programID }) else {
+            return
+        }
+        guard !current.state.isFinished else { return }
+        interruptedIDs.remove(programID)
+        update(programID, to: .failed(message: message))
+        post(DownloadNotice(
+            id: Self.failureNoticeID(programID),
+            kind: .warning,
+            message: "「\(Self.displayTitle(current.program))」の\(Vocabulary.Download.failed)。",
+            recovery: message,
+            action: .restart(programIDs: [programID], label: "もう一度\(Vocabulary.Download.action)")
+        ))
+    }
+
+    // MARK: - Wi-Fi restriction
+
+    /// Wi-Fi限定の判定を一か所にまとめる。経路ごとに書くと必ずどこかが抜ける。
+    private func cellularRejection(
+        for program: TVerProgram,
+        allowingCellular: Bool
+    ) -> Rejection? {
+        guard !allowingCellular, wifiOnly, networkStatus() == .cellular else { return nil }
+        return Rejection(
+            programID: program.id,
+            message: "Wi-Fi接続時のみ\(Vocabulary.Download.action)する設定のため、開始しませんでした。",
+            recovery: "Wi-Fiに接続するか、この番組だけモバイル通信で進めてください。",
+            canRetryOnCellular: true,
+            program: program
+        )
+    }
+
+    /// 設定を後からWi-Fi限定にしたとき、すでに走っている転送を放置しない。
+    private func enforceCellularRestriction() {
+        guard wifiOnly, networkStatus() == .cellular else { return }
+        let affected = records.filter { record in record.state.isInFlight }
+        guard !affected.isEmpty else { return }
+        for record in affected {
+            driver.pause(programID: record.id)
+            update(record.id, to: .paused(progress: Self.inFlightProgress(record.state)))
+        }
+        post(DownloadNotice(
+            id: "download.wifiOnly.enforced",
+            kind: .info,
+            message: "モバイル通信のため、\(affected.count)件の\(Vocabulary.Download.action)を\(Vocabulary.Download.paused)にしました。",
+            recovery: "Wi-Fiに接続すると続きから進みます。",
+            action: .resumeOnCellular(
+                programIDs: affected.map { record in record.id },
+                label: "今回だけモバイル通信で続ける"
+            )
+        ))
     }
 
     // MARK: - Persistence
 
     /// Rebuilds `records`, the offline lookup and the stored preferences after
     /// a cold launch.
+    ///
+    /// 以前は実体の見つからない記録を黙って捨て、中断分は一律に「一時停止中」として
+    /// 二度と動かない行にしていた。消えたことを告げ、やり直せる状態まで戻す。
     func restore() {
         isApplyingStoredSettings = true
         if let stored = defaults.object(forKey: wifiOnlyKey) as? Bool { wifiOnly = stored }
@@ -475,20 +702,43 @@ final class DownloadCenter: ObservableObject {
         ensureDirectory()
         assetURLs = [:]
         bookmarks = [:]
+        interruptedIDs = []
+        pendingAutoResumeIDs = []
+        notices = []
 
-        guard let data = try? Data(contentsOf: metadataURL),
-              let stored = try? JSONDecoder().decode([DownloadPersistedRecord].self, from: data)
-        else {
+        guard let data = try? Data(contentsOf: metadataURL) else {
             records = []
+            reportReclaimed(reclaimOrphanedFiles())
+            refreshStorage()
+            return
+        }
+
+        guard let stored = try? JSONDecoder().decode([DownloadPersistedRecord].self, from: data)
+        else {
+            // 索引が壊れているときに、実体だけ残して黙るのが一番たちが悪い。
+            records = []
+            let reclaimed = reclaimOrphanedFiles()
+            post(DownloadNotice(
+                id: "download.restore.metadata",
+                kind: .warning,
+                message: "\(Vocabulary.Library.downloads)の管理情報を読み取れなかったため、一覧を作り直しました。",
+                recovery: "見たい番組は、もう一度\(Vocabulary.Download.action)してください。"
+            ))
+            reportReclaimed(reclaimed)
             refreshStorage()
             return
         }
 
         var restored: [DownloadRecord] = []
+        var missingTitles: [String] = []
         for entry in stored {
             switch entry.phase {
             case .downloaded:
-                guard let assetURL = resolveAsset(entry) else { continue }
+                guard let assetURL = resolveAsset(entry) else {
+                    // ここで黙って continue していたせいで、番組が無言で消えていた。
+                    missingTitles.append(Self.displayTitle(entry.program))
+                    continue
+                }
                 assetURLs[entry.program.id] = assetURL
                 bookmarks[entry.program.id] = entry.bookmark
                 restored.append(DownloadRecord(
@@ -496,23 +746,134 @@ final class DownloadCenter: ObservableObject {
                     state: .downloaded(bytes: entry.bytes),
                     updatedAt: entry.updatedAt
                 ))
+            case .downloading:
+                restored.append(restoreInterrupted(entry, autoResume: true))
             case .paused:
-                restored.append(DownloadRecord(
-                    program: entry.program,
-                    state: .paused(progress: Self.clamp(entry.progress)),
-                    updatedAt: entry.updatedAt
-                ))
+                restored.append(restoreInterrupted(entry, autoResume: false))
             case .failed:
                 restored.append(DownloadRecord(
                     program: entry.program,
-                    state: .failed(message: entry.message ?? "保存に失敗しました。"),
+                    state: .failed(
+                        message: entry.message
+                            ?? "\(Vocabulary.Download.failed)。もう一度お試しください。"
+                    ),
                     updatedAt: entry.updatedAt
                 ))
             }
         }
         records = restored
         persistRecords()
+
+        let reclaimed = reclaimOrphanedFiles()
+        if !missingTitles.isEmpty {
+            post(DownloadNotice(
+                id: "download.restore.missing",
+                kind: .warning,
+                message: "\(missingTitles.count)件の\(Vocabulary.Library.downloads)が端末に見つかりませんでした。",
+                recovery: "\(Self.joined(missingTitles))。もう一度\(Vocabulary.Download.action)してください。"
+            ))
+        }
+        reportReclaimed(reclaimed)
         refreshStorage()
+
+        // 拾い直しは非同期。拾えたものは進め、拾えなかったものはそう告げる。
+        Task { [weak self] in await self?.adoptInterruptedTransfers() }
+    }
+
+    private func restoreInterrupted(
+        _ entry: DownloadPersistedRecord,
+        autoResume: Bool
+    ) -> DownloadRecord {
+        let programID = entry.program.id
+        if let partial = resolveAsset(entry) {
+            // 途中までの実体を覚えておかないと、やり直し時に容量を回収できない。
+            assetURLs[programID] = partial
+            bookmarks[programID] = entry.bookmark
+        }
+        interruptedIDs.insert(programID)
+        if autoResume { pendingAutoResumeIDs.insert(programID) }
+        return DownloadRecord(
+            program: entry.program,
+            state: .paused(progress: Self.clamp(entry.progress)),
+            updatedAt: entry.updatedAt
+        )
+    }
+
+    /// バックグラウンドに残っている転送を拾い直し、拾えなかった分はやり直せるようにする。
+    private func adoptInterruptedTransfers() async {
+        let candidates = interruptedIDs
+        guard !candidates.isEmpty else { return }
+        let adopted = await driver.adoptRunningTasks(knownLocations: assetURLs)
+
+        var strandedIDs: [String] = []
+        var strandedTitles: [String] = []
+        for programID in candidates {
+            guard let record = records.first(where: { entry in entry.id == programID }) else {
+                continue
+            }
+            guard adopted.contains(programID) else {
+                strandedIDs.append(programID)
+                strandedTitles.append(Self.displayTitle(record.program))
+                continue
+            }
+            interruptedIDs.remove(programID)
+            guard pendingAutoResumeIDs.contains(programID) else { continue }
+            guard cellularRejection(for: record.program, allowingCellular: false) == nil else {
+                continue
+            }
+            driver.resume(programID: programID)
+            update(programID, to: .downloading(progress: Self.inFlightProgress(record.state)))
+        }
+        pendingAutoResumeIDs = []
+
+        guard !strandedIDs.isEmpty else { return }
+        post(DownloadNotice(
+            id: "download.restore.interrupted",
+            kind: .warning,
+            message: "\(strandedIDs.count)件の\(Vocabulary.Download.action)がアプリの終了で中断しました。続きからは再開できません。",
+            recovery: "\(Self.joined(strandedTitles))。最初からやり直すか、一覧から削除してください。",
+            action: .restart(programIDs: strandedIDs, label: "最初からやり直す")
+        ))
+    }
+
+    /// どの記録にも紐づかない実体を片付け、戻った容量を返す。
+    @discardableResult
+    private func reclaimOrphanedFiles() -> Int64 {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return 0 }
+
+        let keep = Set(assetURLs.values.map { url in url.standardizedFileURL.path })
+        let metadataPath = metadataURL.standardizedFileURL.path
+        var reclaimed: Int64 = 0
+        for entry in entries {
+            let path = entry.standardizedFileURL.path
+            if path == metadataPath || keep.contains(path) { continue }
+            // 残すべき実体を内側に抱えている入れ物は消さない。
+            if keep.contains(where: { kept in kept.hasPrefix(path + "/") }) { continue }
+            let size = Self.directorySize(at: entry)
+            guard (try? manager.removeItem(at: entry)) != nil else { continue }
+            reclaimed += size
+        }
+        return reclaimed
+    }
+
+    private func reportReclaimed(_ bytes: Int64) {
+        guard bytes > 0 else { return }
+        post(DownloadNotice(
+            id: "download.restore.reclaimed",
+            kind: .info,
+            message: "どの番組にも紐づかないファイル\(Self.formattedBytes(bytes))分を削除し、空き容量に戻しました。",
+            recovery: nil
+        ))
+    }
+
+    private func post(_ notice: DownloadNotice) {
+        notices.removeAll { existing in existing.id == notice.id }
+        notices.append(notice)
+        if notices.count > 4 { notices.removeFirst(notices.count - 4) }
     }
 
     /// Recomputes how much space the offline library occupies and how much of
@@ -526,8 +887,20 @@ final class DownloadCenter: ObservableObject {
         let values = try? directory.resourceValues(
             forKeys: [.volumeAvailableCapacityForImportantUsageKey]
         )
-        let available = values?.volumeAvailableCapacityForImportantUsage ?? 0
-        storage = DownloadStorageUsage(usedBytes: used, availableBytes: available)
+        if let available = values?.volumeAvailableCapacityForImportantUsage {
+            storage = DownloadStorageUsage(usedBytes: used, availableBytes: available)
+            let now = Date()
+            lastStorageCheck = now
+            freshness = .fresh(at: now)
+        } else {
+            // 測れなかったことを黙って、古い数字を新しい顔で出さない。
+            storage = DownloadStorageUsage(usedBytes: used, availableBytes: storage.availableBytes)
+            freshness = .refreshFailed(
+                lastGoodAt: lastStorageCheck,
+                message: "端末の空き容量を確認できませんでした。",
+                recovery: "表示中の空き容量は古い可能性があります。下に引いて更新してください。"
+            )
+        }
     }
 
     private func persistRecords() {
@@ -541,9 +914,9 @@ final class DownloadCenter: ObservableObject {
             case .notDownloaded:
                 return nil
             case .queued:
-                phase = .paused
+                phase = .downloading
             case let .downloading(value):
-                phase = .paused
+                phase = .downloading
                 progress = value
             case let .paused(value):
                 phase = .paused
@@ -594,6 +967,14 @@ final class DownloadCenter: ObservableObject {
         return String(url.path.dropFirst(base.count))
     }
 
+    private func removeStoredAsset(for programID: String) {
+        if let assetURL = assetURLs[programID] {
+            try? FileManager.default.removeItem(at: assetURL)
+        }
+        assetURLs[programID] = nil
+        bookmarks[programID] = nil
+    }
+
     private func ensureDirectory() {
         try? FileManager.default.createDirectory(
             at: directory,
@@ -642,6 +1023,38 @@ final class DownloadCenter: ObservableObject {
     nonisolated static func clamp(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max(value, 0), 1)
+    }
+
+    /// 一覧と読み上げで使う表示名。
+    nonisolated static func displayTitle(_ program: TVerProgram) -> String {
+        program.seriesTitle.isEmpty ? program.title : program.seriesTitle
+    }
+
+    nonisolated static func inFlightProgress(_ state: DownloadState) -> Double {
+        switch state {
+        case let .downloading(value):
+            return value
+        case let .paused(value):
+            return value
+        default:
+            return 0
+        }
+    }
+
+    nonisolated static func failureNoticeID(_ programID: String) -> String {
+        "download.failed.\(programID)"
+    }
+
+    nonisolated static func joined(_ titles: [String]) -> String {
+        let shown = titles.prefix(3).map { title in "「\(title)」" }.joined(separator: "、")
+        return titles.count > 3 ? "\(shown) ほか\(titles.count - 3)件" : shown
+    }
+
+    nonisolated static func formattedBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useMB, .useGB]
+        return formatter.string(fromByteCount: max(0, bytes))
     }
 
     /// Bytes occupied by a file, or by every regular file under a folder.
