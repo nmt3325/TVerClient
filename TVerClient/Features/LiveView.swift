@@ -504,6 +504,15 @@ struct LivePlaybackView: View {
                 }
             }
         }
+        .onAppear {
+            // 停止したときに小窓だけが生き残らないよう、この画面が持っている
+            // Picture in Picture の調整役を再生側へ預ける。見逃し側と同じ扱いにする。
+            playbackController.bindPictureInPicture(pictureInPicture)
+        }
+        .onDisappear {
+            // 画面を離れたら預けたものを返す。別の画面が預け直したあとなら何もしない。
+            playbackController.unbindPictureInPicture(pictureInPicture)
+        }
         .task(id: channel.id) { await playbackController.playLive(channel) }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
             FullScreenPlaybackView(
