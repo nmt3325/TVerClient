@@ -36,6 +36,18 @@ final class ProgramImagePipelineRegressionTests: XCTestCase {
         let abandoned = expectation(description: "cancelled subscriber stays silent")
         abandoned.isInverted = true
         let cancelledToken = pipeline.loadImage(from: url) { _ in abandoned.fulfill() }
+        // Cancelling before the stub has seen the first request makes the request-count
+        // assertion depend on machine load: URLSession may never call startLoading for a
+        // task that is cancelled first, which leaves the counter at 1 for the whole test.
+        let firstRequestDeadline = Date().addingTimeInterval(2)
+        while RedirectableImageURLProtocol.requestCount == 0, Date() < firstRequestDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(
+            RedirectableImageURLProtocol.requestCount,
+            1,
+            "The first request must reach the stub before it is cancelled"
+        )
         cancelledToken.cancel()
 
         // Scrolling back re-requests the very same URL while the cancelled task is still
