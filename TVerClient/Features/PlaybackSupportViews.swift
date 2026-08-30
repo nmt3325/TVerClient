@@ -37,61 +37,40 @@ struct PlaybackFailureView: View {
     }
 }
 
+/// Standalone timeline for surfaces that do not overlay their controls.
+///
+/// The old implementation wrapped a `Slider` in `TimelineView(.periodic(by: 1))`,
+/// which rebuilt the slider under the finger every second and made seeking
+/// impossible. It now draws the shared scrubber and commits a single seek.
 struct PlaybackTimelineView: View {
     @ObservedObject var playbackController: PlaybackController
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let elapsed = safeElapsed
-            if let duration = safeDuration {
-                VStack(spacing: 6) {
-                    Slider(
-                        value: Binding(
-                            get: { min(elapsed, duration) },
-                            set: { playbackController.seek(to: $0) }
-                        ),
-                        in: 0 ... duration
-                    )
-                    .accessibilityLabel(TVerAccessibilityText.playbackTime(elapsed: elapsed, duration: duration))
-                    HStack {
-                        Text(formattedDuration(elapsed))
-                        Spacer()
-                        Text(formattedDuration(duration))
-                    }
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                }
-            } else {
-                Text(TVerAccessibilityText.playbackTime(elapsed: elapsed, duration: nil))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .accessibilityLabel(TVerAccessibilityText.playbackTime(elapsed: elapsed, duration: nil))
+        VStack(spacing: DS.Spacing.xs) {
+            PlaybackScrubber(
+                elapsed: playbackController.currentTime,
+                duration: playbackController.duration ?? 0,
+                bufferedFraction: playbackController.loadedFraction,
+                isEnabled: playbackController.canSeek,
+                onScrubStarted: { playbackController.beginScrubbing() },
+                onScrubChanged: { playbackController.previewScrub(to: $0) },
+                onScrubEnded: { playbackController.endScrubbing(at: $0) },
+                onAdjust: { playbackController.seek(by: $0) }
+            )
+            HStack {
+                Text(ScrubberMath.formattedTime(playbackController.currentTime))
+                Spacer()
+                Text(durationText)
             }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
         }
     }
 
-    private var safeElapsed: TimeInterval {
-        let elapsed = playbackController.player.currentTime().seconds
-        return elapsed.isFinite ? max(0, elapsed) : 0
-    }
-
-    private var safeDuration: TimeInterval? {
-        guard let duration = playbackController.player.currentItem?.duration.seconds,
-              duration.isFinite,
-              duration > 0
-        else { return nil }
-        return duration
-    }
-
-    private func formattedDuration(_ value: TimeInterval) -> String {
-        let total = max(0, Int(value.rounded()))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
-        return String(format: "%d:%02d", minutes, seconds)
+    private var durationText: String {
+        guard let duration = playbackController.duration else { return "--:--" }
+        return ScrubberMath.formattedTime(duration)
     }
 }
 
