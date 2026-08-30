@@ -1,0 +1,42 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "episode",
+        "content": {
+          "id": "lv000001",
+          "version": 1,
+          "title": "プレースホルダーニュース",
+          "seriesTitle": "サンプルライブA",
+          "description": "サンプルの説明文です。",
+          "startAt": 1893456000,
+          "endAt": 1893459600,
+          "thumbnailPath": "/images/placeholder/lv000001.jpg"
+        }
+      },
+      {
+        "type": "episode",
+        "content": {
+          "id": "lv000002",
+          "version": 1,
+          "title": "プレースホルダースポーツ",
+          "seriesTitle": "サンプルライブB",
+          "description": "サンプルの説明文です。",
+          "startAt": 1893459600,
+          "endAt": 1893463200,
+          "thumbnailPath": "/images/placeholder/lv000002.jpg"
+        }
+      },
+      {
+        "type": "pause",
+        "content": {
+          "id": "",
+          "version": 0,
+          "startAt": 1893463200,
+          "endAt": 1893466800
+        }
+      }
+    ]
+  }
+}

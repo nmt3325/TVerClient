@@ -1,0 +1,20 @@
+{
+  "id": "ref:placeholder-simul-ch01",
+  "name": "サンプルライブ配信",
+  "live": true,
+  "duration": 0,
+  "sources": [
+    {
+      "src": "https://placeholder.example/live/ch01/index.m3u8",
+      "type": "application/x-mpegURL",
+      "ext_x_version": "6"
+    }
+  ],
+  "drm": {
+    "license_url": "https://placeholder.example/license",
+    "certificate_url": "https://placeholder.example/certificate"
+  },
+  "advertising": {
+    "vmap_url": "https://placeholder.example/vmap"
+  }
+}

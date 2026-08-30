@@ -216,16 +216,35 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
             return
         }
         guard state != .starting, state != .active else { return }
+        // A stop is still in flight: starting again from here would make the
+        // delegate callbacks of the two transitions overwrite each other.
+        guard state != .stopping else { return }
 
         lastFailure = nil
         state = .starting
         driver.startPictureInPicture()
     }
 
+    /// Stops Picture in Picture, including a start that has not been confirmed
+    /// yet.
+    ///
+    /// `.starting` used to be a dead end: the driver reports nothing back for a
+    /// start it dropped, and a stop request was ignored in that state. The same
+    /// applies to a `.active` state whose driver is no longer running, where no
+    /// delegate callback can ever leave `.stopping` again.
     func stop() {
-        guard let driver, state == .active || driver.isPictureInPictureActive else { return }
+        guard let driver else { return }
+        let driverIsRunning = driver.isPictureInPictureActive
+        guard state == .active || state == .starting || driverIsRunning else { return }
+
         state = .stopping
         driver.stopPictureInPicture()
+
+        guard driverIsRunning else {
+            // Nothing was live, so no delegate callback is coming.
+            handleDidStop()
+            return
+        }
     }
 
     private func setPossible(_ possible: Bool) {

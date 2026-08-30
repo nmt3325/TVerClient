@@ -2,6 +2,14 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
+/// Hosts the shared `AVPlayer` video layer.
+///
+/// `UIBackgroundModes: audio` on its own does not buy background playback: iOS
+/// suspends the player as soon as the app is backgrounded while an
+/// `AVPlayerLayer` still holds it. Releasing the player while we are in the
+/// background - unless Picture in Picture owns the video - is what makes the
+/// declared background audio real, and re-binding it on the way back keeps the
+/// same item on screen.
 final class PlayerLayerContainerView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
 
@@ -10,6 +18,76 @@ final class PlayerLayerContainerView: UIView {
             preconditionFailure("PlayerLayerContainerView requires AVPlayerLayer")
         }
         return playerLayer
+    }
+
+    /// Picture in Picture renders from this very layer, so the player has to
+    /// stay attached while a PiP session owns it.
+    var isPictureInPictureActive: @MainActor () -> Bool = { false }
+
+    private let notificationCenter: NotificationCenter
+    private var notificationTokens: [NSObjectProtocol] = []
+    private var backgroundedPlayer: AVPlayer?
+
+    init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+        super.init(frame: .zero)
+        installLifecycleObservers()
+    }
+
+    required init?(coder: NSCoder) {
+        preconditionFailure("PlayerLayerContainerView is created in code only")
+    }
+
+    deinit {
+        notificationTokens.forEach(notificationCenter.removeObserver)
+    }
+
+    /// Binds the player without fighting the background release.
+    func setPlayer(_ newPlayer: AVPlayer?) {
+        if backgroundedPlayer != nil {
+            backgroundedPlayer = newPlayer
+            return
+        }
+        if playerLayer.player !== newPlayer {
+            playerLayer.player = newPlayer
+        }
+    }
+
+    func releasePlayer() {
+        backgroundedPlayer = nil
+        playerLayer.player = nil
+    }
+
+    func releasePlayerForBackground() {
+        guard backgroundedPlayer == nil, !isPictureInPictureActive() else { return }
+        guard let player = playerLayer.player else { return }
+        backgroundedPlayer = player
+        playerLayer.player = nil
+    }
+
+    func restorePlayerForForeground() {
+        guard let player = backgroundedPlayer else { return }
+        backgroundedPlayer = nil
+        if playerLayer.player !== player {
+            playerLayer.player = player
+        }
+    }
+
+    private func installLifecycleObservers() {
+        notificationTokens.append(notificationCenter.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.releasePlayerForBackground() }
+        })
+        notificationTokens.append(notificationCenter.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.restorePlayerForForeground() }
+        })
     }
 }
 
@@ -55,7 +133,7 @@ struct PlayerLayerView: UIViewRepresentable {
         if regainedOwnership {
             // Re-binding the shared player makes this layer render again after
             // the full screen surface released it.
-            view.playerLayer.player = nil
+            view.releasePlayer()
         }
         configure(view)
 
@@ -81,15 +159,14 @@ struct PlayerLayerView: UIViewRepresentable {
         coordinator: Coordinator
     ) {
         coordinator.pictureInPicture.detach(from: view.playerLayer)
-        view.playerLayer.player = nil
+        view.releasePlayer()
         coordinator.attachedLayer = nil
     }
 
     private func configure(_ view: PlayerLayerContainerView) {
         view.backgroundColor = .black
-        if view.playerLayer.player !== player {
-            view.playerLayer.player = player
-        }
+        view.isPictureInPictureActive = { [pictureInPicture] in pictureInPicture.isActive }
+        view.setPlayer(player)
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity
         }

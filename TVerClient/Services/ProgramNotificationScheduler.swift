@@ -40,11 +40,27 @@ struct ProgramNotificationRequest: Equatable, Sendable {
     let userInfo: [String: String]
 }
 
+/// Identifier and fire date of a request the system still has queued.
+struct ProgramNotificationPendingRequest: Equatable, Sendable {
+    let identifier: String
+    let fireDate: Date
+}
+
 protocol ProgramNotificationCenter: Sendable {
     func authorizationState() async -> ProgramNotificationAuthorizationState
     func requestAuthorization() async throws -> ProgramNotificationAuthorizationState
     func add(_ request: ProgramNotificationRequest) async throws
     func removePendingRequests(withIdentifiers identifiers: [String]) async
+
+    /// Requests the system has queued but not delivered yet, used to keep the
+    /// app under the per-app pending notification limit.
+    func pendingRequests() async -> [ProgramNotificationPendingRequest]
+}
+
+extension ProgramNotificationCenter {
+    /// Centres that cannot enumerate queued requests opt out of slot
+    /// management rather than failing to build.
+    func pendingRequests() async -> [ProgramNotificationPendingRequest] { [] }
 }
 
 final class UserNotificationProgramNotificationCenter: ProgramNotificationCenter, @unchecked Sendable {
@@ -93,6 +109,19 @@ final class UserNotificationProgramNotificationCenter: ProgramNotificationCenter
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
     }
 
+    func pendingRequests() async -> [ProgramNotificationPendingRequest] {
+        await center.pendingNotificationRequests().compactMap { pending in
+            guard
+                let trigger = pending.trigger as? UNCalendarNotificationTrigger,
+                let fireDate = trigger.nextTriggerDate()
+            else { return nil }
+            return ProgramNotificationPendingRequest(
+                identifier: pending.identifier,
+                fireDate: fireDate
+            )
+        }
+    }
+
     static func authorizationState(
         for status: UNAuthorizationStatus
     ) -> ProgramNotificationAuthorizationState {
@@ -124,6 +153,7 @@ enum ProgramNotificationSchedulerError: LocalizedError, Equatable {
     case authorizationRequired
     case authorizationDenied
     case notificationTimePassed
+    case pendingLimitReached
 
     var errorDescription: String? {
         switch self {
@@ -133,11 +163,17 @@ enum ProgramNotificationSchedulerError: LocalizedError, Equatable {
             return "通知が許可されていません。設定アプリから通知を有効にしてください。"
         case .notificationTimePassed:
             return "通知予定時刻を過ぎているため、通知を設定できません。"
+        case .pendingLimitReached:
+            return "予約中の通知が上限の\(ProgramNotificationScheduler.maximumPendingNotifications)件に達しています。もっと先の番組の通知を解除してから設定してください。"
         }
     }
 }
 
 actor ProgramNotificationScheduler {
+    /// iOS keeps only this many pending local notifications per app and
+    /// silently discards anything past it.
+    static let maximumPendingNotifications = 64
+
     private let center: any ProgramNotificationCenter
 
     init(center: any ProgramNotificationCenter = UserNotificationProgramNotificationCenter()) {
@@ -184,6 +220,10 @@ actor ProgramNotificationScheduler {
                 "programID": program.id
             ]
         )
+        try await makeRoomForPendingRequest(
+            identifier: request.identifier,
+            fireDate: fireDate
+        )
         try await center.add(request)
         return request
     }
@@ -195,8 +235,16 @@ actor ProgramNotificationScheduler {
         leadTime: ProgramNotificationLeadTime = .fiveMinutes,
         now: Date = Date()
     ) async throws -> ProgramNotificationRequest {
-        // UNUserNotificationCenter replaces a pending request atomically when its identifier matches.
-        try await schedule(program: program, channel: channel, leadTime: leadTime, now: now)
+        // UNUserNotificationCenter replaces a pending request atomically when its identifier
+        // matches, but only when the new request is accepted. When it is not -- the programme
+        // moved into the past, or every slot is taken by a sooner programme -- the previous
+        // request would stay queued and fire for a start time this programme no longer has.
+        do {
+            return try await schedule(program: program, channel: channel, leadTime: leadTime, now: now)
+        } catch {
+            await cancel(programID: program.id, channelID: channel.id)
+            throw error
+        }
     }
 
     func cancel(programID: String, channelID: String) async {
@@ -207,6 +255,20 @@ actor ProgramNotificationScheduler {
 
     func cancel(program: TVerLiveProgram, channel: TVerLiveChannel) async {
         await cancel(programID: program.id, channelID: channel.id)
+    }
+
+    /// Keeps the soonest requests when the queue is full: the system drops
+    /// silently, so the eviction has to be explicit to stay predictable.
+    private func makeRoomForPendingRequest(identifier: String, fireDate: Date) async throws {
+        let others = await center.pendingRequests().filter { $0.identifier != identifier }
+        guard others.count >= Self.maximumPendingNotifications else { return }
+
+        let sorted = others.sorted { $0.fireDate < $1.fireDate }
+        let evictable = sorted.dropFirst(Self.maximumPendingNotifications - 1)
+        guard let soonestEvictable = evictable.first, fireDate < soonestEvictable.fireDate else {
+            throw ProgramNotificationSchedulerError.pendingLimitReached
+        }
+        await center.removePendingRequests(withIdentifiers: evictable.map(\.identifier))
     }
 
     nonisolated static func identifier(channelID: String, programID: String) -> String {

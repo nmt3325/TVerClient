@@ -8,13 +8,30 @@ final class ProgramGuideViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
+    /// When the guide currently on screen was produced by a successful fetch.
+    @Published private(set) var lastUpdatedAt: Date?
+
+    /// True while the rows on screen come from the offline copy rather than a
+    /// fresh response. Stale data is never presented silently.
+    @Published private(set) var isShowingCachedData = false
+
     private let service: any TVerProgramGuideServicing
     private let usesPreviewFallback: Bool
+    private let snapshotStore: ProgramGuideSnapshotStore?
+    private let now: () -> Date
     private var hasLoaded = false
+    private var didRestoreSnapshot = false
 
-    init(service: any TVerProgramGuideServicing, usesPreviewFallback: Bool = true) {
+    init(
+        service: any TVerProgramGuideServicing,
+        usesPreviewFallback: Bool = true,
+        snapshotStore: ProgramGuideSnapshotStore? = ProgramGuideSnapshotStore.shared,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.service = service
         self.usesPreviewFallback = usesPreviewFallback
+        self.snapshotStore = snapshotStore
+        self.now = now
     }
 
     var showsInitialLoading: Bool {
@@ -25,9 +42,29 @@ final class ProgramGuideViewModel: ObservableObject {
         guide.contains { !$0.programs.isEmpty }
     }
 
+    /// Banner text for the guide screen, or nil while the data is live.
+    var offlineNotice: String? {
+        guard isShowingCachedData else { return nil }
+        return ProgramGuideOfflineNotice.text(lastUpdatedAt: lastUpdatedAt, now: now())
+    }
+
     func loadIfNeeded() async {
+        await restoreCachedGuideIfNeeded()
         guard !hasLoaded else { return }
         await load()
+    }
+
+    /// Draws the last known guide immediately so a cold launch is not blank,
+    /// and keeps it flagged as cached until the revalidation behind it lands.
+    func restoreCachedGuideIfNeeded() async {
+        guard !didRestoreSnapshot else { return }
+        didRestoreSnapshot = true
+        guard !hasLoaded, guide.isEmpty, let snapshotStore else { return }
+        guard let snapshot = await snapshotStore.load(at: now()) else { return }
+        guard snapshot.guide.contains(where: { !$0.programs.isEmpty }) else { return }
+        guide = snapshot.guide
+        lastUpdatedAt = snapshot.savedAt
+        isShowingCachedData = true
     }
 
     func load() async {
@@ -37,14 +74,24 @@ final class ProgramGuideViewModel: ObservableObject {
         do {
             let response = try await service.fetchProgramGuide(forceRefresh: hasLoaded)
             #if DEBUG
-                guide = response.contains(where: { !$0.programs.isEmpty }) || !usesPreviewFallback
+                let resolved = response.contains(where: { !$0.programs.isEmpty }) || !usesPreviewFallback
                     ? response : PreviewFixture.programGuide
             #else
-                guide = response
+                let resolved = response
             #endif
+            guide = resolved
             hasLoaded = true
+            let updatedAt = now()
+            lastUpdatedAt = updatedAt
+            isShowingCachedData = false
+            if let snapshotStore, resolved.contains(where: { !$0.programs.isEmpty }) {
+                await snapshotStore.save(resolved, at: updatedAt)
+            }
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            // Whatever is still on screen came from an earlier fetch, so label
+            // it instead of letting stale rows pass for live ones.
+            isShowingCachedData = !guide.isEmpty
             DiagnosticLogStore.shared.record(
                 .error,
                 category: "program-guide",
@@ -63,6 +110,10 @@ enum ProgramGuideMetrics {
     static let stationHeaderHeight: CGFloat = 66
     static let minimumTapTarget: CGFloat = 44
     static let minimumProgramHeight = minimumTapTarget
+
+    /// Upper bound for how many days a single slot may be spread across, so a
+    /// malformed end date cannot make the picker walk years of days.
+    static let maximumProgramDaySpan = 7
 
     static func gridSize(channelCount: Int) -> CGSize {
         CGSize(
@@ -92,14 +143,62 @@ enum ProgramGuideMetrics {
         return DateInterval(start: start, end: end)
     }
 
+    /// Days the picker should offer.
+    ///
+    /// A slot running past midnight is rendered on every day it overlaps, so
+    /// listing only its start day hid the tail of an overnight broadcast: the
+    /// day existed in the grid but could not be selected.
     static func dates(in guide: [TVerGuideChannel]) -> [Date] {
-        let values = guide.flatMap(\.programs).map { calendar.startOfDay(for: $0.startAt) }
-        return Array(Set(values)).sorted()
+        var days: Set<Date> = []
+        for program in guide.flatMap(\.programs) {
+            let firstDay = calendar.startOfDay(for: program.startAt)
+            days.insert(firstDay)
+            guard program.endAt > program.startAt else { continue }
+
+            let lastDay = calendar.startOfDay(for: program.endAt)
+            var day = firstDay
+            var remainingDays = maximumProgramDaySpan
+            while day < lastDay, remainingDays > 0 {
+                remainingDays -= 1
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+                // A slot ending exactly at midnight does not reach into the
+                // next day, matching the rule `programs(_:on:)` applies.
+                if program.endAt > day { days.insert(day) }
+            }
+        }
+        return days.sorted()
+    }
+
+    /// The day the guide should open on.
+    ///
+    /// `dates` holds day starts, so ranking them by distance from "now" made a
+    /// late-evening session jump to tomorrow: today began up to 24 hours ago
+    /// while tomorrow begins in minutes.
+    static func preferredDate(in dates: [Date], now: Date = Date()) -> Date? {
+        guard !dates.isEmpty else { return nil }
+        if let today = dates.first(where: { isSameDay($0, now) }) { return today }
+
+        let today = calendar.startOfDay(for: now)
+        return dates.min { lhs, rhs in
+            let left = abs(lhs.timeIntervalSince(today))
+            let right = abs(rhs.timeIntervalSince(today))
+            // On a tie prefer the upcoming day over the one already gone.
+            return left == right ? lhs > rhs : left < right
+        }
     }
 
     static func programs(_ programs: [TVerLiveProgram], on date: Date) -> [TVerLiveProgram] {
         let day = dayInterval(for: date)
-        return programs.filter { $0.startAt < day.end && $0.endAt > day.start }
+        var seenIDs: Set<String> = []
+        return programs
+            .filter { $0.startAt < day.end && $0.endAt > day.start }
+            .sorted { lhs, rhs in
+                lhs.startAt == rhs.startAt ? lhs.id < rhs.id : lhs.startAt < rhs.startAt
+            }
+            // Repeated slots in the payload used to stack identical blocks on
+            // top of each other and break SwiftUI list identity.
+            .filter { seenIDs.insert($0.id).inserted }
     }
 
     static func yPosition(for date: Date, on selectedDate: Date) -> CGFloat {
@@ -117,6 +216,19 @@ enum ProgramGuideMetrics {
 
     static func isSameDay(_ lhs: Date, _ rhs: Date) -> Bool {
         calendar.isDate(lhs, inSameDayAs: rhs)
+    }
+
+    /// Vertical offset the grid should open at, clamped so late-evening slots
+    /// cannot scroll the content past its own end.
+    static func initialOffsetY(
+        for date: Date,
+        on selectedDate: Date,
+        viewportHeight: CGFloat,
+        leadingInset: CGFloat = 120
+    ) -> CGFloat {
+        let contentHeight = gridSize(channelCount: 0).height
+        let maximumOffset = max(0, contentHeight - max(0, viewportHeight))
+        return min(max(0, yPosition(for: date, on: selectedDate) - leadingInset), maximumOffset)
     }
 }
 
@@ -200,9 +312,9 @@ struct ProgramGuideView: View {
         .onChange(of: viewModel.guide) { guide in
             let dates = ProgramGuideMetrics.dates(in: guide)
             if !dates.contains(where: { ProgramGuideMetrics.isSameDay($0, selectedDate) }),
-               let nearest = dates.min(by: { abs($0.timeIntervalSinceNow) < abs($1.timeIntervalSinceNow) })
+               let preferred = ProgramGuideMetrics.preferredDate(in: dates)
             {
-                selectedDate = nearest
+                selectedDate = preferred
             }
         }
         .sheet(item: $selectedProgram) { selection in
@@ -219,6 +331,10 @@ struct ProgramGuideView: View {
 
     private var guideContent: some View {
         VStack(spacing: 0) {
+            if let notice = viewModel.offlineNotice {
+                ProgramGuideOfflineBanner(message: notice)
+                Divider()
+            }
             ProgramGuideDatePicker(
                 dates: ProgramGuideMetrics.dates(in: viewModel.guide),
                 selectedDate: $selectedDate
@@ -474,7 +590,11 @@ private struct ProgramGuideGrid: View {
                 let now = Date()
                 let targetDate = ProgramGuideMetrics.isSameDay(now, selectedDate)
                     ? now : ProgramGuideMetrics.calendar.date(bySettingHour: 6, minute: 0, second: 0, of: selectedDate) ?? selectedDate
-                contentOffset.y = max(0, ProgramGuideMetrics.yPosition(for: targetDate, on: selectedDate) - 120)
+                contentOffset.y = ProgramGuideMetrics.initialOffsetY(
+                    for: targetDate,
+                    on: selectedDate,
+                    viewportHeight: bodyHeight
+                )
             }
         }
     }
@@ -1145,6 +1265,7 @@ enum GuideAccessibilityIdentifier {
     static let playButton = "guide.play.button"
     static let catchUpNotFound = "guide.catchup.notfound"
     static let catchUpBadge = "guide.catchup.badge"
+    static let offlineBanner = "guide.offline.banner"
 }
 
 /// Outcome of looking up the catch-up (見逃し配信) episode for a finished broadcast slot.
@@ -1337,5 +1458,176 @@ private struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
             guard parent.contentOffset != scrollView.contentOffset else { return }
             parent.contentOffset = scrollView.contentOffset
         }
+    }
+}
+
+/// Wording for the "this is not live data" banner.
+enum ProgramGuideOfflineNotice {
+    static let prefix = "オフライン表示中・最終更新 "
+    static let unknownTimestamp = "不明"
+
+    static func text(
+        lastUpdatedAt: Date?,
+        now: Date = Date(),
+        calendar: Calendar = ProgramGuideMetrics.calendar
+    ) -> String {
+        guard let lastUpdatedAt else { return prefix + unknownTimestamp }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.timeZone = calendar.timeZone
+        // A bare clock time would be misleading once the copy is a day old.
+        formatter.dateFormat = calendar.isDate(lastUpdatedAt, inSameDayAs: now) ? "HH:mm" : "M/d HH:mm"
+        return prefix + formatter.string(from: lastUpdatedAt)
+    }
+}
+
+private struct ProgramGuideOfflineBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.footnote)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.18))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
+        .accessibilityIdentifier(GuideAccessibilityIdentifier.offlineBanner)
+    }
+}
+
+/// Disk copy of the last successfully fetched programme guide.
+struct ProgramGuideSnapshot: Codable, Sendable, Equatable {
+    let savedAt: Date
+    let guide: [TVerGuideChannel]
+
+    private enum CodingKeys: String, CodingKey {
+        case savedAt
+        case guide
+    }
+
+    init(savedAt: Date, guide: [TVerGuideChannel]) {
+        self.savedAt = savedAt
+        self.guide = guide.map(ProgramGuideSnapshot.redacted)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        savedAt = try container.decode(Date.self, forKey: .savedAt)
+        // Re-redact on the way in as well, so a file written by an older build
+        // can never hand credentials back to the app.
+        guide = try container.decode([TVerGuideChannel].self, forKey: .guide)
+            .map(ProgramGuideSnapshot.redacted)
+    }
+
+    /// Strips the playback credentials from a channel.
+    ///
+    /// `apiKey`, `projectID` and `mediaID` authorise streaming; they must never
+    /// be written to the Caches directory. They are also useless offline, and a
+    /// successful fetch always supplies fresh ones.
+    static func redacted(_ channel: TVerGuideChannel) -> TVerGuideChannel {
+        let source = channel.channel
+        return TVerGuideChannel(
+            channel: TVerLiveChannel(
+                id: source.id,
+                name: source.name,
+                iconURL: source.iconURL,
+                projectID: "",
+                mediaID: "",
+                apiKey: "",
+                currentProgram: source.currentProgram,
+                state: source.state
+            ),
+            programs: channel.programs
+        )
+    }
+}
+
+/// Persists the programme guide so a cold launch without connectivity still
+/// shows something. A nil directory means "memory only", which is what unit
+/// tests and previews get unless they pass an explicit location.
+actor ProgramGuideSnapshotStore {
+    static let defaultMaximumAge: TimeInterval = 3 * 24 * 60 * 60
+    static let defaultMaximumChannelCount = 64
+
+    static let shared: ProgramGuideSnapshotStore? = {
+        guard let directory = TVerOfflineCache.directory(named: "TVerProgramGuide") else { return nil }
+        return ProgramGuideSnapshotStore(directory: directory)
+    }()
+
+    private let directory: URL
+    private let fileURL: URL
+    private let maximumAge: TimeInterval
+    private let maximumChannelCount: Int
+    private let fileManager: FileManager
+    private var failureDescription: String?
+
+    init(
+        directory: URL,
+        name: String = "program-guide",
+        maximumAge: TimeInterval = ProgramGuideSnapshotStore.defaultMaximumAge,
+        maximumChannelCount: Int = ProgramGuideSnapshotStore.defaultMaximumChannelCount,
+        fileManager: FileManager = .default
+    ) {
+        self.directory = directory
+        fileURL = directory.appendingPathComponent("\(name).json", isDirectory: false)
+        self.maximumAge = max(0, maximumAge)
+        self.maximumChannelCount = max(0, maximumChannelCount)
+        self.fileManager = fileManager
+    }
+
+    func save(_ guide: [TVerGuideChannel], at date: Date) {
+        let snapshot = ProgramGuideSnapshot(
+            savedAt: date,
+            guide: Array(guide.prefix(maximumChannelCount))
+        )
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(snapshot)
+            try data.write(to: fileURL, options: .atomic)
+            failureDescription = nil
+        } catch {
+            failureDescription = String(describing: type(of: error))
+        }
+    }
+
+    func load(at date: Date) -> ProgramGuideSnapshot? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let snapshot = try? decoder.decode(ProgramGuideSnapshot.self, from: data) else {
+            // Truncated or foreign payload: drop it so the next save is clean.
+            try? fileManager.removeItem(at: fileURL)
+            return nil
+        }
+        // A snapshot from the future means the clock moved; treat it as stale
+        // rather than trusting it indefinitely.
+        guard
+            snapshot.savedAt <= date.addingTimeInterval(3_600),
+            date.timeIntervalSince(snapshot.savedAt) <= maximumAge
+        else {
+            try? fileManager.removeItem(at: fileURL)
+            return nil
+        }
+        return snapshot
+    }
+
+    func lastFailure() -> String? {
+        failureDescription
+    }
+
+    func clear() {
+        try? fileManager.removeItem(at: fileURL)
+        failureDescription = nil
     }
 }

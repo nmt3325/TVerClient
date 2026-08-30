@@ -11,6 +11,22 @@ enum PlaybackState: Equatable, Sendable {
     case failed(TVerClientError)
 }
 
+/// The slice of `AVAudioSession` the playback stack depends on.
+///
+/// The real session is process wide, so interruption handling can only be
+/// pinned down by a test when the controller talks to this protocol instead of
+/// the singleton.
+protocol PlaybackAudioSessioning: AnyObject {
+    func setCategory(
+        _ category: AVAudioSession.Category,
+        mode: AVAudioSession.Mode,
+        options: AVAudioSession.CategoryOptions
+    ) throws
+    func setActive(_ active: Bool, options: AVAudioSession.SetActiveOptions) throws
+}
+
+extension AVAudioSession: PlaybackAudioSessioning {}
+
 @MainActor
 final class PlaybackController: ObservableObject {
     @Published private(set) var currentProgram: TVerProgram?
@@ -22,34 +38,43 @@ final class PlaybackController: ObservableObject {
     let player: AVPlayer
     private let resolver: any TVerStreamResolving
     private let liveResolver: any TVerLiveStreamResolving
-    private let audioSession: AVAudioSession
+    private let audioSession: any PlaybackAudioSessioning
+    private let notificationCenter: NotificationCenter
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
     private var remoteTargets: [(command: MPRemoteCommand, target: Any)] = []
+    private var interruptionObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
     private var requestGeneration = 0
     private var wantsPlayback = false
+    /// Set only when the system suspended playback that we had asked for, so
+    /// the end of an interruption restores those sessions and nothing else.
+    private var shouldResumeAfterInterruption = false
 
     init(
         resolver: any TVerStreamResolving = BrightcoveStreamResolver(),
         liveResolver: any TVerLiveStreamResolving = LiveStreamResolver(),
         player: AVPlayer = AVPlayer(),
-        audioSession: AVAudioSession = .sharedInstance()
+        audioSession: any PlaybackAudioSessioning = AVAudioSession.sharedInstance(),
+        notificationCenter: NotificationCenter = .default
     ) {
         self.resolver = resolver
         self.liveResolver = liveResolver
         self.player = player
         self.audioSession = audioSession
+        self.notificationCenter = notificationCenter
         installPlayerObservers()
+        installAudioSessionObservers()
         installRemoteCommands()
     }
 
     deinit {
         itemStatusObservation?.invalidate()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
+        let observers: [NSObjectProtocol?] = [endObserver, failedObserver, interruptionObserver, routeChangeObserver]
+        for observer in observers.compactMap({ $0 }) { notificationCenter.removeObserver(observer) }
         for entry in remoteTargets { entry.command.removeTarget(entry.target) }
     }
 
@@ -91,6 +116,13 @@ final class PlaybackController: ObservableObject {
             try activateAudioSession()
             wantsPlayback = true
             error = nil
+            // AVPlayer ignores `play()` while the playhead sits at the end of
+            // the item. Without this rewind the state machine, the transport
+            // controls and the lock screen all report playback while the
+            // player stays silent.
+            if hasPlayedToEnd(item) {
+                player.seek(to: .zero)
+            }
             player.play()
             if item.status == .readyToPlay {
                 transition(to: .playing)
@@ -104,6 +136,8 @@ final class PlaybackController: ObservableObject {
 
     func pause() {
         wantsPlayback = false
+        // An explicit pause outranks a pending interruption restore.
+        shouldResumeAfterInterruption = false
         player.pause()
         transition(to: .paused)
     }
@@ -111,6 +145,7 @@ final class PlaybackController: ObservableObject {
     func stop() {
         requestGeneration += 1
         wantsPlayback = false
+        shouldResumeAfterInterruption = false
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         player.pause()
@@ -250,22 +285,22 @@ final class PlaybackController: ObservableObject {
     }
 
     private func activateAudioSession() throws {
-        try audioSession.setCategory(.playback, mode: .moviePlayback)
-        try audioSession.setActive(true)
+        try audioSession.setCategory(.playback, mode: .moviePlayback, options: [])
+        try audioSession.setActive(true, options: [])
     }
 
     private func installPlayerObservers() {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
             Task { @MainActor [weak self] in self?.updateNowPlayingInfo(elapsed: time.seconds) }
         }
-        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
+        endObserver = notificationCenter.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
                 self.wantsPlayback = false
                 self.transition(to: .ended)
             }
         }
-        failedObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
+        failedObserver = notificationCenter.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
                 let sourceError = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
@@ -273,6 +308,111 @@ final class PlaybackController: ObservableObject {
                 self.applyPlaybackFailure(sourceError)
             }
         }
+    }
+
+    /// Phone calls, Siri and other apps take the audio session away from us.
+    /// Without these observers the player goes silent while `state`,
+    /// `isPlaying` and the lock screen keep claiming playback is running, and
+    /// nothing ever brings the sound back.
+    private func installAudioSessionObservers() {
+        interruptionObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let typeRawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
+            let optionsRawValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            Task { @MainActor [weak self] in
+                self?.handleInterruption(typeRawValue: typeRawValue, optionsRawValue: optionsRawValue)
+            }
+        }
+        routeChangeObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let reasonRawValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return }
+            Task { @MainActor [weak self] in
+                self?.handleRouteChange(reasonRawValue: reasonRawValue)
+            }
+        }
+    }
+
+    private func handleInterruption(typeRawValue: UInt, optionsRawValue: UInt) {
+        guard let type = AVAudioSession.InterruptionType(rawValue: typeRawValue) else { return }
+        switch type {
+        case .began:
+            // The system already stopped the audio; only our state is lying.
+            guard wantsPlayback else { return }
+            shouldResumeAfterInterruption = true
+            wantsPlayback = false
+            player.pause()
+            transition(to: .paused)
+            DiagnosticLogStore.shared.record(
+                .warning,
+                category: "playback",
+                message: "Playback interrupted by the system",
+                metadata: ["contentType": isLive ? "live" : "vod"]
+            )
+        case .ended:
+            // One restore per interruption, so a repeated `.ended`
+            // notification can never start a second playback.
+            guard shouldResumeAfterInterruption else { return }
+            shouldResumeAfterInterruption = false
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRawValue)
+            guard options.contains(.shouldResume) else {
+                DiagnosticLogStore.shared.record(
+                    .warning,
+                    category: "playback",
+                    message: "Interruption ended without a resume hint",
+                    metadata: ["contentType": isLive ? "live" : "vod"]
+                )
+                return
+            }
+            guard player.currentItem != nil else {
+                // The stream is still being resolved, so let the pending item
+                // start on its own instead of activating a session for nothing.
+                wantsPlayback = true
+                return
+            }
+            resume()
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: "Playback resumed after an interruption",
+                metadata: ["contentType": isLive ? "live" : "vod"]
+            )
+        @unknown default:
+            break
+        }
+    }
+
+    /// Unplugging headphones or losing a Bluetooth device stops the audio at
+    /// the route level. Reporting the pause keeps the transport controls
+    /// honest instead of showing a playing state with no sound.
+    private func handleRouteChange(reasonRawValue: UInt) {
+        guard let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRawValue) else { return }
+        guard reason == .oldDeviceUnavailable, wantsPlayback else { return }
+        shouldResumeAfterInterruption = false
+        wantsPlayback = false
+        player.pause()
+        transition(to: .paused)
+        DiagnosticLogStore.shared.record(
+            .warning,
+            category: "playback",
+            message: "Playback paused because the audio route disappeared",
+            metadata: ["contentType": isLive ? "live" : "vod"]
+        )
+    }
+
+    /// True when the playhead already reached the end of a finite item.
+    private func hasPlayedToEnd(_ item: AVPlayerItem) -> Bool {
+        guard !isLive else { return false }
+        if state == .ended { return true }
+        let duration = item.duration.seconds
+        let current = item.currentTime().seconds
+        guard duration.isFinite, duration > 0, current.isFinite else { return false }
+        return current >= duration - 0.05
     }
 
     private func installRemoteCommands() {

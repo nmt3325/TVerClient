@@ -59,19 +59,22 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private let cacheTTL: TimeInterval
     private let staleIfErrorTTL: TimeInterval
     private let dateProvider: @Sendable () -> Date
+    private let healthReporter: EndpointHealthReporting
 
     init(
         session: URLSession = TVerNetworking.makeEphemeralSession(),
         responseCache: TVerResponseCache = TVerResponseCache(),
         cacheTTL: TimeInterval = 60,
         staleIfErrorTTL: TimeInterval = 15 * 60,
-        dateProvider: @escaping @Sendable () -> Date = { Date() }
+        dateProvider: @escaping @Sendable () -> Date = { Date() },
+        healthReporter: EndpointHealthReporting = NoopEndpointHealthReporter.shared
     ) {
         self.session = session
         self.responseCache = responseCache
         self.cacheTTL = max(0, cacheTTL)
         self.staleIfErrorTTL = max(0, staleIfErrorTTL)
         self.dateProvider = dateProvider
+        self.healthReporter = healthReporter
     }
 
     func fetchSchedule() async throws -> [ProgramDay] {
@@ -152,6 +155,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return makeProgramDays(from: orderedEpisodes)
     }
 
+    /// The browser-create endpoint has no matching case in the frozen EndpointID
+    /// contract, so this attempt deliberately reports no health event.
     private func createBrowserCredentials() async throws -> Credentials {
         var request = URLRequest(url: Self.browserURL)
         request.httpMethod = "POST"
@@ -159,17 +164,11 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue("https://s.tver.jp/", forHTTPHeaderField: "Referer")
 
-        let data = try await perform(request)
-        let response: BrowserResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-
-        guard let result = response.result,
-              !result.platformUID.isEmpty,
-              !result.platformToken.isEmpty
-        else {
-            throw TVerClientError.invalidResponse
+        let result = try await attempt(request, endpoint: nil)
+        let outcome = try TVerPayloadDecoder.decode(result.data, endpoint: .episodeDetail) { root, _ in
+            try credentialsPayload(root)
         }
-        return Credentials(uid: result.platformUID, token: result.platformToken)
+        return try value(of: outcome)
     }
 
     private func fetchEpisodeRanking(
@@ -177,34 +176,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         forceRefresh: Bool
     ) async throws -> [EpisodeContent] {
         let request = try serviceRequest(path: "callEpisodeRanking", credentials: credentials)
-        let data = try await perform(request, forceRefresh: forceRefresh)
-        let response: EpisodeRankingResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-
-        guard let sections = response.result?.contents else {
-            throw TVerClientError.invalidResponse
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .episodeDetail,
+            forceRefresh: forceRefresh
+        ) { root, context in
+            try rankedEpisodes(root, context: context, limit: Self.maximumRankedContentCount)
         }
-
-        var seen = Set<String>()
-        var episodes: [EpisodeContent] = []
-
-        for section in sections {
-            for item in section.contents ?? [] where item.type == "episode" {
-                guard let episode = item.content,
-                      let episodeID = episode.id,
-                      !episodeID.isEmpty,
-                      seen.insert(episodeID).inserted
-                else {
-                    continue
-                }
-                episodes.append(episode)
-                if episodes.count == Self.maximumRankedContentCount {
-                    return episodes
-                }
-            }
-        }
-
-        return episodes
+        return try value(of: outcome)
     }
 
     private func fetchRankedSeriesIDs(
@@ -212,28 +191,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         forceRefresh: Bool
     ) async throws -> [String] {
         let request = try serviceRequest(path: "callRanking", credentials: credentials)
-        let data = try await perform(request, forceRefresh: forceRefresh)
-        let response: RankingResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-
-        guard let sections = response.result?.contents else {
-            throw TVerClientError.invalidResponse
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .episodeDetail,
+            forceRefresh: forceRefresh
+        ) { root, context in
+            try rankedSeriesIDs(root, context: context, limit: Self.maximumRankedContentCount)
         }
-
-        var seen = Set<String>()
-        var seriesIDs: [String] = []
-
-        for section in sections where section.type == "ranking" {
-            for item in (section.contents ?? []).sorted(by: rankingOrder) where item.type == "series" {
-                guard let id = item.content?.id, !id.isEmpty, seen.insert(id).inserted else { continue }
-                seriesIDs.append(id)
-                if seriesIDs.count == Self.maximumRankedContentCount {
-                    return seriesIDs
-                }
-            }
-        }
-
-        return seriesIDs
+        return try value(of: outcome)
     }
 
     private func fetchEpisodes(
@@ -243,20 +208,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     ) async throws -> [EpisodeContent] {
         let encodedSeriesID = seriesID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? seriesID
         let request = try serviceRequest(path: "callSeriesEpisodes/\(encodedSeriesID)", credentials: credentials)
-        let data = try await perform(request, forceRefresh: forceRefresh)
-        let response: SeriesEpisodesResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-
-        guard let groups = response.result?.contents else {
-            throw TVerClientError.invalidResponse
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .episodeDetail,
+            forceRefresh: forceRefresh
+        ) { root, context in
+            try seriesEpisodes(root, context: context)
         }
-
-        return groups.flatMap { group in
-            (group.contents ?? []).compactMap { item in
-                guard item.type == "episode" else { return nil }
-                return item.content
-            }
-        }
+        return try value(of: outcome)
     }
 
     private func serviceRequest(path: String, credentials: Credentials) throws -> URLRequest {
@@ -279,81 +238,237 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         return request
     }
 
-    private func perform(_ request: URLRequest, forceRefresh: Bool = false) async throws -> Data {
-        guard let cacheKey = responseCacheKey(for: request) else {
-            return try await performUncached(request)
-        }
+    // MARK: - Transport and endpoint health
 
+    /// One attempt against one endpoint, plus everything the health event needs.
+    private struct TransportResult {
+        let data: Data
+        let httpStatus: Int?
+        let durationMS: Int
+        /// A still fresh cache entry answered without any request, so this call
+        /// must not emit a health event.
+        let servedWithoutRequest: Bool
+        /// The attempt failed and the stale cache answered in its place.
+        let usedStaleFallback: Bool
+    }
+
+    private struct TransportFailure: Error {
+        let underlying: TVerClientError
+        let httpStatus: Int?
+        let category: EndpointFailureCategory
+        let durationMS: Int
+    }
+
+    private static func elapsedMS(since start: DispatchTime) -> Int {
+        Int((DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1_000_000)
+    }
+
+    /// Sends one request, applying the shared cache, conditional revalidation and
+    /// the stale-if-error fallback. Every network path in this client goes here.
+    private func transport(
+        _ request: URLRequest,
+        forceRefresh: Bool,
+        useCache: Bool
+    ) async throws -> TransportResult {
         let now = dateProvider()
-        let cached = await responseCache.snapshot(for: cacheKey)
-        if !forceRefresh, let cached, cacheAge(of: cached, at: now) < cacheTTL {
-            return cached.data
+        let cacheKey = useCache ? responseCacheKey(for: request) : nil
+        var cached: TVerResponseCache.Snapshot?
+        if let cacheKey {
+            cached = await responseCache.snapshot(for: cacheKey)
         }
 
-        var conditionalRequest = request
+        if !forceRefresh, let cached, cacheAge(of: cached, at: now) < cacheTTL {
+            return TransportResult(
+                data: cached.data, httpStatus: nil, durationMS: 0,
+                servedWithoutRequest: true, usedStaleFallback: false
+            )
+        }
+
+        var outgoing = request
         if let cached {
             if let eTag = cached.eTag {
-                conditionalRequest.setValue(eTag, forHTTPHeaderField: "If-None-Match")
+                outgoing.setValue(eTag, forHTTPHeaderField: "If-None-Match")
             }
             if let lastModified = cached.lastModified {
-                conditionalRequest.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+                outgoing.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
             }
         }
 
+        let started = DispatchTime.now()
         do {
-            let (data, response) = try await session.data(for: conditionalRequest)
+            let (data, response) = try await session.data(for: outgoing)
+            let duration = Self.elapsedMS(since: started)
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw TVerClientError.invalidResponse
+                throw TransportFailure(
+                    underlying: .invalidResponse, httpStatus: nil,
+                    category: .environment, durationMS: duration
+                )
             }
 
-            if httpResponse.statusCode == 304, let cached {
+            if httpResponse.statusCode == 304, let cached, let cacheKey {
                 await responseCache.markRevalidated(cached, for: cacheKey, at: now)
-                return cached.data
+                return TransportResult(
+                    data: cached.data, httpStatus: 304, durationMS: duration,
+                    servedWithoutRequest: false, usedStaleFallback: false
+                )
             }
 
             guard (200 ..< 300).contains(httpResponse.statusCode) else {
                 if isTransient(statusCode: httpResponse.statusCode),
-                   let cached,
-                   canUseStale(cached, at: now)
+                   let cached, canUseStale(cached, at: now)
                 {
-                    return cached.data
+                    return TransportResult(
+                        data: cached.data, httpStatus: httpResponse.statusCode, durationMS: duration,
+                        servedWithoutRequest: false, usedStaleFallback: true
+                    )
                 }
-                throw apiError(statusCode: httpResponse.statusCode, data: data)
+                throw TransportFailure(
+                    underlying: apiError(statusCode: httpResponse.statusCode, data: data),
+                    httpStatus: httpResponse.statusCode,
+                    category: .network,
+                    durationMS: duration
+                )
             }
 
-            await responseCache.store(
-                data: data,
-                for: cacheKey,
-                at: now,
-                eTag: httpResponse.value(forHTTPHeaderField: "ETag"),
-                lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified")
-            )
-            return data
-        } catch let error as TVerClientError {
-            throw error
-        } catch {
-            if let cached, canUseStale(cached, at: now) {
-                return cached.data
+            if let cacheKey {
+                await responseCache.store(
+                    data: data, for: cacheKey, at: now,
+                    eTag: httpResponse.value(forHTTPHeaderField: "ETag"),
+                    lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified")
+                )
             }
-            throw TVerClientError.normalized(from: error)
+
+            return TransportResult(
+                data: data, httpStatus: httpResponse.statusCode, durationMS: duration,
+                servedWithoutRequest: false, usedStaleFallback: false
+            )
+        } catch let failure as TransportFailure {
+            throw failure
+        } catch {
+            let duration = Self.elapsedMS(since: started)
+            if let cached, canUseStale(cached, at: now) {
+                return TransportResult(
+                    data: cached.data, httpStatus: nil, durationMS: duration,
+                    servedWithoutRequest: false, usedStaleFallback: true
+                )
+            }
+            let underlying = (error as? TVerClientError) ?? .network(error.localizedDescription)
+            throw TransportFailure(
+                underlying: underlying, httpStatus: nil,
+                category: .network, durationMS: duration
+            )
         }
     }
 
-    private func performUncached(_ request: URLRequest) async throws -> Data {
+    /// Runs one attempt and turns a transport failure into exactly one health event.
+    private func attempt(
+        _ request: URLRequest,
+        endpoint: EndpointID?,
+        forceRefresh: Bool = false,
+        useCache: Bool = true
+    ) async throws -> TransportResult {
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw TVerClientError.invalidResponse
+            return try await transport(request, forceRefresh: forceRefresh, useCache: useCache)
+        } catch let failure as TransportFailure {
+            if let endpoint {
+                report(
+                    endpoint: endpoint, outcome: .failed, category: failure.category,
+                    httpStatus: failure.httpStatus, durationMS: failure.durationMS,
+                    note: "transport failed"
+                )
             }
-            guard (200 ..< 300).contains(httpResponse.statusCode) else {
-                throw apiError(statusCode: httpResponse.statusCode, data: data)
-            }
-            return data
-        } catch let error as TVerClientError {
-            throw error
-        } catch {
-            throw TVerClientError.normalized(from: error)
+            throw failure.underlying
         }
+    }
+
+    /// One request plus one decode, reported as exactly one health event.
+    private func loadDecoded<Value: Sendable>(
+        _ request: URLRequest,
+        endpoint: EndpointID,
+        forceRefresh: Bool = false,
+        useCache: Bool = true,
+        trackUnknownKeys: Bool = true,
+        transform: (TVerPayloadNode, TVerPayloadDecodeContext) throws -> Value
+    ) async throws -> DecodeOutcome<Value> {
+        let result = try await attempt(
+            request, endpoint: endpoint, forceRefresh: forceRefresh, useCache: useCache
+        )
+        do {
+            let outcome = try TVerPayloadDecoder.decode(
+                result.data,
+                endpoint: endpoint,
+                trackUnknownKeys: trackUnknownKeys,
+                transform: transform
+            )
+            if !result.servedWithoutRequest {
+                let reported: EndpointOutcome = result.usedStaleFallback
+                    ? .fallbackUsed
+                    : outcome.endpointOutcome
+                report(
+                    endpoint: endpoint, outcome: reported,
+                    category: Self.failureCategory(for: reported),
+                    httpStatus: result.httpStatus, durationMS: result.durationMS,
+                    note: Self.note(for: outcome)
+                )
+            }
+            return outcome
+        } catch let clientError as TVerClientError {
+            if !result.servedWithoutRequest {
+                report(
+                    endpoint: endpoint, outcome: .failed, category: .upstreamChange,
+                    httpStatus: result.httpStatus, durationMS: result.durationMS,
+                    note: "api returned an error code"
+                )
+            }
+            throw clientError
+        }
+    }
+
+    private func report(
+        endpoint: EndpointID,
+        outcome: EndpointOutcome,
+        category: EndpointFailureCategory,
+        httpStatus: Int?,
+        durationMS: Int?,
+        note: String?
+    ) {
+        healthReporter.record(
+            EndpointHealthEvent(
+                endpoint: endpoint,
+                at: dateProvider(),
+                outcome: outcome,
+                category: category,
+                httpStatus: httpStatus,
+                durationMS: durationMS,
+                note: note
+            )
+        )
+    }
+
+    private static func failureCategory(for outcome: EndpointOutcome) -> EndpointFailureCategory {
+        switch outcome {
+        case .ok: return .none
+        case .degraded, .failed: return .upstreamChange
+        case .fallbackUsed: return .network
+        }
+    }
+
+    /// Health notes stay structural. Tokens, URLs and query strings never go in.
+    private static func note<Value: Sendable>(for outcome: DecodeOutcome<Value>) -> String? {
+        switch outcome {
+        case .ok:
+            return nil
+        case let .degraded(_, degradation):
+            return "dropped=\(degradation.droppedElementCount) unknown=\(degradation.unknownKeys.count) missing=\(degradation.missingOptionalKeys.count)"
+        case let .failed(failure):
+            let path = failure.codingPath.isEmpty ? "" : " at \(failure.codingPath)"
+            return "decode failed: \(failure.reason)\(path)"
+        }
+    }
+
+    private func value<Value: Sendable>(of outcome: DecodeOutcome<Value>) throws -> Value {
+        guard let value = outcome.value else { throw TVerClientError.invalidResponse }
+        return value
     }
 
     private func responseCacheKey(for request: URLRequest) -> String? {
@@ -384,36 +499,234 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     }
 
     private func apiError(statusCode: Int, data: Data) -> TVerClientError {
-        if let status = try? JSONDecoder().decode(APIStatus.self, from: data),
-           let message = status.message,
-           !message.isEmpty
-        {
-            return .api(message)
+        if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            let node = TVerPayloadNode(raw: json, path: "", context: TVerPayloadDecodeContext())
+            if let message = node.string("message"), !message.isEmpty {
+                return .api(message)
+            }
         }
         return .api("TVer APIでHTTP \(statusCode)エラーが発生しました。")
     }
 
-    private func decode<Response: Decodable>(_ data: Data) throws -> Response {
-        do {
-            return try JSONDecoder().decode(Response.self, from: data)
-        } catch {
-            throw TVerClientError.invalidResponse
+    // MARK: - Payload transforms
+    //
+    // One transform per response shape. Each isolates failures per element, so a
+    // single broken entry can never empty a whole screen.
+
+    private func credentialsPayload(_ root: TVerPayloadNode) throws -> Credentials {
+        let result = try TVerPayloadEnvelope.result(of: root, endpoint: .episodeDetail)
+        guard let uid = result.string("platform_uid"), !uid.isEmpty,
+              let token = result.string("platform_token"), !token.isEmpty
+        else {
+            throw DecodeFailure(
+                endpoint: .episodeDetail,
+                reason: "missing platform credentials",
+                codingPath: "result"
+            )
+        }
+        return Credentials(uid: uid, token: token)
+    }
+
+    /// Reads one `{ type, content }` entry. A missing `type` is accepted: TVer
+    /// omits it on some surfaces and rejecting those entries was a client bug.
+    private func episodeContent(
+        item: TVerPayloadNode,
+        context: TVerPayloadDecodeContext
+    ) -> EpisodeContent? {
+        let type = item.string("type")
+        guard type == nil || type == "episode" else { return nil }
+        let content = item.object("content")
+        guard !content.isMissing else {
+            context.noteDroppedElement()
+            return nil
+        }
+        guard let id = content.string("id"), !id.isEmpty else {
+            context.noteDroppedElement()
+            return nil
+        }
+        return EpisodeContent(
+            id: id,
+            seriesID: content.string("seriesID"),
+            title: content.string("title", tracked: true),
+            seriesTitle: content.string("seriesTitle"),
+            description: content.string("description"),
+            broadcastDateLabel: content.string("broadcastDateLabel", "broadcastDate", tracked: true),
+            endAt: content.int("endAt"),
+            thumbnailPath: content.string("thumbnailPath")
+        )
+    }
+
+    private func rankedEpisodes(
+        _ root: TVerPayloadNode,
+        context: TVerPayloadDecodeContext,
+        limit: Int
+    ) throws -> [EpisodeContent] {
+        let result = try TVerPayloadEnvelope.result(of: root, endpoint: .episodeDetail)
+        guard let sections = result.array("contents") else {
+            throw DecodeFailure(
+                endpoint: .episodeDetail,
+                reason: "missing contents array",
+                codingPath: "result.contents"
+            )
+        }
+
+        var seen = Set<String>()
+        var episodes: [EpisodeContent] = []
+        for section in sections {
+            for item in section.array("contents") ?? [section] {
+                guard let episode = episodeContent(item: item, context: context),
+                      let episodeID = episode.id,
+                      seen.insert(episodeID).inserted
+                else {
+                    continue
+                }
+                episodes.append(episode)
+                if episodes.count == limit { return episodes }
+            }
+        }
+        return episodes
+    }
+
+    private func seriesEpisodes(
+        _ root: TVerPayloadNode,
+        context: TVerPayloadDecodeContext
+    ) throws -> [EpisodeContent] {
+        let result = try TVerPayloadEnvelope.result(of: root, endpoint: .episodeDetail)
+        guard let groups = result.array("contents") else {
+            throw DecodeFailure(
+                endpoint: .episodeDetail,
+                reason: "missing contents array",
+                codingPath: "result.contents"
+            )
+        }
+
+        var seen = Set<String>()
+        var episodes: [EpisodeContent] = []
+        for group in groups {
+            for item in group.array("contents") ?? [group] {
+                guard let episode = episodeContent(item: item, context: context),
+                      let episodeID = episode.id,
+                      seen.insert(episodeID).inserted
+                else {
+                    continue
+                }
+                episodes.append(episode)
+            }
+        }
+        return episodes
+    }
+
+    private func rankedSeriesIDs(
+        _ root: TVerPayloadNode,
+        context: TVerPayloadDecodeContext,
+        limit: Int
+    ) throws -> [String] {
+        let result = try TVerPayloadEnvelope.result(of: root, endpoint: .episodeDetail)
+        guard let sections = result.array("contents") else {
+            throw DecodeFailure(
+                endpoint: .episodeDetail,
+                reason: "missing contents array",
+                codingPath: "result.contents"
+            )
+        }
+
+        var seen = Set<String>()
+        var seriesIDs: [String] = []
+        for section in sections {
+            let sectionType = section.string("type")
+            guard sectionType == nil || sectionType == "ranking" else { continue }
+
+            var ranked: [(rank: Int, offset: Int, id: String)] = []
+            for (offset, item) in (section.array("contents") ?? []).enumerated() {
+                let itemType = item.string("type")
+                guard itemType == nil || itemType == "series" else { continue }
+                guard let id = item.object("content").string("id"), !id.isEmpty else {
+                    context.noteDroppedElement()
+                    continue
+                }
+                ranked.append((item.int("rank") ?? Int.max, offset, id))
+            }
+
+            // Payload order breaks the tie, so an unranked entry never reorders
+            // between two otherwise identical responses.
+            let ordered = ranked.sorted {
+                $0.rank == $1.rank ? $0.offset < $1.offset : $0.rank < $1.rank
+            }
+            for entry in ordered where seen.insert(entry.id).inserted {
+                seriesIDs.append(entry.id)
+                if seriesIDs.count == limit { return seriesIDs }
+            }
+        }
+        return seriesIDs
+    }
+
+    private func liveChannels(
+        _ root: TVerPayloadNode,
+        context: TVerPayloadDecodeContext
+    ) throws -> [LiveChannelContent] {
+        let result = try TVerPayloadEnvelope.result(of: root, endpoint: .liveChannels)
+        guard let items = result.array("contents") else {
+            throw DecodeFailure(
+                endpoint: .liveChannels,
+                reason: "missing contents array",
+                codingPath: "result.contents"
+            )
+        }
+
+        return items.compactMap { item -> LiveChannelContent? in
+            let type = item.string("type")
+            guard type == nil || type == "channel" else { return nil }
+            let channel = item.object("content")
+            let video = item.object("video")
+            guard let id = channel.string("id"), !id.isEmpty,
+                  let name = channel.string("name"), !name.isEmpty,
+                  let projectID = video.string("projectID"), !projectID.isEmpty,
+                  let mediaID = video.string("mediaID"), !mediaID.isEmpty
+            else {
+                context.noteDroppedElement()
+                return nil
+            }
+            return LiveChannelContent(
+                id: id,
+                name: name,
+                version: channel.int("version"),
+                apiKey: video.string("apiKey"),
+                projectID: projectID,
+                mediaID: mediaID
+            )
         }
     }
 
-    private func validateAPIResponse(code: Int?, message: String?) throws {
-        guard code == 0 else {
-            let detail = message.flatMap { $0.isEmpty ? nil : $0 }
-            throw TVerClientError.api(detail ?? "TVer APIでエラーが発生しました（code: \(code ?? -1)）。")
-        }
+    private func liveTimeline(
+        _ root: TVerPayloadNode,
+        channelID: String,
+        context: TVerPayloadDecodeContext
+    ) throws -> [TVerLiveProgram] {
+        let result = try TVerPayloadEnvelope.optionalResult(of: root)
+        let items = result.array("contents") ?? []
+        return items.compactMap { makeLiveProgram(item: $0, channelID: channelID, context: context) }
     }
 
-    private func rankingOrder(_ lhs: RankingItem, _ rhs: RankingItem) -> Bool {
-        switch (lhs.rank, rhs.rank) {
-        case let (left?, right?): return left < right
-        case (_?, nil): return true
-        case (nil, _?): return false
-        case (nil, nil): return false
+    private func catchUpEpisodes(
+        _ root: TVerPayloadNode,
+        context: TVerPayloadDecodeContext
+    ) throws -> [EpisodeContent] {
+        let result = try TVerPayloadEnvelope.optionalResult(of: root)
+        let items = result.array("contents") ?? []
+        return items.compactMap { episodeContent(item: $0, context: context) }
+    }
+
+    static func catchUpCandidates(from episodes: [EpisodeContent]) -> [CatchUpEpisodeCandidate] {
+        episodes.compactMap { episode -> CatchUpEpisodeCandidate? in
+            guard let id = episode.id, !id.isEmpty else { return nil }
+            return CatchUpEpisodeCandidate(
+                id: id,
+                seriesID: episode.seriesID,
+                title: episode.title ?? "",
+                seriesTitle: episode.seriesTitle ?? "",
+                broadcastDateLabel: episode.broadcastDateLabel,
+                endAt: episode.endAt
+            )
         }
     }
 
@@ -464,7 +777,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             )).map(calendar.startOfDay(for:))
         }
 
-        let now = Date()
+        let now = dateProvider()
         let currentYear = calendar.component(.year, from: now)
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
         let candidates = (currentYear - 1 ... currentYear + 1).compactMap { year in
@@ -547,13 +860,13 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             credentials: credentials,
             forceRefresh: forceRefresh
         )
-        let now = Date()
+        let now = dateProvider()
 
         return await withTaskGroup(of: (Int, TVerLiveChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
                     let timeline = (try? await fetchLiveTimeline(
-                        channelID: raw.channel.id!,
+                        channelID: raw.id,
                         credentials: credentials,
                         forceRefresh: forceRefresh
                     )) ?? []
@@ -579,13 +892,13 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             credentials: credentials,
             forceRefresh: forceRefresh
         )
-        let now = Date()
+        let now = dateProvider()
 
         return await withTaskGroup(of: (Int, TVerGuideChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
                     let timeline = ((try? await fetchLiveTimeline(
-                        channelID: raw.channel.id!,
+                        channelID: raw.id,
                         credentials: credentials,
                         forceRefresh: forceRefresh
                     )) ?? []).sorted { $0.startAt < $1.startAt }
@@ -609,20 +922,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         forceRefresh: Bool
     ) async throws -> [LiveChannelContent] {
         let request = try serviceRequest(path: "callLiveChannel", credentials: credentials)
-        let data = try await perform(request, forceRefresh: forceRefresh)
-        let response: LiveChannelResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-        guard let items = response.result?.contents else { throw TVerClientError.invalidResponse }
-
-        return items.compactMap { item -> LiveChannelContent? in
-            guard item.type == "channel", let channel = item.content,
-                  channel.id?.isEmpty == false, channel.name?.isEmpty == false,
-                  item.video?.projectID?.isEmpty == false, item.video?.mediaID?.isEmpty == false
-            else {
-                return nil
-            }
-            return LiveChannelContent(channel: channel, video: item.video!)
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .liveChannels,
+            forceRefresh: forceRefresh
+        ) { root, context in
+            try liveChannels(root, context: context)
         }
+        return try value(of: outcome)
     }
 
     private func fetchLiveTimeline(
@@ -632,36 +939,57 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     ) async throws -> [TVerLiveProgram] {
         let pathID = channelID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelID
         let request = try serviceRequest(path: "callLiveTimeline/\(pathID)", credentials: credentials)
-        let data = try await perform(request, forceRefresh: forceRefresh)
-        let response: LiveTimelineResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-        return (response.result?.contents ?? []).compactMap { makeLiveProgram(item: $0, channelID: channelID) }
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .programGuide,
+            forceRefresh: forceRefresh
+        ) { root, context in
+            try liveTimeline(root, channelID: channelID, context: context)
+        }
+        return try value(of: outcome)
     }
 
-    private func makeLiveProgram(item: LiveTimelineItem, channelID: String) -> TVerLiveProgram? {
-        guard let content = item.content, let startAt = content.startAt, let endAt = content.endAt,
-              endAt > startAt else { return nil }
-        let isPause = item.type == "pause"
-            || content.seriesTitle?.contains("配信休止") == true
-            || content.title?.contains("配信休止") == true
-            || content.seriesTitle?.contains("配信準備中") == true
-            || content.title?.contains("配信準備中") == true
-        let identifier = content.id?.isEmpty == false ? content.id! : "pause-\(channelID)-\(startAt)"
-        let thumbnailURL = content.thumbnailPath.flatMap { path -> URL? in
+    private func makeLiveProgram(
+        item: TVerPayloadNode,
+        channelID: String,
+        context: TVerPayloadDecodeContext
+    ) -> TVerLiveProgram? {
+        let content = item.object("content")
+        guard let startAt = content.int("startAt", tracked: true),
+              let endAt = content.int("endAt", tracked: true),
+              endAt > startAt
+        else {
+            context.noteDroppedElement()
+            return nil
+        }
+
+        let type = item.string("type")
+        let title = content.string("title")
+        let seriesTitle = content.string("seriesTitle")
+        let isPause = type == "pause"
+            || seriesTitle?.contains("配信休止") == true
+            || title?.contains("配信休止") == true
+            || seriesTitle?.contains("配信準備中") == true
+            || title?.contains("配信準備中") == true
+        let rawID = content.string("id")
+        let identifier = rawID?.isEmpty == false ? (rawID ?? "") : "pause-\(channelID)-\(startAt)"
+        let thumbnailURL = content.string("thumbnailPath").flatMap { path -> URL? in
             guard !path.isEmpty,
                   let url = URL(string: path, relativeTo: Self.staticsBaseURL)?.absoluteURL,
                   TVerNetworking.isPermittedImageURL(url) else { return nil }
             return url
         }
+
         func cleaned(_ value: String?) -> String? {
             let text = value?.trimmingCharacters(in: .whitespacesAndNewlines)
             return text?.isEmpty == false ? text : nil
         }
+
         return TVerLiveProgram(
             id: identifier,
-            title: cleaned(content.title) ?? (isPause ? "配信休止" : "番組情報なし"),
-            seriesTitle: cleaned(content.seriesTitle) ?? (isPause ? "配信休止" : "ライブ配信"),
-            description: cleaned(content.description) ?? "",
+            title: cleaned(title) ?? (isPause ? "配信休止" : "番組情報なし"),
+            seriesTitle: cleaned(seriesTitle) ?? (isPause ? "配信休止" : "ライブ配信"),
+            description: cleaned(content.string("description")) ?? "",
             startAt: Date(timeIntervalSince1970: TimeInterval(startAt)),
             endAt: Date(timeIntervalSince1970: TimeInterval(endAt)),
             thumbnailURL: thumbnailURL,
@@ -673,107 +1001,288 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         raw: LiveChannelContent,
         currentProgram: TVerLiveProgram?
     ) -> TVerLiveChannel {
-        let channelID = raw.channel.id!
         let state: TVerLiveState
         if let currentProgram {
             state = currentProgram.isPause ? .paused : .onAir
         } else {
             state = .unavailable
         }
-        let iconURL = URL(string: "https://statics.tver.jp/images/icon/\(channelID).jpg?v=\(raw.channel.version ?? 0)")
+        let iconURL = URL(string: "https://statics.tver.jp/images/icon/\(raw.id).jpg?v=\(raw.version ?? 0)")
         return TVerLiveChannel(
-            id: channelID, name: raw.channel.name!, iconURL: iconURL,
-            projectID: raw.video.projectID!, mediaID: raw.video.mediaID!,
-            apiKey: raw.video.apiKey ?? channelID,
+            id: raw.id, name: raw.name, iconURL: iconURL,
+            projectID: raw.projectID, mediaID: raw.mediaID,
+            apiKey: raw.apiKey ?? raw.id,
             currentProgram: currentProgram, state: state
         )
     }
 }
 
-private struct Credentials: Sendable {
+// MARK: - Permissive payload decoding
+//
+// Every TVer response goes through this one funnel. The hand written Decodable
+// structs it replaces failed a whole document whenever a single key was renamed,
+// retyped or added upstream, which is how most live/catalogue regressions started.
+//
+// Rules enforced here:
+//   * unknown fields never fail a decode, they are counted and reported,
+//   * required and optional values are separated by the model that reads them,
+//   * arrays isolate failures per element and keep whatever decoded,
+//   * key lookup ignores case and separators, so snake_case and camelCase match.
+
+/// Everything one decode lost or did not recognise.
+final class TVerPayloadDecodeContext {
+    private(set) var droppedElementCount = 0
+    private var unknownKeys: Set<String> = []
+    private var missingOptionalKeys: Set<String> = []
+
+    func noteUnknownKey(_ path: String) {
+        unknownKeys.insert(path)
+    }
+
+    func noteMissingOptionalKey(_ path: String) {
+        missingOptionalKeys.insert(path)
+    }
+
+    func noteDroppedElement(_ count: Int = 1) {
+        droppedElementCount += max(0, count)
+    }
+
+    var degradation: DecodeDegradation {
+        DecodeDegradation(
+            droppedElementCount: droppedElementCount,
+            unknownKeys: unknownKeys.sorted(),
+            missingOptionalKeys: missingOptionalKeys.sorted()
+        )
+    }
+}
+
+/// Scalar coercion shared by every reader, so a value that arrives as "12"
+/// instead of 12 is still usable.
+enum TVerPayloadCoercion {
+    static func isBoolean(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    static func string(_ value: Any?) -> String? {
+        switch value {
+        case let text as String:
+            return text
+        case let number as NSNumber:
+            return isBoolean(number) ? (number.boolValue ? "true" : "false") : number.stringValue
+        default:
+            return nil
+        }
+    }
+
+    static func int(_ value: Any?) -> Int? {
+        switch value {
+        case let number as NSNumber:
+            if isBoolean(number) { return number.boolValue ? 1 : 0 }
+            return Int(number.int64Value)
+        case let text as String:
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let integer = Int(trimmed) { return integer }
+            if let double = Double(trimmed) { return Int(double) }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    static func bool(_ value: Any?) -> Bool? {
+        switch value {
+        case let number as NSNumber:
+            return isBoolean(number) ? number.boolValue : number.int64Value != 0
+        case let text as String:
+            switch text.lowercased() {
+            case "true", "yes", "1": return true
+            case "false", "no", "0": return false
+            default: return nil
+            }
+        default:
+            return nil
+        }
+    }
+}
+
+/// A permissive view over one JSON value.
+final class TVerPayloadNode {
+    let path: String
+    private let raw: Any?
+    private let context: TVerPayloadDecodeContext
+    private let dictionary: [String: Any]?
+    private let keyIndex: [String: String]
+    private var consumedKeys: Set<String> = []
+    private var children: [TVerPayloadNode] = []
+
+    init(raw: Any?, path: String, context: TVerPayloadDecodeContext) {
+        let unwrapped: Any? = raw is NSNull ? nil : raw
+        self.raw = unwrapped
+        self.path = path
+        self.context = context
+        if let object = unwrapped as? [String: Any] {
+            dictionary = object
+            var index: [String: String] = [:]
+            for key in object.keys.sorted() where index[TVerPayloadNode.normalized(key)] == nil {
+                index[TVerPayloadNode.normalized(key)] = key
+            }
+            keyIndex = index
+        } else {
+            dictionary = nil
+            keyIndex = [:]
+        }
+    }
+
+    /// snake_case, camelCase, kebab-case and PascalCase all collapse to one key.
+    static func normalized(_ key: String) -> String {
+        String(key.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
+
+    var isMissing: Bool { raw == nil }
+    var isObject: Bool { dictionary != nil }
+    var isArray: Bool { raw is [Any] }
+    var stringValue: String? { TVerPayloadCoercion.string(raw) }
+    var intValue: Int? { TVerPayloadCoercion.int(raw) }
+    var boolValue: Bool? { TVerPayloadCoercion.bool(raw) }
+
+    var elements: [TVerPayloadNode]? {
+        guard let list = raw as? [Any] else { return nil }
+        return list.map { makeChild(raw: $0, path: path + "[]") }
+    }
+
+    func node(_ names: [String]) -> TVerPayloadNode {
+        guard let dictionary else { return makeChild(raw: nil, path: joined(names.first ?? "?")) }
+        for name in names {
+            guard let key = keyIndex[TVerPayloadNode.normalized(name)] else { continue }
+            consumedKeys.insert(key)
+            return makeChild(raw: dictionary[key], path: joined(key))
+        }
+        return makeChild(raw: nil, path: joined(names.first ?? "?"))
+    }
+
+    func object(_ names: String...) -> TVerPayloadNode {
+        node(names)
+    }
+
+    func string(_ names: String..., tracked: Bool = false) -> String? {
+        let found = node(names)
+        let value = found.stringValue
+        if value == nil, tracked { context.noteMissingOptionalKey(found.path) }
+        return value
+    }
+
+    func int(_ names: String..., tracked: Bool = false) -> Int? {
+        let found = node(names)
+        let value = found.intValue
+        if value == nil, tracked { context.noteMissingOptionalKey(found.path) }
+        return value
+    }
+
+    func bool(_ names: String...) -> Bool? {
+        node(names).boolValue
+    }
+
+    func array(_ names: String..., tracked: Bool = false) -> [TVerPayloadNode]? {
+        let found = node(names)
+        let value = found.elements
+        if value == nil, tracked { context.noteMissingOptionalKey(found.path) }
+        return value
+    }
+
+    /// Reports every key no reader touched. Called once, after the transform.
+    func reportUnknownKeys() {
+        if let dictionary {
+            for key in dictionary.keys.sorted() where !consumedKeys.contains(key) {
+                context.noteUnknownKey(joined(key))
+            }
+        }
+        for child in children {
+            child.reportUnknownKeys()
+        }
+    }
+
+    private func makeChild(raw childRaw: Any?, path childPath: String) -> TVerPayloadNode {
+        let node = TVerPayloadNode(raw: childRaw, path: childPath, context: context)
+        children.append(node)
+        return node
+    }
+
+    private func joined(_ key: String) -> String {
+        path.isEmpty ? key : "\(path).\(key)"
+    }
+}
+
+enum TVerPayloadDecoder {
+    /// Decodes one payload, degrading instead of failing wherever it still can.
+    /// - Parameter trackUnknownKeys: false for documents we deliberately read a
+    ///   single field out of, so their untouched fields are not reported as drift.
+    static func decode<Value: Sendable>(
+        _ data: Data,
+        endpoint: EndpointID,
+        trackUnknownKeys: Bool = true,
+        transform: (TVerPayloadNode, TVerPayloadDecodeContext) throws -> Value
+    ) throws -> DecodeOutcome<Value> {
+        let json: Any
+        do {
+            json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            return .failed(DecodeFailure(endpoint: endpoint, reason: "body is not valid JSON"))
+        }
+
+        let context = TVerPayloadDecodeContext()
+        let root = TVerPayloadNode(raw: json, path: "", context: context)
+        do {
+            let value = try transform(root, context)
+            if trackUnknownKeys { root.reportUnknownKeys() }
+            let degradation = context.degradation
+            return degradation.isEmpty ? .ok(value) : .degraded(value, degradation)
+        } catch let failure as DecodeFailure {
+            return .failed(failure)
+        } catch let clientError as TVerClientError {
+            throw clientError
+        } catch {
+            return .failed(DecodeFailure(endpoint: endpoint, reason: "unexpected decode error"))
+        }
+    }
+}
+
+enum TVerPayloadEnvelope {
+    /// Validates the `code` of a `{ code, message, result }` document and returns
+    /// its `result` node, which may be missing.
+    ///
+    /// A missing `code` counts as success: several TVer documents omit it and
+    /// rejecting those was a client bug, not an upstream change.
+    static func optionalResult(of root: TVerPayloadNode) throws -> TVerPayloadNode {
+        let code = root.int("code")
+        let message = root.string("message")
+        if let code, code != 0 {
+            let detail = message.flatMap { $0.isEmpty ? nil : $0 }
+            throw TVerClientError.api(detail ?? "TVer APIがエラーを返しました（code: \(code)）。")
+        }
+        return root.object("result")
+    }
+
+    /// Same as `optionalResult`, but a missing `result` is a decode failure.
+    static func result(of root: TVerPayloadNode, endpoint: EndpointID) throws -> TVerPayloadNode {
+        let result = try optionalResult(of: root)
+        guard !result.isMissing else {
+            throw DecodeFailure(endpoint: endpoint, reason: "missing result object", codingPath: "result")
+        }
+        return result
+    }
+}
+
+/// Platform credentials issued by the browser-create endpoint.
+struct TVerPlatformCredentials: Sendable, Equatable {
     let uid: String
     let token: String
 }
 
-private struct APIStatus: Decodable {
-    let message: String?
-}
+private typealias Credentials = TVerPlatformCredentials
 
-private struct BrowserResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: BrowserResult?
-}
-
-private struct BrowserResult: Decodable {
-    let platformUID: String
-    let platformToken: String
-
-    enum CodingKeys: String, CodingKey {
-        case platformUID = "platform_uid"
-        case platformToken = "platform_token"
-    }
-}
-
-private struct EpisodeRankingResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: EpisodeRankingResult?
-}
-
-private struct EpisodeRankingResult: Decodable {
-    let contents: [EpisodeRankingSection]?
-}
-
-private struct EpisodeRankingSection: Decodable {
-    let contents: [EpisodeItem]?
-}
-
-private struct RankingResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: RankingResult?
-}
-
-private struct RankingResult: Decodable {
-    let contents: [RankingSection]?
-}
-
-private struct RankingSection: Decodable {
-    let type: String?
-    let contents: [RankingItem]?
-}
-
-private struct RankingItem: Decodable {
-    let type: String?
-    let content: RankingContent?
-    let rank: Int?
-}
-
-private struct RankingContent: Decodable {
-    let id: String?
-}
-
-private struct SeriesEpisodesResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: SeriesEpisodesResult?
-}
-
-private struct SeriesEpisodesResult: Decodable {
-    let contents: [EpisodeGroup]?
-}
-
-private struct EpisodeGroup: Decodable {
-    let contents: [EpisodeItem]?
-}
-
-private struct EpisodeItem: Decodable {
-    let type: String?
-    let content: EpisodeContent?
-}
-
-private struct EpisodeContent: Decodable, Sendable {
+/// One episode as the platform API describes it. Everything except the
+/// identifier stays optional because TVer omits fields per surface.
+struct EpisodeContent: Sendable, Equatable {
     let id: String?
     let seriesID: String?
     let title: String?
@@ -784,56 +1293,16 @@ private struct EpisodeContent: Decodable, Sendable {
     let thumbnailPath: String?
 }
 
-private struct LiveChannelResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: LiveChannelResult?
-}
-
-private struct LiveChannelResult: Decodable { let contents: [LiveChannelItem]? }
-private struct LiveChannelItem: Decodable {
-    let type: String?
-    let content: LiveChannelMetadata?
-    let video: LiveVideoMetadata?
-}
-
-private struct LiveChannelMetadata: Decodable, Sendable {
-    let id: String?
+/// One live channel plus the identifiers needed to play it. These are the
+/// fields the app cannot work without, so they are validated during decoding
+/// instead of being force unwrapped later.
+struct LiveChannelContent: Sendable, Equatable {
+    let id: String
+    let name: String
     let version: Int?
-    let name: String?
-}
-
-private struct LiveVideoMetadata: Decodable, Sendable {
     let apiKey: String?
-    let projectID: String?
-    let mediaID: String?
-}
-
-private struct LiveChannelContent: Sendable {
-    let channel: LiveChannelMetadata
-    let video: LiveVideoMetadata
-}
-
-private struct LiveTimelineResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: LiveTimelineResult?
-}
-
-private struct LiveTimelineResult: Decodable { let contents: [LiveTimelineItem]? }
-private struct LiveTimelineItem: Decodable {
-    let type: String?
-    let content: LiveTimelineContent?
-}
-
-private struct LiveTimelineContent: Decodable {
-    let id: String?
-    let title: String?
-    let seriesTitle: String?
-    let description: String?
-    let startAt: Int?
-    let endAt: Int?
-    let thumbnailPath: String?
+    let projectID: String
+    let mediaID: String
 }
 
 // MARK: - Catch-up (見逃し配信) lookup
@@ -1141,9 +1610,11 @@ extension TVerAPIClient {
         components.queryItems = [
             URLQueryItem(name: "platform_uid", value: credentials.uid),
             URLQueryItem(name: "platform_token", value: credentials.token),
-            URLQueryItem(name: "keyword", value: keyword),
+            URLQueryItem(name: "keyword", value: keyword)
         ]
-        guard let url = components.url else { throw TVerClientError.invalidResponse }
+        guard let url = components.url else {
+            throw TVerClientError.invalidResponse
+        }
 
         var request = URLRequest(url: url)
         request.setValue("web", forHTTPHeaderField: "x-tver-platform-type")
@@ -1152,27 +1623,15 @@ extension TVerAPIClient {
 
         // Deliberately uncached: the shared response cache keys on host+path only,
         // so two different keywords would otherwise collide on one entry.
-        let data = try await performUncached(request)
-        let response: KeywordSearchResponse = try decode(data)
-        try validateAPIResponse(code: response.code, message: response.message)
-
-        return (response.result?.contents ?? []).compactMap { item in
-            guard item.type == "episode",
-                  let content = item.content,
-                  let id = content.id,
-                  !id.isEmpty
-            else {
-                return nil
-            }
-            return CatchUpEpisodeCandidate(
-                id: id,
-                seriesID: content.seriesID,
-                title: content.title ?? "",
-                seriesTitle: content.seriesTitle ?? "",
-                broadcastDateLabel: content.broadcastDateLabel,
-                endAt: content.endAt
-            )
+        let outcome = try await loadDecoded(
+            request,
+            endpoint: .catchUpSearch,
+            useCache: false
+        ) { root, context in
+            try catchUpEpisodes(root, context: context)
         }
+        let episodes = try value(of: outcome)
+        return Self.catchUpCandidates(from: episodes)
     }
 
     private func broadcastProviderID(forEpisode episodeID: String) async -> String? {
@@ -1186,13 +1645,17 @@ extension TVerAPIClient {
         request.setValue("https://tver.jp/", forHTTPHeaderField: "Referer")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        guard let data = try? await performUncached(request),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let value = json["broadcastProviderID"] as? String
-        else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The episode document carries dozens of fields the app does not model, so
+        // its untouched keys must not be reported as upstream drift.
+        let outcome = try? await loadDecoded(
+            request,
+            endpoint: .episodeDetail,
+            useCache: false,
+            trackUnknownKeys: false,
+            transform: { root, _ in root.string("broadcastProviderID") }
+        )
+        guard let found = outcome?.value, let providerID = found else { return nil }
+        let trimmed = providerID.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
@@ -1210,12 +1673,85 @@ extension TVerAPIClient {
     }
 }
 
-private struct KeywordSearchResponse: Decodable {
-    let code: Int?
-    let message: String?
-    let result: KeywordSearchResult?
-}
+// MARK: - Fixture-facing decode seams
+//
+// The fixture and mutation suites drive these directly, so decoding is covered
+// without a network stub and without re-implementing the transforms under test.
+extension TVerAPIClient {
+    func decodeBrowserCredentials(_ data: Data) throws -> DecodeOutcome<TVerPlatformCredentials> {
+        try TVerPayloadDecoder.decode(data, endpoint: .episodeDetail) { root, _ in
+            try credentialsPayload(root)
+        }
+    }
 
-private struct KeywordSearchResult: Decodable {
-    let contents: [EpisodeItem]?
+    func decodeEpisodeRanking(_ data: Data) throws -> DecodeOutcome<[EpisodeContent]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .episodeDetail) { root, context in
+            try rankedEpisodes(root, context: context, limit: Self.maximumRankedContentCount)
+        }
+    }
+
+    func decodeSeriesEpisodes(_ data: Data) throws -> DecodeOutcome<[EpisodeContent]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .episodeDetail) { root, context in
+            try seriesEpisodes(root, context: context)
+        }
+    }
+
+    func decodeRankedSeriesIDs(_ data: Data) throws -> DecodeOutcome<[String]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .episodeDetail) { root, context in
+            try rankedSeriesIDs(root, context: context, limit: Self.maximumRankedContentCount)
+        }
+    }
+
+    func decodeLiveChannels(_ data: Data) throws -> DecodeOutcome<[TVerLiveChannel]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .liveChannels) { root, context in
+            let raw = try liveChannels(root, context: context)
+            return raw.map { makeLiveChannel(raw: $0, currentProgram: nil) }
+        }
+    }
+
+    func decodeLiveTimeline(_ data: Data, channelID: String) throws -> DecodeOutcome<[TVerLiveProgram]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .programGuide) { root, context in
+            try liveTimeline(root, channelID: channelID, context: context)
+        }
+    }
+
+    func decodeCatchUpSearch(_ data: Data) throws -> DecodeOutcome<[EpisodeContent]> {
+        try TVerPayloadDecoder.decode(data, endpoint: .catchUpSearch) { root, context in
+            try catchUpEpisodes(root, context: context)
+        }
+    }
+
+    /// Reads a fixed set of dotted key paths out of any payload. The mutation
+    /// harness uses it for documents the client only samples a few fields from,
+    /// such as the Streaks live playback response.
+    func decodeValues(
+        _ data: Data,
+        endpoint: EndpointID,
+        keys: [String]
+    ) throws -> DecodeOutcome<[String]> {
+        try TVerPayloadDecoder.decode(data, endpoint: endpoint) { root, context in
+            keys.compactMap { key -> String? in
+                var node = root
+                for part in key.split(separator: ".").map(String.init) {
+                    node = node.object(part)
+                }
+                guard let text = node.stringValue else {
+                    context.noteMissingOptionalKey(key)
+                    return nil
+                }
+                return text
+            }
+        }
+    }
+
+    /// Program days built from decoded episodes, so the broadcast-label handling
+    /// the schedule depends on is covered by the same fixtures.
+    func programDays(fromEpisodes episodes: [EpisodeContent]) -> [ProgramDay] {
+        makeProgramDays(from: episodes)
+    }
+
+    /// Catch-up candidates built from decoded episodes.
+    func catchUpCandidates(fromEpisodes episodes: [EpisodeContent]) -> [CatchUpEpisodeCandidate] {
+        Self.catchUpCandidates(from: episodes)
+    }
 }
