@@ -18,6 +18,9 @@ struct PlayerStage: View {
     var supportsSeeking: Bool = true
     var isFullScreen: Bool = false
     var isActiveSurface: Bool = true
+    /// 中断の告知を映像の上に出すかどうか。縦向きの埋め込みプレイヤーは
+    /// 映像が小さいので、下の番組情報側に出したほうが読める。
+    var showsContinuityNotice: Bool = true
     var onToggleFullScreen: (() -> Void)?
 
     @State private var showsSpinner = false
@@ -52,6 +55,7 @@ struct PlayerStage: View {
                     subtitle: subtitle,
                     supportsSeeking: supportsSeeking,
                     isFullScreen: isFullScreen,
+                    showsContinuityNotice: showsContinuityNotice,
                     onToggleFullScreen: onToggleFullScreen
                 )
                 .opacity(model.areControlsVisible ? 1 : 0)
@@ -62,19 +66,26 @@ struct PlayerStage: View {
                 )
             }
             .contentShape(Rectangle())
-            .gesture(
-                SpatialTapGesture(count: 2, coordinateSpace: .local)
-                    .onEnded { value in
-                        handleSkipTap(at: value.location, width: proxy.size.width)
-                    }
-            )
-            .onTapGesture { model.toggleControls() }
+            .gesture(skipOrToggleGesture(width: proxy.size.width))
         }
         .background(Color.black)
         .task(id: playbackController.isLoading) { await updateSpinner() }
         .onAppear { syncAutoHideSuspension() }
         .onChange(of: playbackController.isPlaying) { _ in syncAutoHideSuspension() }
         .onChange(of: isVoiceOverRunning) { _ in syncAutoHideSuspension() }
+        .onChange(of: playbackController.continuityNotice) { _ in syncAutoHideSuspension() }
+    }
+
+    /// 2回タップ（スキップ）を先に判定し、外れたときだけ 1 回タップ
+    /// （コントロールの表示切り替え）に落とす。別々のジェスチャとして
+    /// 付けると、スキップのたびにコントロールまで消えてしまう。
+    private func skipOrToggleGesture(width: CGFloat) -> some Gesture {
+        SpatialTapGesture(count: 2, coordinateSpace: .local)
+            .onEnded { value in handleSkipTap(at: value.location, width: width) }
+            .exclusively(
+                before: SpatialTapGesture(count: 1, coordinateSpace: .local)
+                    .onEnded { _ in model.toggleControls() }
+            )
     }
 
     /// A double tap on the left or right half skips, and repeated taps stack
@@ -89,9 +100,12 @@ struct PlayerStage: View {
     }
 
     /// Auto hide is wrong while paused: the controls are the only affordance
-    /// left. VoiceOver users likewise need them to stay on screen.
+    /// left. VoiceOver users likewise need them to stay on screen, and a
+    /// continuity notice has to stay readable until it is acted on.
     private func syncAutoHideSuspension() {
-        let shouldSuspend = !playbackController.isPlaying || isVoiceOverRunning
+        let shouldSuspend = !playbackController.isPlaying
+            || isVoiceOverRunning
+            || playbackController.continuityNotice != nil
         if model.isAutoHideSuspended != shouldSuspend {
             model.isAutoHideSuspended = shouldSuspend
         }

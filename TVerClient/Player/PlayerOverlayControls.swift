@@ -13,16 +13,24 @@ struct PlayerOverlayControls: View {
     var subtitle: String?
     var supportsSeeking: Bool = true
     var isFullScreen: Bool = false
+    /// 中断の告知を映像の上に重ねるかどうか。
+    var showsContinuityNotice: Bool = true
     var onToggleFullScreen: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
+                .accessibilitySortPriority(4)
             Spacer(minLength: DS.Spacing.s)
+            continuityBanner
+                .accessibilitySortPriority(3)
             transportRow
+                .accessibilitySortPriority(2)
             Spacer(minLength: DS.Spacing.s)
             bottomBar
+                .accessibilitySortPriority(1)
         }
+        .accessibilityElement(children: .contain)
         .padding(.horizontal, isFullScreen ? DS.Spacing.xl : DS.Spacing.m)
         .padding(.vertical, DS.Spacing.s)
         .background(PlayerScrim())
@@ -127,6 +135,56 @@ struct PlayerOverlayControls: View {
         .simultaneousGesture(TapGesture().onEnded { model.registerInteraction() })
     }
 
+    // MARK: - Continuity
+
+    /// 勝手に止まった理由と、次の一手。映像が十分に大きい面（全画面や
+    /// 横向き）ではここに出す。黙って音が消えたままにしないための表示。
+    @ViewBuilder
+    private var continuityBanner: some View {
+        if showsContinuityNotice, let notice = playbackController.continuityNotice {
+            HStack(alignment: .center, spacing: DS.Spacing.s) {
+                VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                    Text(notice.title)
+                        .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                    Text(notice.nextStep)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    model.registerInteraction()
+                    playbackController.recoverFromContinuityNotice()
+                } label: {
+                    Label(notice.actionTitle, systemImage: notice.actionSystemImage)
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, DS.Spacing.m)
+                        .frame(minHeight: DS.Size.minimumTapTarget)
+                        .background(Color.white.opacity(0.22), in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                PlayerIconButton(
+                    systemImage: "xmark",
+                    label: "この案内を閉じる",
+                    glyphSize: 13
+                ) {
+                    playbackController.dismissContinuityNotice()
+                }
+            }
+            .padding(.horizontal, DS.Spacing.m)
+            .padding(.vertical, DS.Spacing.xs)
+            .background(
+                RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                    .fill(Color.black.opacity(0.6))
+            )
+            .padding(.bottom, DS.Spacing.s)
+            .accessibilityElement(children: .contain)
+        }
+    }
+
     // MARK: - Center
 
     private var transportRow: some View {
@@ -177,13 +235,15 @@ struct PlayerOverlayControls: View {
                         bufferedFraction: playbackController.loadedFraction,
                         isEnabled: playbackController.canSeek,
                         onScrubStarted: {
-                            model.registerInteraction()
+                            // 指を離すまで自動非表示を止める。掴んでいる最中に
+                            // シークバーごと消えるのが最悪の体験だった。
+                            model.beginHeldInteraction()
                             playbackController.beginScrubbing()
                         },
                         onScrubChanged: { playbackController.previewScrub(to: $0) },
                         onScrubEnded: {
                             playbackController.endScrubbing(at: $0)
-                            model.registerInteraction()
+                            model.endHeldInteraction()
                         },
                         onAdjust: { playbackController.seek(by: $0) }
                     )
