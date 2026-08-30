@@ -1,83 +1,69 @@
-import AVKit
 import SwiftUI
 
-enum ProgramLibrarySection: String, CaseIterable, Identifiable {
-    case favorites = "お気に入り"
-    case recents = "最近見た"
-    var id: String { rawValue }
-}
-
+/// Download-first library. The capacity bar sits above three grouped lists:
+/// transfers in flight, saved episodes, and the programmes the viewer kept.
+@MainActor
 struct LibraryView: View {
     @ObservedObject var libraryStore: ProgramLibraryStore
     @ObservedObject var playbackController: PlaybackController
-    @State private var section: ProgramLibrarySection = .favorites
-    @State private var selectedProgram: TVerProgram?
-    @State private var showsClearConfirmation = false
+    @EnvironmentObject private var downloadCenter: DownloadCenter
 
-    private var programs: [TVerProgram] {
-        section == .favorites ? libraryStore.favoritePrograms : libraryStore.recentPrograms
+    @State private var selectedProgram: TVerProgram?
+
+    init(libraryStore: ProgramLibraryStore, playbackController: PlaybackController) {
+        self.libraryStore = libraryStore
+        self.playbackController = playbackController
+    }
+
+    private var inFlight: [DownloadRecord] {
+        downloadCenter.records.filter { record in !record.state.isFinished }
+    }
+
+    private var saved: [DownloadRecord] {
+        downloadCenter.records.filter { record in record.state.isFinished }
+    }
+
+    private var isEmpty: Bool {
+        downloadCenter.records.isEmpty
+            && libraryStore.favoritePrograms.isEmpty
+            && libraryStore.recentPrograms.isEmpty
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                Picker("ライブラリ表示", selection: $section) {
-                    ForEach(ProgramLibrarySection.allCases) { item in
-                        Text(item.rawValue).tag(item)
+            List {
+                Section {
+                    DownloadStorageBar(usage: downloadCenter.storage)
+                        .listRowSeparator(.hidden)
+                }
+
+                if let rejection = downloadCenter.lastRejection {
+                    Section {
+                        rejectionNotice(rejection)
+                            .listRowSeparator(.hidden)
                     }
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
 
-                if programs.isEmpty {
-                    ScheduleStatusView(
-                        title: section == .favorites ? "お気に入りはまだありません" : "最近見た番組はありません",
-                        message: section == .favorites
-                            ? "番組カードのハートを押すと、ここからすぐに視聴できます。"
-                            : "番組を再生すると、ここに履歴が表示されます。",
-                        systemImage: section == .favorites ? "heart" : "clock.arrow.circlepath"
-                    ) {
-                        EmptyView()
+                if isEmpty {
+                    Section {
+                        ContentStatusView(.empty(
+                            title: "保存した番組はありません",
+                            message: "番組の右にある保存ボタンを押すと、通信のない場所でも見られます。",
+                            systemImage: "arrow.down.circle"
+                        ))
+                        .listRowSeparator(.hidden)
                     }
                 } else {
-                    List {
-                        ForEach(programs) { program in
-                            LibraryProgramRow(program: program) {
-                                DiagnosticLogStore.shared.record(
-                                    .info,
-                                    category: "playback",
-                                    message: "Library playback selected"
-                                )
-                                selectedProgram = program
-                            }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) { remove(program) } label: {
-                                        Label("削除", systemImage: "trash")
-                                    }
-                                }
-                        }
-                    }
-                    .listStyle(.plain)
+                    downloadingSection
+                    savedSection
+                    favoritesSection
+                    recentsSection
                 }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .listStyle(.plain)
             .navigationTitle("ライブラリ")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("すべて消去", role: .destructive) { showsClearConfirmation = true }
-                        .frame(minHeight: 44)
-                        .disabled(programs.isEmpty)
-                }
-            }
-        }
-        .confirmationDialog(
-            "\(section.rawValue)をすべて消去しますか？",
-            isPresented: $showsClearConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("すべて消去", role: .destructive) { clearCurrentSection() }
-            Button("キャンセル", role: .cancel) {}
+            .toolbar { settingsToolbar }
+            .refreshable { downloadCenter.refreshStorage() }
         }
         .sheet(item: $selectedProgram) { program in
             PlaybackView(
@@ -86,45 +72,237 @@ struct LibraryView: View {
                 libraryStore: libraryStore
             )
         }
+        .onAppear { downloadCenter.refreshStorage() }
     }
 
-    private func remove(_ program: TVerProgram) {
-        if section == .favorites { libraryStore.removeFavorite(program) }
-        else { libraryStore.removeRecentProgram(program) }
-    }
+    // MARK: - Sections
 
-    private func clearCurrentSection() {
-        if section == .favorites { libraryStore.clearFavorites() }
-        else { libraryStore.clearRecentPrograms() }
-    }
-}
-
-struct LibraryProgramRow: View {
-    let program: TVerProgram
-    let onWatch: () -> Void
-
-    var body: some View {
-        Button(action: onWatch) {
-            HStack(spacing: 12) {
-                ProgramThumbnail(url: program.thumbnailURL)
-                    .frame(width: 112, height: 63)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(program.seriesTitle).font(.headline).lineLimit(2)
-                    Text(program.title).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                    Label(program.broadcastLabel, systemImage: "clock")
-                        .font(.caption).foregroundStyle(.secondary)
+    @ViewBuilder
+    private var downloadingSection: some View {
+        if !inFlight.isEmpty {
+            Section {
+                ForEach(inFlight) { record in
+                    row(for: record.program, state: record.state)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                downloadCenter.cancel(record.id)
+                            } label: {
+                                Label("キャンセル", systemImage: "xmark")
+                            }
+                            if case .downloading = record.state {
+                                Button {
+                                    downloadCenter.pause(record.id)
+                                } label: {
+                                    Label("一時停止", systemImage: "pause")
+                                }
+                            }
+                            if case .paused = record.state {
+                                Button {
+                                    downloadCenter.resume(record.id)
+                                } label: {
+                                    Label("再開", systemImage: "play")
+                                }
+                            }
+                        }
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "play.circle.fill")
-                    .font(.title2).foregroundStyle(.blue)
-                    .frame(width: 44, height: 44)
-                    .accessibilityHidden(true)
+            } header: {
+                SectionHeader("ダウンロード中", subtitle: "\(inFlight.count)件")
             }
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(TVerAccessibilityText.program(program))
-        .accessibilityHint("ダブルタップして再生します。左にスワイプすると削除できます")
+    }
+
+    @ViewBuilder
+    private var savedSection: some View {
+        if !saved.isEmpty {
+            Section {
+                ForEach(saved) { record in
+                    row(for: record.program, state: record.state)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                downloadCenter.delete(record.id)
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                        }
+                }
+            } header: {
+                SectionHeader(
+                    "保存済み",
+                    subtitle: DownloadStorageBar.formatted(downloadCenter.storage.usedBytes)
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var favoritesSection: some View {
+        if !libraryStore.favoritePrograms.isEmpty {
+            Section {
+                ForEach(libraryStore.favoritePrograms) { program in
+                    row(for: program, state: downloadCenter.state(for: program.id))
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                libraryStore.removeFavorite(program)
+                            } label: {
+                                Label("マイリストから削除", systemImage: "heart.slash")
+                            }
+                        }
+                }
+            } header: {
+                SectionHeader(
+                    "マイリスト",
+                    subtitle: "\(libraryStore.favoritePrograms.count)件"
+                ) {
+                    Button("すべて削除") { libraryStore.clearFavorites() }
+                        .font(.caption2)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(DS.Palette.catchUp)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var recentsSection: some View {
+        if !libraryStore.recentPrograms.isEmpty {
+            Section {
+                ForEach(libraryStore.recentPrograms) { program in
+                    row(for: program, state: downloadCenter.state(for: program.id))
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                libraryStore.removeRecentProgram(program)
+                            } label: {
+                                Label("履歴から削除", systemImage: "trash")
+                            }
+                        }
+                }
+            } header: {
+                SectionHeader(
+                    "最近見た",
+                    subtitle: "\(libraryStore.recentPrograms.count)件"
+                ) {
+                    Button("履歴を消去") { libraryStore.clearRecentPrograms() }
+                        .font(.caption2)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(DS.Palette.catchUp)
+                }
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var settingsToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Menu {
+                Toggle("Wi-Fiのときだけ保存", isOn: $downloadCenter.wifiOnly)
+                Toggle("視聴後に自動削除", isOn: $downloadCenter.deleteAfterWatching)
+                Divider()
+                Button {
+                    downloadCenter.refreshStorage()
+                } label: {
+                    Label("空き容量を再計算", systemImage: "arrow.clockwise")
+                }
+            } label: {
+                Image(systemName: "gearshape")
+                    .frame(
+                        width: DS.Size.minimumTapTarget,
+                        height: DS.Size.minimumTapTarget
+                    )
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("ダウンロード設定")
+        }
+    }
+
+    // MARK: - Rows
+
+    private func row(for program: TVerProgram, state: DownloadState) -> some View {
+        MediaRow(
+            title: program.seriesTitle.isEmpty ? program.title : program.seriesTitle,
+            subtitle: program.title,
+            detail: detail(for: program, state: state),
+            thumbnailURL: program.thumbnailURL,
+            badges: badges(for: state),
+            progress: state.progress
+        ) {
+            DownloadButton(program: program)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { open(program) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: Text("再生")) { open(program) }
+    }
+
+    private func rejectionNotice(_ rejection: DownloadCenter.Rejection) -> some View {
+        HStack(alignment: .top, spacing: DS.Spacing.s) {
+            Image(systemName: "exclamationmark.circle")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(DS.Palette.warning)
+            Text(rejection.message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button {
+                downloadCenter.clearRejection()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+                    .frame(
+                        width: DS.Size.minimumTapTarget,
+                        height: DS.Size.minimumTapTarget
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("このお知らせを閉じる")
+        }
+    }
+
+    private func badges(for state: DownloadState) -> [MediaBadge] {
+        switch state {
+        case .notDownloaded:
+            return []
+        case .queued, .downloading:
+            return [MediaBadge(.downloading)]
+        case .paused:
+            return [MediaBadge(.downloading, text: "一時停止")]
+        case .failed:
+            return [MediaBadge(.expiringSoon, text: "保存失敗")]
+        case .downloaded:
+            return [MediaBadge(.downloaded)]
+        }
+    }
+
+    private func detail(for program: TVerProgram, state: DownloadState) -> String? {
+        switch state {
+        case .notDownloaded:
+            if let availableUntil = program.availableUntil, !availableUntil.isEmpty {
+                return "配信期限 \(availableUntil)"
+            }
+            return program.broadcastLabel
+        case .queued:
+            return "順番待ち"
+        case let .downloading(progress):
+            return "ダウンロード中 \(percent(progress))"
+        case let .paused(progress):
+            return "一時停止中 \(percent(progress))"
+        case let .failed(message):
+            return message
+        case let .downloaded(bytes):
+            return DownloadStorageBar.formatted(bytes)
+        }
+    }
+
+    private func percent(_ progress: Double) -> String {
+        "\(Int((DownloadCenter.clamp(progress) * 100).rounded()))%"
+    }
+
+    private func open(_ program: TVerProgram) {
+        DiagnosticLogStore.shared.record(
+            .info,
+            category: "library",
+            message: "Library row opened for playback"
+        )
+        selectedProgram = program
     }
 }
