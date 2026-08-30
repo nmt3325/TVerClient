@@ -1,7 +1,7 @@
 import Foundation
 
-struct ProgramSearchEntry: Identifiable, Hashable, Sendable {
-    enum Source: String, Hashable, Sendable {
+struct ProgramSearchEntry: Identifiable, Hashable, Codable, Sendable {
+    enum Source: String, Hashable, Codable, Sendable {
         case programGuide
         case videoOnDemand
         case library
@@ -139,22 +139,39 @@ struct ProgramSearchIndex: Sendable {
     private let indexedEntries: [IndexedEntry]
 
     init(entries: [ProgramSearchEntry]) {
-        indexedEntries = entries.enumerated().map { offset, entry in
-            IndexedEntry(
-                entry: entry,
-                normalizedFields: [
-                    entry.stationName,
-                    entry.title,
-                    entry.seriesTitle,
-                    entry.description,
-                ].map(JapaneseSearchNormalizer.normalize),
-                sourceOrder: offset
-            )
-        }
+        // Upstream repeats the same programme across paginated days, so the
+        // raw entries can carry duplicate ids. Duplicates break SwiftUI list
+        // identity and render the same row twice, so keep the first occurrence.
+        var seenIDs: Set<String> = []
+        indexedEntries = entries
+            .filter { seenIDs.insert($0.id).inserted }
+            .enumerated()
+            .map { offset, entry in
+                IndexedEntry(
+                    entry: entry,
+                    normalizedFields: [
+                        entry.stationName,
+                        entry.title,
+                        entry.seriesTitle,
+                        entry.description,
+                    ].map(JapaneseSearchNormalizer.normalize),
+                    sourceOrder: offset
+                )
+            }
+    }
+
+    init(snapshot: ProgramSearchIndexSnapshot) {
+        self.init(entries: snapshot.entries)
     }
 
     var count: Int {
         indexedEntries.count
+    }
+
+    /// Entries in index order, ready to be written to disk and reloaded when
+    /// the API is unreachable.
+    var entries: [ProgramSearchEntry] {
+        indexedEntries.map(\.entry)
     }
 
     func search(
@@ -276,8 +293,12 @@ struct ProgramSearchIndex: Sendable {
         let programInterval = DateInterval(start: start, end: end)
         var day = calendar.startOfDay(for: start)
         let finalDay = calendar.startOfDay(for: end)
+        // A malformed payload can carry an end date years away; walking every
+        // day of such a range would stall the whole search.
+        var remainingDays = Self.maximumTimeSlotDaySpan
 
-        while day <= finalDay {
+        while day <= finalDay, remainingDays > 0 {
+            remainingDays -= 1
             guard
                 let slotStart = calendar.date(byAdding: .hour, value: hours.lowerBound, to: day),
                 let slotEnd = calendar.date(byAdding: .hour, value: hours.upperBound, to: day)
@@ -292,10 +313,114 @@ struct ProgramSearchIndex: Sendable {
         return false
     }
 
+    static let maximumTimeSlotDaySpan = 8
+
     static var japaneseCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.locale = Locale(identifier: "ja_JP")
         calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
         return calendar
+    }
+}
+
+/// Disk copy of a built search index.
+///
+/// Only titles, station names and timings are written. Search entries never
+/// carry tokens, cookies, query strings or stream URLs, so the offline index is
+/// safe to keep in the Caches directory.
+struct ProgramSearchIndexSnapshot: Codable, Sendable, Equatable {
+    let savedAt: Date
+    let entries: [ProgramSearchEntry]
+
+    init(savedAt: Date, entries: [ProgramSearchEntry]) {
+        self.savedAt = savedAt
+        self.entries = entries
+    }
+}
+
+/// Persists a `ProgramSearchIndex` so search keeps working while the API is
+/// unreachable. A missing directory means "memory only", which is what unit
+/// tests and previews get unless they pass an explicit location.
+actor ProgramSearchIndexStore {
+    static let defaultMaximumAge: TimeInterval = 7 * 24 * 60 * 60
+    static let defaultMaximumEntryCount = 5_000
+
+    static let shared: ProgramSearchIndexStore? = {
+        guard let directory = TVerOfflineCache.directory(named: "TVerSearchIndex") else { return nil }
+        return ProgramSearchIndexStore(directory: directory)
+    }()
+
+    private let directory: URL
+    private let fileURL: URL
+    private let maximumAge: TimeInterval
+    private let maximumEntryCount: Int
+    private let fileManager: FileManager
+    private var failureDescription: String?
+
+    init(
+        directory: URL,
+        name: String = "program-search-index",
+        maximumAge: TimeInterval = ProgramSearchIndexStore.defaultMaximumAge,
+        maximumEntryCount: Int = ProgramSearchIndexStore.defaultMaximumEntryCount,
+        fileManager: FileManager = .default
+    ) {
+        self.directory = directory
+        fileURL = directory.appendingPathComponent("\(name).json", isDirectory: false)
+        self.maximumAge = max(0, maximumAge)
+        self.maximumEntryCount = max(0, maximumEntryCount)
+        self.fileManager = fileManager
+    }
+
+    func save(_ index: ProgramSearchIndex, at date: Date) {
+        save(entries: index.entries, at: date)
+    }
+
+    func save(entries: [ProgramSearchEntry], at date: Date) {
+        let snapshot = ProgramSearchIndexSnapshot(
+            savedAt: date,
+            entries: Array(entries.prefix(maximumEntryCount))
+        )
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(snapshot)
+            try data.write(to: fileURL, options: .atomic)
+            failureDescription = nil
+        } catch {
+            failureDescription = String(describing: type(of: error))
+        }
+    }
+
+    func load(at date: Date) -> ProgramSearchIndexSnapshot? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        guard let snapshot = try? JSONDecoder().decode(ProgramSearchIndexSnapshot.self, from: data) else {
+            // Truncated or foreign payload: drop it so the next save starts clean.
+            try? fileManager.removeItem(at: fileURL)
+            return nil
+        }
+        // A snapshot from the future means the clock moved; treat it as stale
+        // rather than trusting it forever.
+        guard
+            snapshot.savedAt <= date.addingTimeInterval(3_600),
+            date.timeIntervalSince(snapshot.savedAt) <= maximumAge
+        else {
+            try? fileManager.removeItem(at: fileURL)
+            return nil
+        }
+        return snapshot
+    }
+
+    /// Rebuilds a usable index from disk, or nil when nothing is available.
+    func restoredIndex(at date: Date) -> ProgramSearchIndex? {
+        guard let snapshot = load(at: date), !snapshot.entries.isEmpty else { return nil }
+        return ProgramSearchIndex(snapshot: snapshot)
+    }
+
+    func lastFailure() -> String? {
+        failureDescription
+    }
+
+    func clear() {
+        try? fileManager.removeItem(at: fileURL)
+        failureDescription = nil
     }
 }
