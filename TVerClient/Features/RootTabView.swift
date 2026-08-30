@@ -11,7 +11,8 @@ struct RootTabView: View {
         TabView {
             ProgramGuideView(
                 viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
-                playbackController: playbackController
+                playbackController: playbackController,
+                libraryStore: libraryStore
             )
             .tabItem {
                 Label("番組表", systemImage: "rectangle.grid.3x2")
@@ -599,6 +600,7 @@ private struct LivePlaybackView: View {
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @State private var isFullScreenPresented = false
 
     private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
     private var isCurrent: Bool { playbackController.currentLiveChannel?.id == channel.id }
@@ -610,7 +612,9 @@ private struct LivePlaybackView: View {
                     PlaybackVideoSurface(
                         player: playbackController.player,
                         pictureInPicture: pictureInPicture,
-                        accessibilityLabel: "\(channel.name)のライブ動画プレイヤー"
+                        accessibilityLabel: "\(channel.name)のライブ動画プレイヤー",
+                        isActiveSurface: !isFullScreenPresented,
+                        onEnterFullScreen: { isFullScreenPresented = true }
                     )
 
                     VStack(alignment: .leading, spacing: 7) {
@@ -654,6 +658,17 @@ private struct LivePlaybackView: View {
             }
         }
         .task(id: channel.id) { await playbackController.playLive(channel) }
+        .fullScreenCover(isPresented: $isFullScreenPresented) {
+            FullScreenPlaybackView(
+                playbackController: playbackController,
+                pictureInPicture: pictureInPicture,
+                title: channel.name,
+                subtitle: channel.currentProgram?.seriesTitle,
+                accessibilityLabel: "\(channel.name)の全画面ライブ動画プレイヤー",
+                supportsSeeking: false,
+                onExit: { isFullScreenPresented = false }
+            )
+        }
     }
 
     @ViewBuilder
@@ -820,13 +835,25 @@ private struct CardButtonStyle: ButtonStyle {
     }
 }
 
-private struct PlaybackView: View {
+@MainActor
+struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
     @ObservedObject var libraryStore: ProgramLibraryStore
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @State private var isFullScreenPresented = false
+
+    init(
+        program: TVerProgram,
+        playbackController: PlaybackController,
+        libraryStore: ProgramLibraryStore
+    ) {
+        self.program = program
+        self.playbackController = playbackController
+        self.libraryStore = libraryStore
+    }
 
     private var isCurrent: Bool { playbackController.currentProgram?.id == program.id }
     private var isFavorite: Bool { libraryStore.isFavorite(program) }
@@ -839,7 +866,9 @@ private struct PlaybackView: View {
                     PlaybackVideoSurface(
                         player: playbackController.player,
                         pictureInPicture: pictureInPicture,
-                        accessibilityLabel: "\(program.seriesTitle)の動画プレイヤー"
+                        accessibilityLabel: "\(program.seriesTitle)の動画プレイヤー",
+                        isActiveSurface: !isFullScreenPresented,
+                        onEnterFullScreen: { isFullScreenPresented = true }
                     )
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -899,6 +928,16 @@ private struct PlaybackView: View {
         .task(id: program.id) {
             libraryStore.recordRecentlyViewed(program)
             await playbackController.play(program)
+        }
+        .fullScreenCover(isPresented: $isFullScreenPresented) {
+            FullScreenPlaybackView(
+                playbackController: playbackController,
+                pictureInPicture: pictureInPicture,
+                title: program.seriesTitle,
+                subtitle: program.title,
+                accessibilityLabel: "\(program.seriesTitle)の全画面動画プレイヤー",
+                onExit: { isFullScreenPresented = false }
+            )
         }
     }
 

@@ -101,14 +101,47 @@ struct PlaybackVideoSurface: View {
     @ObservedObject var pictureInPicture: PictureInPictureCoordinator
     let accessibilityLabel: String
     var cornerRadius: CGFloat = 12
+    var videoGravity: AVLayerVideoGravity = .resizeAspect
+    /// The inline surface releases the shared player layer while the full
+    /// screen surface is presented, so playback is never restarted.
+    var isActiveSurface: Bool = true
+    /// When set, a full screen button and a double tap gesture are offered.
+    var onEnterFullScreen: (() -> Void)? = nil
 
     var body: some View {
-        PlayerLayerView(player: player, pictureInPicture: pictureInPicture)
-            .frame(maxWidth: .infinity)
-            .aspectRatio(16 / 9, contentMode: .fit)
-            .background(Color.black)
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .accessibilityLabel(accessibilityLabel)
+        PlayerLayerView(
+            player: player,
+            pictureInPicture: pictureInPicture,
+            videoGravity: videoGravity,
+            isActiveSurface: isActiveSurface
+        )
+        .frame(maxWidth: .infinity)
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .accessibilityLabel(accessibilityLabel)
+        .overlay(alignment: .bottomTrailing) { fullScreenButton }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { onEnterFullScreen?() }
+    }
+
+    @ViewBuilder
+    private var fullScreenButton: some View {
+        if let onEnterFullScreen {
+            Button(action: onEnterFullScreen) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(Color.black.opacity(0.55), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("全画面")
+            .accessibilityHint("動画を画面いっぱいに表示します")
+            .accessibilityIdentifier(PlaybackAccessibilityIdentifier.fullScreenEnter)
+            .padding(6)
+        }
     }
 }
 
