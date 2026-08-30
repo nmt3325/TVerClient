@@ -87,6 +87,17 @@ enum ProgramSearchTimeSlot: String, CaseIterable, Hashable, Sendable {
         }
     }
 
+    /// 画面に出す短い名前。いまどの時間帯で絞り込んでいるかを見せるために使う。
+    var displayName: String {
+        switch self {
+        case .all: return "すべての時間帯"
+        case .earlyMorning: return "深夜・早朝 0〜6時"
+        case .morning: return "朝 6〜12時"
+        case .daytime: return "昼 12〜18時"
+        case .evening: return "夜 18〜24時"
+        }
+    }
+
     fileprivate var hourRange: Range<Int>? {
         switch self {
         case .all: return nil
