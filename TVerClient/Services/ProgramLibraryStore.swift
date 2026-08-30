@@ -166,6 +166,20 @@ final class ProgramLibraryStore: ObservableObject {
         persist()
     }
 
+    /// 壊れた保存データから戻したことを利用者が受け取った。
+    ///
+    /// 告知を出したままにすると、一覧の上に永久に居座ってしまう。
+    func acknowledgeStorageRecovery() {
+        guard didRecoverFromCorruptedStorage else { return }
+        didRecoverFromCorruptedStorage = false
+    }
+
+    /// 保存に失敗したことの告知を閉じる。次に失敗すればまた出る。
+    func acknowledgePersistenceFailure() {
+        guard lastPersistenceFailure != nil else { return }
+        lastPersistenceFailure = nil
+    }
+
     private func pruneExpiredRecents(referenceDate: Date) {
         recentPrograms = Self.retainedRecents(
             recentPrograms,
