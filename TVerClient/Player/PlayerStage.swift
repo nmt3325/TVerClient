@@ -71,6 +71,9 @@ struct PlayerStage: View {
         .background(Color.black)
         .task(id: playbackController.isLoading) { await updateSpinner() }
         .onAppear { syncAutoHideSuspension() }
+        // 掴んだまま画面が閉じると指を離した合図が来ない。同じモデルで開き直したときに
+        // 自動非表示が止まったままにならないよう、ここでも必ず落とす。
+        .onDisappear { model.endHeldInteraction() }
         .onChange(of: playbackController.isPlaying) { _ in syncAutoHideSuspension() }
         .onChange(of: isVoiceOverRunning) { _ in syncAutoHideSuspension() }
         .onChange(of: playbackController.continuityNotice) { _ in syncAutoHideSuspension() }
