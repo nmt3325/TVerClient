@@ -1,6 +1,19 @@
 import AVKit
 import SwiftUI
 
+/// タブの識別子。選択状態を保存し、画面間の誘導を可能にするために必要。
+enum RootTab: String, Hashable {
+    case catchUp
+    case guide
+    case live
+    case library
+    case diagnostics
+}
+
+/// アプリの土台。
+///
+/// オーケストレータ契約。タブ選択の保持と、再生中バーの常設はここが持つ。
+/// 各タスクは自分の画面を直すが、このファイルは変更しない。
 @MainActor
 struct RootTabView: View {
     @StateObject private var playbackController = PlaybackController()
@@ -10,10 +23,18 @@ struct RootTabView: View {
     @StateObject private var catchUpAvailability = CatchUpAvailabilityStore(lookup: TVerAPIClient())
     @StateObject private var areaStore = AreaStore(service: TVerAPIClient())
 
+    /// アプリを離れて戻ったときに、見ていたタブへ戻る。
+    @SceneStorage("RootTabView.selectedTab") private var storedTab: String = RootTab.catchUp.rawValue
+
+    private var selection: Binding<RootTab> {
+        Binding(
+            get: { RootTab(rawValue: storedTab) ?? .catchUp },
+            set: { storedTab = $0.rawValue }
+        )
+    }
+
     var body: some View {
-        // Ordered by how often the tabs are actually used: catch-up first,
-        // then the guide, live, saved content and finally diagnostics.
-        TabView {
+        TabView(selection: selection) {
             ScheduleView(
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
@@ -22,6 +43,7 @@ struct RootTabView: View {
             .tabItem {
                 Label("見逃し", systemImage: "play.rectangle.on.rectangle")
             }
+            .tag(RootTab.catchUp)
 
             ProgramGuideView(
                 viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
@@ -31,6 +53,7 @@ struct RootTabView: View {
             .tabItem {
                 Label("番組表", systemImage: "calendar.day.timeline.left")
             }
+            .tag(RootTab.guide)
 
             LiveView(
                 viewModel: LiveViewModel(service: TVerAPIClient()),
@@ -39,6 +62,7 @@ struct RootTabView: View {
             .tabItem {
                 Label("ライブ", systemImage: "dot.radiowaves.left.and.right")
             }
+            .tag(RootTab.live)
 
             LibraryView(
                 libraryStore: libraryStore,
@@ -47,16 +71,35 @@ struct RootTabView: View {
             .tabItem {
                 Label("ライブラリ", systemImage: "arrow.down.circle")
             }
+            .tag(RootTab.library)
 
+            #if DEBUG
+            // 開発者向けの画面なので、出荷ビルドではタブバーに並べない。
+            // リリースでの入口はライブラリ画面のツールバーから提供する。
             DiagnosticsView(logStore: diagnosticLogStore)
                 .tabItem {
                     Label("診断", systemImage: "stethoscope")
                 }
+                .tag(RootTab.diagnostics)
+            #endif
         }
         .tint(DS.Palette.catchUp)
         .environmentObject(downloadCenter)
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // 再生シートを閉じても、止める場所と戻る場所が必ず画面に残る。
+            if let presence = playbackController.presence {
+                PlaybackPresenceBar(
+                    presence: presence,
+                    onToggle: { playbackController.togglePlayback() },
+                    onStop: { playbackController.stop() },
+                    onOpen: { selection.wrappedValue = presence.isLive ? .live : .catchUp }
+                )
+                .transition(.move(edge: .bottom))
+            }
+        }
+        .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
         .task {
             downloadCenter.restore()
             downloadCenter.refreshStorage()

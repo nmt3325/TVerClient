@@ -757,6 +757,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 description: episode.description ?? "",
                 broadcastLabel: broadcastLabel,
                 availableUntil: availableUntilLabel(epochSeconds: episode.endAt),
+                availableUntilAt: availableUntilDate(epochSeconds: episode.endAt),
                 thumbnailURL: thumbnailURL(path: episode.thumbnailPath, episodeID: episodeID)
             )
             programsByDate[date, default: []].append(program)
@@ -836,6 +837,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
         formatter.dateFormat = "M月d日(E) H:mmまで"
         return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(epochSeconds)))
+    }
+
+    /// 期限の絶対時刻。表示用の文字列と違って年を失わない。
+    private func availableUntilDate(epochSeconds: Int?) -> Date? {
+        guard let epochSeconds, epochSeconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(epochSeconds))
     }
 
     private func thumbnailURL(path: String?, episodeID: String) -> URL? {
@@ -1673,6 +1680,7 @@ extension TVerAPIClient {
             description: "",
             broadcastLabel: candidate.broadcastDateLabel ?? "",
             availableUntil: availableUntilLabel(epochSeconds: candidate.endAt),
+            availableUntilAt: availableUntilDate(epochSeconds: candidate.endAt),
             thumbnailURL: thumbnailURL(path: nil, episodeID: candidate.id)
         )
     }
