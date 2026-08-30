@@ -4,3 +4,7 @@ DerivedData/
 xcuserdata/
 build/
 *.ipa
+
+# Raw API captures (never commit real responses)
+TVerClientTests/Fixtures/Captured/
+*.captured.json
