@@ -154,7 +154,8 @@ final class NetworkDiagnosticsService: @unchecked Sendable {
             endpoint: .mediaManifest,
             url: endpoints[.streaks] ?? Self.streaksProbeURL,
             method: "HEAD",
-            requiresJSONObject: false
+            requiresJSONObject: false,
+            acceptsCredentialFreeRejection: true
         )
         let steps = [metadata, manifest]
         return StartupSelfCheckReport(
@@ -164,12 +165,17 @@ final class NetworkDiagnosticsService: @unchecked Sendable {
         )
     }
 
+    /// - Parameter acceptsCredentialFreeRejection: the step probes a bare host
+    ///   root without credentials, so a 4xx rejection still proves DNS, TCP and
+    ///   TLS. Only server errors and transport failures mean unreachable there.
+    ///   This mirrors the policy `probe(_:)` already applies to `.streaks`.
     private func selfCheckStep(
         name: String,
         endpoint: EndpointID,
         url: URL,
         method: String,
-        requiresJSONObject: Bool
+        requiresJSONObject: Bool,
+        acceptsCredentialFreeRejection: Bool = false
     ) async -> StartupSelfCheckStep {
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -191,6 +197,13 @@ final class NetworkDiagnosticsService: @unchecked Sendable {
 
             let statusCode = http.statusCode
             guard (200 ..< 400).contains(statusCode) else {
+                if acceptsCredentialFreeRejection, (400 ..< 500).contains(statusCode) {
+                    return emit(
+                        name: name, endpoint: endpoint, outcome: .ok, category: .none,
+                        statusCode: statusCode, durationMS: durationMS,
+                        detail: "credential-free request rejected, host reachable"
+                    )
+                }
                 return emit(
                     name: name, endpoint: endpoint, outcome: .failed,
                     category: statusCode >= 500 ? .environment : .upstreamChange,
@@ -380,15 +393,10 @@ final class NetworkDiagnosticsService: @unchecked Sendable {
 
 /// Externally callable entry point for the launch-time self-check.
 ///
-/// Integration note: nothing calls this automatically yet. `App/` and
-/// `RootTabView.swift` are frozen for this change, so hooking the self-check
-/// into application startup is a follow-up integration step. The intended
-/// wiring is a single fire-and-forget call from the app entry point:
-///
-///     .task { await StartupSelfCheck.run() }
-///
-/// Until that call exists the self-check only runs when the diagnostics screen
-/// asks for it, so a launch-time regression stays invisible.
+/// The app entry point already runs this once per launch as a fire and forget
+/// task, and the diagnostics screen re-runs it on demand. Both paths publish the
+/// report to `DiagnosticLogStore`, so a launch time regression shows up without
+/// anyone reproducing playback.
 @MainActor
 enum StartupSelfCheck {
     @discardableResult
