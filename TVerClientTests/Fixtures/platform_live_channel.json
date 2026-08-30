@@ -1,0 +1,33 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "channel",
+        "content": {
+          "id": "ch01",
+          "version": 2,
+          "name": "サンプルチャンネル1"
+        },
+        "video": {
+          "apiKey": "ch01",
+          "projectID": "placeholder-simul-ch01",
+          "mediaID": "ref:placeholder-simul-ch01"
+        }
+      },
+      {
+        "type": "channel",
+        "content": {
+          "id": "ch02",
+          "version": 0,
+          "name": "サンプルチャンネル2"
+        },
+        "video": {
+          "apiKey": "ch02",
+          "projectID": "placeholder-simul-ch02",
+          "mediaID": "ref:placeholder-simul-ch02"
+        }
+      }
+    ]
+  }
+}

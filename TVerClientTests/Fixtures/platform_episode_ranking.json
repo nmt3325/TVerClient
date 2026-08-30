@@ -1,0 +1,64 @@
+{
+  "code": 0,
+  "result": {
+    "contents": [
+      {
+        "type": "episodeRanking",
+        "label": "placeholder ranking",
+        "contents": [
+          {
+            "type": "episode",
+            "content": {
+              "id": "ep000001",
+              "version": 3,
+              "seriesID": "sr000001",
+              "title": "第1話 プレースホルダー",
+              "seriesTitle": "サンプル番組A",
+              "description": "サンプルの説明文です。",
+              "broadcastDateLabel": "1月5日(月)放送分",
+              "startAt": 1893369600,
+              "endAt": 1893974400,
+              "thumbnailPath": "/images/placeholder/ep000001.jpg",
+              "isNHKContent": false,
+              "ribbonID": 0
+            }
+          },
+          {
+            "type": "episode",
+            "content": {
+              "id": "ep000002",
+              "version": 1,
+              "seriesID": "sr000002",
+              "title": "第2話 プレースホルダー",
+              "seriesTitle": "サンプル番組B",
+              "description": "サンプルの説明文です。",
+              "broadcastDateLabel": "1月6日(火)放送分",
+              "startAt": 1893456000,
+              "endAt": 1894060800,
+              "thumbnailPath": "/images/placeholder/ep000002.jpg",
+              "isNHKContent": false,
+              "ribbonID": 2
+            }
+          },
+          {
+            "type": "episode",
+            "content": {
+              "id": "ep000003",
+              "version": 7,
+              "seriesID": "sr000001",
+              "title": "第3話 プレースホルダー",
+              "seriesTitle": "サンプル番組A",
+              "description": "サンプルの説明文です。",
+              "broadcastDateLabel": "1月7日(水)放送分",
+              "startAt": 1893542400,
+              "endAt": 1894147200,
+              "thumbnailPath": "/images/placeholder/ep000003.jpg",
+              "isNHKContent": false,
+              "ribbonID": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
