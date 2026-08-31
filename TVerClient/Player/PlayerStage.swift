@@ -1,5 +1,104 @@
 import AVFoundation
 import SwiftUI
+import UIKit
+
+/// Resolves a background double tap before it mutates either playback or the
+/// chrome. Keeping this tiny decision separate makes left/right and the
+/// non-seekable fallback deterministic.
+enum PlayerStageBackgroundTapAction: Equatable {
+    case toggleControls
+    case skip(forward: Bool)
+
+    static func resolve(
+        x: CGFloat,
+        width: CGFloat,
+        supportsSeeking: Bool,
+        canSeek: Bool
+    ) -> PlayerStageBackgroundTapAction {
+        guard supportsSeeking, canSeek, width > 0 else { return .toggleControls }
+        return .skip(forward: x >= width / 2)
+    }
+}
+
+/// A UIKit tap plane used as a *background sibling* of the real controls.
+/// Buttons and the scrubber therefore win hit testing without competing with
+/// an ancestor gesture, while unoccupied video pixels still receive taps.
+@MainActor
+final class PlayerBackgroundTapView: UIView {
+    static let accessibilityIdentifier = "playback.background-tap-surface"
+
+    private var onSingleTap: () -> Void = {}
+    private var onDoubleTap: (CGPoint) -> Void = { _ in }
+
+    private(set) lazy var singleTapRecognizer: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(didSingleTap(_:)))
+        recognizer.numberOfTapsRequired = 1
+        return recognizer
+    }()
+
+    private(set) lazy var doubleTapRecognizer: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(didDoubleTap(_:)))
+        recognizer.numberOfTapsRequired = 2
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isAccessibilityElement = false
+        accessibilityIdentifier = Self.accessibilityIdentifier
+        singleTapRecognizer.require(toFail: doubleTapRecognizer)
+        addGestureRecognizer(singleTapRecognizer)
+        addGestureRecognizer(doubleTapRecognizer)
+    }
+
+    required init?(coder: NSCoder) {
+        preconditionFailure("PlayerBackgroundTapView is created in code only")
+    }
+
+    func updateActions(
+        onSingleTap: @escaping () -> Void,
+        onDoubleTap: @escaping (CGPoint) -> Void
+    ) {
+        self.onSingleTap = onSingleTap
+        self.onDoubleTap = onDoubleTap
+    }
+
+    /// Shared by recognizer callbacks and hosted interaction tests.
+    func performSingleTap() {
+        onSingleTap()
+    }
+
+    /// Shared by recognizer callbacks and hosted interaction tests.
+    func performDoubleTap(at location: CGPoint) {
+        onDoubleTap(location)
+    }
+
+    @objc private func didSingleTap(_: UITapGestureRecognizer) {
+        performSingleTap()
+    }
+
+    @objc private func didDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        performDoubleTap(at: recognizer.location(in: self))
+    }
+}
+
+@MainActor
+struct PlayerBackgroundTapSurface: UIViewRepresentable {
+    let onSingleTap: () -> Void
+    let onDoubleTap: (CGPoint) -> Void
+
+    func makeUIView(context: Context) -> PlayerBackgroundTapView {
+        let view = PlayerBackgroundTapView()
+        view.updateActions(onSingleTap: onSingleTap, onDoubleTap: onDoubleTap)
+        return view
+    }
+
+    func updateUIView(_ view: PlayerBackgroundTapView, context: Context) {
+        view.updateActions(onSingleTap: onSingleTap, onDoubleTap: onDoubleTap)
+    }
+}
 
 /// The video plus every control layered on top of it.
 ///
@@ -41,20 +140,24 @@ struct PlayerStage: View {
                 .accessibilityElement()
                 .accessibilityLabel(accessibilityLabel)
 
-                // Keep the exclusive single/double-tap recognizer on a
-                // dedicated background sibling. Putting it on the enclosing
-                // ZStack makes every Button and scrub gesture underneath it
-                // compete with the ancestor recognizer.
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(skipOrToggleGesture(width: proxy.size.width))
-                    .accessibilityHidden(true)
+                // When chrome is hidden this plane owns the whole video. When
+                // chrome is visible, the equivalent plane inside
+                // PlayerOverlayControls sits behind its buttons and scrubber.
+                PlayerBackgroundTapSurface(
+                    onSingleTap: { model.toggleControls() },
+                    onDoubleTap: { location in
+                        handleSkipTap(at: location, width: proxy.size.width)
+                    }
+                )
+                .allowsHitTesting(!model.areControlsVisible)
+                .accessibilityHidden(true)
 
                 if showsSpinner {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(.white)
                         .scaleEffect(1.3)
+                        .allowsHitTesting(false)
                         .accessibilityLabel("読み込み中")
                 }
                 SkipRippleOverlay(feedback: model.skipFeedback)
@@ -67,7 +170,11 @@ struct PlayerStage: View {
                     supportsSeeking: supportsSeeking,
                     isFullScreen: isFullScreen,
                     showsContinuityNotice: showsContinuityNotice,
-                    onToggleFullScreen: onToggleFullScreen
+                    onToggleFullScreen: onToggleFullScreen,
+                    onBackgroundSingleTap: { model.toggleControls() },
+                    onBackgroundDoubleTap: { location in
+                        handleSkipTap(at: location, width: proxy.size.width)
+                    }
                 )
                 .opacity(model.areControlsVisible ? 1 : 0)
                 .allowsHitTesting(model.areControlsVisible)
@@ -88,27 +195,22 @@ struct PlayerStage: View {
         .onChange(of: playbackController.continuityNotice) { _ in syncAutoHideSuspension() }
     }
 
-    /// 2回タップ（スキップ）を先に判定し、外れたときだけ 1 回タップ
-    /// （コントロールの表示切り替え）に落とす。別々のジェスチャとして
-    /// 付けると、スキップのたびにコントロールまで消えてしまう。
-    private func skipOrToggleGesture(width: CGFloat) -> some Gesture {
-        SpatialTapGesture(count: 2, coordinateSpace: .local)
-            .onEnded { value in handleSkipTap(at: value.location, width: width) }
-            .exclusively(
-                before: SpatialTapGesture(count: 1, coordinateSpace: .local)
-                    .onEnded { _ in model.toggleControls() }
-            )
-    }
-
     /// A double tap on the left or right half skips, and repeated taps stack
-    /// up (10, 20, 30 ...) the way the system player does.
+    /// up (10, 20, 30 ...) the way the system player does. A double tap falls
+    /// back to the normal chrome toggle until a finite seek range is ready.
     private func handleSkipTap(at location: CGPoint, width: CGFloat) {
-        guard supportsSeeking, playbackController.canSeek else {
+        switch PlayerStageBackgroundTapAction.resolve(
+            x: location.x,
+            width: width,
+            supportsSeeking: supportsSeeking,
+            canSeek: playbackController.canSeek
+        ) {
+        case .toggleControls:
             model.toggleControls()
-            return
+        case let .skip(forward):
+            let offset = model.registerSkip(forward: forward)
+            playbackController.seek(by: offset)
         }
-        let offset = model.registerSkip(forward: location.x >= width / 2)
-        playbackController.seek(by: offset)
     }
 
     /// Auto hide is wrong while paused: the controls are the only affordance

@@ -167,18 +167,30 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     var canStart: Bool { availability == .available && state == .inactive }
     var errorMessage: String? { lastFailure?.localizedDescription }
 
-    /// True only for the exact source layer AVKit still needs. An outgoing
-    /// inline/full-screen surface may retain the shared player during PiP, but
-    /// every other inactive surface must release it.
+    /// True only for the exact source layer AVKit still needs. This includes
+    /// the readiness window after a playing item entered the background: AVKit
+    /// can make PiP possible later, but only while its source still has the
+    /// player attached.
     func shouldRetainPlayerLayer(_ playerLayer: AVPlayerLayer) -> Bool {
         guard attachedLayer === playerLayer else { return false }
         if driver?.isPictureInPictureActive == true { return true }
         switch state {
         case .starting, .active, .stopping:
             return true
-        case .inactive, .failed:
+        case .inactive:
+            return hasPendingAutomaticStartIntent
+        case .failed:
             return false
         }
+    }
+
+    private var hasPendingAutomaticStartIntent: Bool {
+        applicationState == .background
+            && startsAutomaticallyFromInline
+            && playbackWasActiveOnBackgroundEntry
+            && !automaticStartRequestedForCurrentBackground
+            && availability != .unsupported
+            && driver != nil
     }
 
     func isAttached(to playerLayer: AVPlayerLayer) -> Bool {
@@ -189,7 +201,17 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         // SwiftUI may call updateUIView repeatedly while observing this object.
         // Republishing availability from that update path creates a feedback
         // loop that can starve the view task responsible for starting playback.
-        guard attachedLayer !== playerLayer else { return }
+        if attachedLayer === playerLayer {
+            // Returning to the source while a deferred surface disappears is
+            // an ownership reclaim, not a stale update. Cancel both the pending
+            // hand-off and a deferred detach so PiP stop cannot blank the layer
+            // that is onscreen again.
+            pendingAttachmentLayer?.player = nil
+            pendingAttachmentLayer = nil
+            pendingAttachmentPlayer = nil
+            shouldDetachAfterTransition = false
+            return
+        }
 
         if let attachedLayer, shouldRetainPlayerLayer(attachedLayer) {
             // The new onscreen surface waits empty until the PiP source has
@@ -364,6 +386,12 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         shouldDetachAfterTransition = false
         attachedLayer = playerLayer
 
+        // A controller is a session for one source layer. A replacement must
+        // never inherit a failed transition from the old source, otherwise the
+        // new surface is available but `canStart` remains permanently false.
+        lastFailure = nil
+        state = .inactive
+
         guard isSupported() else {
             availability = .unsupported
             return
@@ -372,10 +400,14 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         let newDriver = driverFactory(playerLayer)
         newDriver.delegate = self
         newDriver.canStartPictureInPictureAutomaticallyFromInline = startsAutomaticallyFromInline
+
+        // The real driver's callback setter reports its current value
+        // synchronously. Publish the fully configured driver first so that
+        // callback can safely re-enter the automatic-start state machine.
+        driver = newDriver
         newDriver.possibilityDidChange = { [weak self] possible in
             self?.setPossible(possible)
         }
-        driver = newDriver
         setPossible(newDriver.isPictureInPicturePossible)
     }
 

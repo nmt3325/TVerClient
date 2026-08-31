@@ -16,8 +16,31 @@ struct PlayerOverlayControls: View {
     /// 中断の告知を映像の上に重ねるかどうか。
     var showsContinuityNotice: Bool = true
     var onToggleFullScreen: (() -> Void)?
+    var onBackgroundSingleTap: () -> Void = {}
+    var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
 
     var body: some View {
+        ZStack {
+            PlayerScrim()
+            PlayerBackgroundTapSurface(
+                onSingleTap: onBackgroundSingleTap,
+                onDoubleTap: onBackgroundDoubleTap
+            )
+            .accessibilityHidden(true)
+            controlStack
+        }
+        .tint(.white)
+        .foregroundStyle(.white)
+        // スクラブが onScrubEnded を伴わずに終わる経路がある（別のジェスチャに奪われた、
+        // 途中で画面が閉じた）。掴んだ印をそこだけで落としていると、自動非表示が
+        // 止まったまま操作パネルが出っぱなしになる。
+        .onChange(of: playbackController.isScrubbing) { isScrubbing in
+            guard !isScrubbing else { return }
+            model.endHeldInteraction()
+        }
+    }
+
+    private var controlStack: some View {
         VStack(spacing: 0) {
             topBar
                 .accessibilitySortPriority(4)
@@ -33,16 +56,6 @@ struct PlayerOverlayControls: View {
         .accessibilityElement(children: .contain)
         .padding(.horizontal, isFullScreen ? DS.Spacing.xl : DS.Spacing.m)
         .padding(.vertical, DS.Spacing.s)
-        .background(PlayerScrim())
-        .tint(.white)
-        .foregroundStyle(.white)
-        // スクラブが onScrubEnded を伴わずに終わる経路がある（別のジェスチャに奪われた、
-        // 途中で画面が閉じた）。掴んだ印をそこだけで落としていると、自動非表示が
-        // 止まったまま操作パネルが出っぱなしになる。
-        .onChange(of: playbackController.isScrubbing) { isScrubbing in
-            guard !isScrubbing else { return }
-            model.endHeldInteraction()
-        }
     }
 
     // MARK: - Top
