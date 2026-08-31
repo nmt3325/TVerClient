@@ -21,6 +21,7 @@ struct LibraryView: View {
     @State private var pendingAction: PendingDestructiveAction?
     @State private var pendingUnsubscribe: SeriesSubscription?
     @State private var activeSheet: LibrarySheet?
+    @State private var path: [TVerProgram] = []
     @State private var selection: Set<LibraryRowID> = []
 
     /// 取り返しのつかない操作は、経路にかかわらずこの入れ物を通して確認する。
@@ -104,7 +105,7 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollViewReader { proxy in
                 libraryList
                     .onReceive(tabReselection.events) { tab in
@@ -167,6 +168,13 @@ struct LibraryView: View {
                 LibraryDownloadSettingsView(downloadCenter: downloadCenter)
             case .diagnostics:
                 DiagnosticsView(logStore: DiagnosticLogStore.shared)
+            }
+        }
+        .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
+            // ミニプレイヤーからの戻り。再生中の番組を push し直す。
+            guard let program = playbackController.currentProgram else { return }
+            if path.last != program {
+                path = [program]
             }
         }
         .onAppear { downloadCenter.refreshStorage() }

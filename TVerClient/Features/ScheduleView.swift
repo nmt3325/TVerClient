@@ -304,6 +304,13 @@ struct ScheduleView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         }
+        .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
+            // ミニプレイヤーからの戻り。再生中の番組を push し直す。
+            guard let program = playbackController.currentProgram else { return }
+            if path.last != program {
+                path = [program]
+            }
+        }
         .task {
             await viewModel.loadIfNeeded()
             refreshSearchIndex()
@@ -613,7 +620,8 @@ struct ScheduleView: View {
             downloadCenter.delete(pending.program.id)
         case .restartDownload:
             downloadCenter.restart(pending.program)
-        case .favorite, .allFavorites, .recent, .allRecents:
+        case .favorite, .allFavorites, .recent, .allRecents, .selection:
+            // 見逃しタブはマイリスト・履歴・一括選択の確認を出さない。
             break
         }
     }

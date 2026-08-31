@@ -160,6 +160,7 @@ final class LiveViewModel: ObservableObject {
 struct LiveView: View {
     @StateObject private var viewModel: LiveViewModel
     @ObservedObject private var playbackController: PlaybackController
+    @State private var path: [TVerLiveChannel] = []
     @EnvironmentObject private var areaStore: AreaStore
     @EnvironmentObject private var tabReselection: TabReselection
     @Environment(\.openURL) private var openURL
@@ -170,7 +171,7 @@ struct LiveView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             content
                 .safeAreaInset(edge: .top, spacing: 0) { notices }
                 .navigationTitle("ライブ")
@@ -190,6 +191,13 @@ struct LiveView: View {
             // 起動時のエリア一覧更新のような、外からの変更だけ。
             guard !areaStore.isSwitchingArea else { return }
             Task { await viewModel.loadIfNeeded(area: newArea) }
+        }
+        .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
+            // ミニプレイヤーからの戻り。再生中のチャンネルを push し直す。
+            guard let channel = playbackController.currentLiveChannel else { return }
+            if path.last != channel {
+                path = [channel]
+            }
         }
     }
 

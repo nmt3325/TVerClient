@@ -98,7 +98,11 @@ struct RootTabView: View {
                     presence: presence,
                     onToggle: { playbackController.togglePlayback() },
                     onStop: { playbackController.stop() },
-                    onOpen: { selection.wrappedValue = presence.isLive ? .live : .catchUp }
+                    onOpen: {
+                        // タブを合わせたうえで、そのタブに再生画面を出し直させる。
+                        selection.wrappedValue = presence.isLive ? .live : .catchUp
+                        playbackController.requestPlayerPresentation()
+                    }
                 )
                 .transition(.move(edge: .bottom))
             }

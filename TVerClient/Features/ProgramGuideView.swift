@@ -280,6 +280,21 @@ struct ProgramGuideView: View {
             )
             .presentationDetents([.medium, .large])
         }
+        .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
+            // ミニプレイヤーからの戻り。番組表では詳細シートが再生の場なので、
+            // 再生中のチャンネルに当たる番組を現在の番組表から拾い直す。
+            let now = Date()
+            guard selectedProgram == nil,
+                  let channel = playbackController.currentLiveChannel,
+                  let row = viewModel.guide.first(where: { $0.channel.id == channel.id }),
+                  let program = row.programs.first(where: { $0.startAt <= now && now < $0.endAt }) ?? row.programs.first
+            else { return }
+            // 見逃しの有無は詳細シート側が開いたときに改めて引き直すので、ここでは既定の未知のまま渡す。
+            selectedProgram = ProgramGuideSelection(
+                channel: row.channel,
+                program: program
+            )
+        }
     }
 
     private var guideContent: some View {
