@@ -67,7 +67,7 @@ final class ProgramImagePipelineRegressionTests: XCTestCase {
         case .some(.success):
             break
         case let .some(.failure(error)):
-            XCTFail("The reissued request must not inherit the cancelled task's failure: \\(error)")
+            XCTFail("The reissued request must not inherit the cancelled task's failure: \(error)")
         case .none:
             XCTFail("The reissued request never completed")
         }
@@ -92,7 +92,7 @@ final class ProgramImagePipelineRegressionTests: XCTestCase {
         case .some(.success):
             break
         case let .some(.failure(error)):
-            XCTFail("A redirect inside statics.tver.jp must still resolve: \\(error)")
+            XCTFail("A redirect inside statics.tver.jp must still resolve: \(error)")
         case .none:
             XCTFail("No result was delivered")
         }

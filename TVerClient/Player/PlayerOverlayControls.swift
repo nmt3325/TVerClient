@@ -2,22 +2,19 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-/// A native hit-test leaf placed beneath a SwiftUI control. The scrubber must
-/// keep its full 44pt interaction region in front of the background tap plane
-/// even while seeking is temporarily disabled. Because this view is a child of
-/// the SwiftUI host, gestures on the control still observe the touch while the
-/// sibling background recognizers do not.
+/// A non-interactive hierarchy marker placed beneath a SwiftUI button. Scrubber
+/// input is owned by `PlaybackScrubberInteractionView`; a passive marker must
+/// never become a second touch consumer in front of a SwiftUI gesture.
 @MainActor
 final class PlayerControlHitTargetView: UIView {
     static let playPauseIdentifier = "playback.hit-target.play-pause"
-    static let scrubberIdentifier = "playback.hit-target.scrubber"
 
-    init(identifier: String, blocksBackgroundTaps: Bool) {
+    init(identifier: String) {
         super.init(frame: .zero)
         backgroundColor = .clear
         isOpaque = false
         isAccessibilityElement = false
-        isUserInteractionEnabled = blocksBackgroundTaps
+        isUserInteractionEnabled = false
         accessibilityIdentifier = identifier
     }
 
@@ -29,18 +26,14 @@ final class PlayerControlHitTargetView: UIView {
 @MainActor
 private struct PlayerControlHitTarget: UIViewRepresentable {
     let identifier: String
-    var blocksBackgroundTaps = false
 
     func makeUIView(context: Context) -> PlayerControlHitTargetView {
-        PlayerControlHitTargetView(
-            identifier: identifier,
-            blocksBackgroundTaps: blocksBackgroundTaps
-        )
+        PlayerControlHitTargetView(identifier: identifier)
     }
 
     func updateUIView(_ view: PlayerControlHitTargetView, context: Context) {
         view.accessibilityIdentifier = identifier
-        view.isUserInteractionEnabled = blocksBackgroundTaps
+        view.isUserInteractionEnabled = false
     }
 }
 
@@ -313,13 +306,11 @@ struct PlayerOverlayControls: View {
                             playbackController.endScrubbing(at: $0)
                             model.endHeldInteraction()
                         },
+                        onScrubCancelled: {
+                            playbackController.cancelScrubbing()
+                            model.endHeldInteraction()
+                        },
                         onAdjust: { playbackController.seek(by: $0) }
-                    )
-                    .background(
-                        PlayerControlHitTarget(
-                            identifier: PlayerControlHitTargetView.scrubberIdentifier,
-                            blocksBackgroundTaps: true
-                        )
                     )
                     timeLabels
                 } else {

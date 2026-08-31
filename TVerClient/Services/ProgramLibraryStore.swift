@@ -25,7 +25,7 @@ final class ProgramLibraryStore: ObservableObject {
     /// UserDefaults keeps a whole domain in memory and rewrites it as a single
     /// plist, so an unbounded library blob degrades every launch. Anything over
     /// this budget is trimmed before writing.
-    static let defaultMaximumPersistedByteCount = 262_144
+    nonisolated static let defaultMaximumPersistedByteCount = 262_144
 
     private let defaults: UserDefaults
     private let storageKey: String

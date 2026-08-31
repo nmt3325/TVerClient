@@ -1,6 +1,217 @@
 import SwiftUI
 import UIKit
 
+/// Native touch owner for the scrubber. This view is deliberately interactive:
+/// it sits above the sibling background-tap plane and translates the same
+/// recognizer callback used in production into a complete begin/change/end
+/// scrub session. It therefore blocks blank-video taps without swallowing the
+/// drag that must reach playback.
+@MainActor
+final class PlaybackScrubberInteractionView: UIView {
+    static let accessibilityIdentifier = "playback.hit-target.scrubber"
+
+    private final class CancellationEpoch {
+        var value: UInt = 0
+    }
+
+    private var elapsed: TimeInterval = 0
+    private var duration: TimeInterval = 0
+    private var isScrubbingEnabled = false
+    private var session: ScrubSession?
+    private var sessionDuration: TimeInterval?
+    private var startLocation = CGPoint.zero
+    private var onScrubStarted: () -> Void = {}
+    private var onScrubChanged: (TimeInterval) -> Void = { _ in }
+    private var onScrubEnded: (TimeInterval) -> Void = { _ in }
+    private var onScrubCancelled: () -> Void = {}
+    private let cancellationEpoch = CancellationEpoch()
+    private var deferredCancellationTask: Task<Void, Never>?
+
+    private(set) lazy var scrubRecognizer: UILongPressGestureRecognizer = {
+        let recognizer = UILongPressGestureRecognizer(
+            target: self,
+            action: #selector(handleScrubRecognizer(_:))
+        )
+        recognizer.minimumPressDuration = 0
+        recognizer.allowableMovement = .greatestFiniteMagnitude
+        recognizer.cancelsTouchesInView = true
+        recognizer.delaysTouchesBegan = false
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isAccessibilityElement = false
+        accessibilityIdentifier = Self.accessibilityIdentifier
+        addGestureRecognizer(scrubRecognizer)
+    }
+
+    required init?(coder: NSCoder) {
+        preconditionFailure("PlaybackScrubberInteractionView is created in code only")
+    }
+
+    func update(
+        elapsed: TimeInterval,
+        duration: TimeInterval,
+        isEnabled: Bool,
+        onScrubStarted: @escaping () -> Void,
+        onScrubChanged: @escaping (TimeInterval) -> Void,
+        onScrubEnded: @escaping (TimeInterval) -> Void,
+        onScrubCancelled: @escaping () -> Void
+    ) {
+        let nextIsEnabled = isEnabled && duration.isFinite && duration > 0
+        let invalidatesCurrentItem = sessionDuration.map {
+            abs($0 - duration) > 0.5
+        } ?? false
+
+        self.elapsed = elapsed
+        self.duration = duration
+        isScrubbingEnabled = nextIsEnabled
+        self.onScrubStarted = onScrubStarted
+        self.onScrubChanged = onScrubChanged
+        self.onScrubEnded = onScrubEnded
+        self.onScrubCancelled = onScrubCancelled
+
+        if session != nil, !nextIsEnabled || invalidatesCurrentItem {
+            // Do not toggle the live recognizer's isEnabled property here.
+            // UIKit synchronously emits .cancelled when it is disabled during
+            // updateUIView, which can publish back into SwiftUI's transaction.
+            cancelActiveScrub()
+        }
+    }
+
+    @objc func handleScrubRecognizer(_ recognizer: UILongPressGestureRecognizer) {
+        handleScrubGesture(
+            state: recognizer.state,
+            location: recognizer.location(in: self)
+        )
+    }
+
+    /// The recognizer callback delegates to this state machine verbatim. Hosted
+    /// regressions can drive it deterministically without private UITouch APIs.
+    func handleScrubGesture(state: UIGestureRecognizer.State, location: CGPoint) {
+        switch state {
+        case .began:
+            guard isScrubbingEnabled, session == nil, bounds.width > 0 else { return }
+            invalidateDeferredCancellation()
+            startLocation = location
+            var newSession = ScrubSession(startTime: elapsed, duration: duration)
+            newSession.jump(toX: location.x, width: bounds.width)
+            session = newSession
+            sessionDuration = duration
+            onScrubStarted()
+            impact()
+            onScrubChanged(newSession.time)
+        case .changed:
+            updateSession(at: location)
+        case .ended:
+            updateSession(at: location)
+            finishSession()
+        case .cancelled, .failed:
+            cancelActiveScrub()
+        case .possible:
+            break
+        @unknown default:
+            cancelActiveScrub()
+        }
+    }
+
+    /// Invalidates ownership synchronously, but publishes controller/model
+    /// cleanup on the next MainActor turn so update/dismantle cannot re-enter
+    /// an active SwiftUI transaction. Cancellation never commits a stale seek.
+    func cancelActiveScrub() {
+        guard session != nil else { return }
+        session = nil
+        sessionDuration = nil
+        cancellationEpoch.value &+= 1
+        let generation = cancellationEpoch.value
+        let epoch = cancellationEpoch
+        let cancellation = onScrubCancelled
+        deferredCancellationTask?.cancel()
+        deferredCancellationTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled, epoch.value == generation else { return }
+            cancellation()
+        }
+    }
+
+    private func updateSession(at location: CGPoint) {
+        guard var session else { return }
+        let wasAtEdge = session.isAtEdge
+        let speedChanged = session.apply(
+            translation: CGSize(
+                width: location.x - startLocation.x,
+                height: location.y - startLocation.y
+            ),
+            width: bounds.width
+        )
+        if speedChanged || (session.isAtEdge && !wasAtEdge) { impact() }
+        self.session = session
+        onScrubChanged(session.time)
+    }
+
+    private func finishSession() {
+        guard let session else { return }
+        self.session = nil
+        sessionDuration = nil
+        invalidateDeferredCancellation()
+        onScrubEnded(session.time)
+    }
+
+    private func invalidateDeferredCancellation() {
+        cancellationEpoch.value &+= 1
+        deferredCancellationTask?.cancel()
+        deferredCancellationTask = nil
+    }
+
+    private func impact() {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+}
+
+@MainActor
+private struct PlaybackScrubberInteractionSurface: UIViewRepresentable {
+    let elapsed: TimeInterval
+    let duration: TimeInterval
+    let isEnabled: Bool
+    let onScrubStarted: () -> Void
+    let onScrubChanged: (TimeInterval) -> Void
+    let onScrubEnded: (TimeInterval) -> Void
+    let onScrubCancelled: () -> Void
+
+    func makeUIView(context: Context) -> PlaybackScrubberInteractionView {
+        let view = PlaybackScrubberInteractionView()
+        configure(view)
+        return view
+    }
+
+    func updateUIView(_ view: PlaybackScrubberInteractionView, context: Context) {
+        configure(view)
+    }
+
+    static func dismantleUIView(
+        _ view: PlaybackScrubberInteractionView,
+        coordinator: Void
+    ) {
+        view.cancelActiveScrub()
+    }
+
+    private func configure(_ view: PlaybackScrubberInteractionView) {
+        view.update(
+            elapsed: elapsed,
+            duration: duration,
+            isEnabled: isEnabled,
+            onScrubStarted: onScrubStarted,
+            onScrubChanged: onScrubChanged,
+            onScrubEnded: onScrubEnded,
+            onScrubCancelled: onScrubCancelled
+        )
+    }
+}
+
 /// The playback scrubber.
 ///
 /// `Slider` is not usable here: it has no buffered range, no precision
@@ -21,14 +232,13 @@ struct PlaybackScrubber: View {
     var onScrubStarted: () -> Void = {}
     var onScrubChanged: (TimeInterval) -> Void = { _ in }
     var onScrubEnded: (TimeInterval) -> Void = { _ in }
+    var onScrubCancelled: () -> Void = {}
     var onAdjust: (TimeInterval) -> Void = { _ in }
 
-    @GestureState private var isTouching = false
-    @State private var session: ScrubSession?
+    @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var isScrubbing: Bool { session != nil }
     private var displayTime: TimeInterval { isScrubbing ? scrubTime : elapsed }
     private var trackHeight: CGFloat { isScrubbing ? 8 : 4 }
     private var knobSize: CGFloat { isScrubbing ? 18 : 12 }
@@ -56,7 +266,31 @@ struct PlaybackScrubber: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            .gesture(drag(width: width), including: isEnabled ? .all : .subviews)
+            .overlay {
+                PlaybackScrubberInteractionSurface(
+                    elapsed: elapsed,
+                    duration: duration,
+                    isEnabled: isEnabled,
+                    onScrubStarted: {
+                        scrubTime = elapsed
+                        isScrubbing = true
+                        onScrubStarted()
+                    },
+                    onScrubChanged: { time in
+                        scrubTime = time
+                        onScrubChanged(time)
+                    },
+                    onScrubEnded: { time in
+                        scrubTime = time
+                        isScrubbing = false
+                        onScrubEnded(time)
+                    },
+                    onScrubCancelled: {
+                        isScrubbing = false
+                        onScrubCancelled()
+                    }
+                )
+            }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isScrubbing)
         }
         .frame(height: 44)
@@ -74,53 +308,11 @@ struct PlaybackScrubber: View {
             @unknown default: break
             }
         }
-        .onChange(of: isTouching) { touching in
-            guard !touching, let session else { return }
-            finish(session)
-        }
     }
 
     private func knobOffset(progress: CGFloat, width: CGFloat) -> CGFloat {
         guard width > knobSize else { return 0 }
         return min(max(width * progress - knobSize / 2, 0), width - knobSize)
-    }
-
-    private func drag(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .updating($isTouching) { _, state, _ in state = true }
-            .onChanged { value in
-                guard isEnabled, duration > 0 else { return }
-                var current: ScrubSession
-                if let session {
-                    current = session
-                } else {
-                    current = ScrubSession(startTime: elapsed, duration: duration)
-                    current.jump(toX: value.startLocation.x, width: width)
-                    onScrubStarted()
-                    impact()
-                }
-                let wasAtEdge = current.isAtEdge
-                let speedChanged = current.apply(translation: value.translation, width: width)
-                if speedChanged || (current.isAtEdge && !wasAtEdge) { impact() }
-                session = current
-                scrubTime = current.time
-                onScrubChanged(current.time)
-            }
-            .onEnded { _ in
-                guard let session else { return }
-                finish(session)
-            }
-    }
-
-    private func finish(_ session: ScrubSession) {
-        self.session = nil
-        scrubTime = session.time
-        onScrubEnded(session.time)
-    }
-
-    private func impact() {
-        guard !UIAccessibility.isReduceMotionEnabled else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 }
 

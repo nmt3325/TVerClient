@@ -75,11 +75,11 @@ final class PlayerBackgroundTapView: UIView {
         onDoubleTap(location)
     }
 
-    @objc private func didSingleTap(_: UITapGestureRecognizer) {
+    @objc func didSingleTap(_: UITapGestureRecognizer) {
         performSingleTap()
     }
 
-    @objc private func didDoubleTap(_ recognizer: UITapGestureRecognizer) {
+    @objc func didDoubleTap(_ recognizer: UITapGestureRecognizer) {
         performDoubleTap(at: recognizer.location(in: self))
     }
 }
