@@ -1,4 +1,6 @@
 import AVFoundation
+import AVKit
+import MediaPlayer
 @testable import TVerClient
 import UIKit
 import XCTest
@@ -72,6 +74,22 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(context.session.activationCount, 0)
     }
 
+    func testPausedInterruptionForcesFreshAudioActivationOnExplicitResume() async throws {
+        let context = try await makePlayingController()
+        context.controller.pause()
+        context.session.reset()
+
+        context.postInterruption(began: true)
+        await waitUntil("the interruption invalidates the audio activation") {
+            !context.controller.isAudioSessionActive
+        }
+
+        context.controller.resume()
+        await waitUntil("explicit resume restarts playback") { context.controller.state == .playing }
+
+        XCTAssertEqual(context.session.activationCount, 1)
+    }
+
     func testLosingTheAudioRouteReportsThePause() async throws {
         let context = try await makePlayingController()
 
@@ -141,6 +159,88 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertTrue(view.playerLayer.player === player, "Picture in Picture renders from this very layer")
     }
 
+    func testStopSynchronouslyAndIdempotentlyTearsDownPlaybackResources() async throws {
+        let context = try await makePlayingController()
+        let driver = FakeControllerPictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makePictureInPictureCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: context.player))
+        coordinator.start()
+        driver.simulateDidStart()
+        context.controller.bindPictureInPicture(coordinator)
+        context.session.reset()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: "termination test"]
+
+        XCTAssertTrue(context.controller.isPeriodicTimeObserverInstalled)
+        XCTAssertTrue(context.controller.isAudioSessionActive)
+
+        context.controller.stop()
+
+        XCTAssertEqual(context.controller.state, .idle)
+        XCTAssertFalse(context.controller.hasActivePlayback)
+        XCTAssertNil(context.player.currentItem)
+        XCTAssertEqual(context.player.rate, 0, accuracy: 0.0001)
+        XCTAssertFalse(context.controller.isPeriodicTimeObserverInstalled)
+        XCTAssertFalse(context.controller.isItemStatusObserverInstalled)
+        XCTAssertFalse(context.controller.isAudioSessionActive)
+        XCTAssertEqual(driver.stopCount, 1)
+        XCTAssertEqual(context.session.deactivationCount, 1)
+        XCTAssertNil(MPNowPlayingInfoCenter.default().nowPlayingInfo)
+
+        context.controller.stop()
+
+        XCTAssertEqual(driver.stopCount, 1, "repeated termination must not send a second PiP stop")
+        XCTAssertEqual(context.session.deactivationCount, 1, "audio deactivation is idempotent")
+        XCTAssertNil(context.player.currentItem)
+        XCTAssertFalse(context.controller.isPeriodicTimeObserverInstalled)
+    }
+
+    func testNaturalEndRetiresAudioPiPAndPeriodicObserverButKeepsReplayItem() async throws {
+        let context = try await makePlayingController()
+        let driver = FakeControllerPictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makePictureInPictureCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: context.player))
+        coordinator.start()
+        driver.simulateDidStart()
+        context.controller.bindPictureInPicture(coordinator)
+        context.session.reset()
+
+        context.center.post(name: .AVPlayerItemDidPlayToEndTime, object: context.item)
+        await waitUntil("the natural-end teardown completes") { context.controller.state == .ended }
+
+        XCTAssertTrue(context.player.currentItem === context.item, "the item remains available for replay")
+        // AVPlayer acknowledges pause through its media-daemon queue; resource
+        // retirement is synchronous, while the observable transport rate is not.
+        await settle { context.player.rate == 0 }
+        XCTAssertEqual(context.player.rate, 0, accuracy: 0.0001)
+        XCTAssertFalse(context.controller.isPeriodicTimeObserverInstalled)
+        XCTAssertFalse(context.controller.isAudioSessionActive)
+        XCTAssertEqual(driver.stopCount, 1)
+        XCTAssertEqual(context.session.deactivationCount, 1)
+
+        context.controller.resume()
+        await waitUntil("replay restarts") { context.controller.state == .playing }
+
+        XCTAssertTrue(context.controller.isPeriodicTimeObserverInstalled)
+        XCTAssertTrue(context.controller.isAudioSessionActive)
+        XCTAssertEqual(context.session.activationCount, 1)
+    }
+
+    func testOrdinaryBackgroundNotificationDoesNotStopPlaybackController() async throws {
+        let context = try await makePlayingController()
+        context.session.reset()
+
+        context.center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(context.player.currentItem === context.item)
+        XCTAssertEqual(context.controller.state, .playing)
+        XCTAssertTrue(context.controller.hasActivePlayback)
+        XCTAssertEqual(context.session.deactivationCount, 0)
+        XCTAssertTrue(context.controller.isPeriodicTimeObserverInstalled)
+    }
+
     // MARK: - Helpers
 
     @MainActor
@@ -168,6 +268,18 @@ final class PlaybackControllerTests: XCTestCase {
                 userInfo: [AVAudioSessionRouteChangeReasonKey: reason.rawValue]
             )
         }
+    }
+
+    private func makePictureInPictureCoordinator(
+        driver: FakeControllerPictureInPictureDriver
+    ) -> PictureInPictureCoordinator {
+        let coordinator = PictureInPictureCoordinator(
+            isSupported: { true },
+            driverFactory: { _ in driver }
+        )
+        driver.didStart = { [weak coordinator] in coordinator?.handleDidStart() }
+        driver.didStop = { [weak coordinator] in coordinator?.handleDidStop() }
+        return coordinator
     }
 
     private func makePlayingController(seconds: Double = 8) async throws -> Context {
@@ -286,5 +398,33 @@ private final class FakePlaybackAudioSession: PlaybackAudioSessioning {
     func reset() {
         activationCount = 0
         deactivationCount = 0
+    }
+}
+
+@MainActor
+private final class FakeControllerPictureInPictureDriver: PictureInPictureControllerDriving {
+    weak var delegate: AVPictureInPictureControllerDelegate?
+    var isPictureInPicturePossible = false
+    var isPictureInPictureActive = false
+    var canStartPictureInPictureAutomaticallyFromInline = false
+    var possibilityDidChange: ((Bool) -> Void)?
+    var didStart: (() -> Void)?
+    var didStop: (() -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    func startPictureInPicture() {
+        startCount += 1
+    }
+
+    func stopPictureInPicture() {
+        stopCount += 1
+        isPictureInPictureActive = false
+        didStop?()
+    }
+
+    func simulateDidStart() {
+        isPictureInPictureActive = true
+        didStart?()
     }
 }

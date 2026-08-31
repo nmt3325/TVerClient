@@ -20,13 +20,27 @@ final class PlayerLayerContainerView: UIView {
         return playerLayer
     }
 
-    /// Picture in Picture renders from this very layer, so the player has to
-    /// stay attached while a PiP session owns it.
-    var isPictureInPictureActive: @MainActor () -> Bool = { false }
+    /// Called before the background release decision. The PiP coordinator uses
+    /// this synchronous seam to request automatic PiP before its source layer
+    /// can be detached.
+    var prepareForBackground: @MainActor () -> Void = {}
+
+    /// `.starting`, `.active`, and `.stopping` PiP all render from this exact
+    /// layer. Treating only `.active` as ownership creates a race where the
+    /// source is released while the system is still starting PiP.
+    var shouldRetainPlayerLayerInBackground: @MainActor () -> Bool = { false }
+
+    /// Source-compatible alias for the old, narrower callback.
+    var isPictureInPictureActive: @MainActor () -> Bool {
+        get { shouldRetainPlayerLayerInBackground }
+        set { shouldRetainPlayerLayerInBackground = newValue }
+    }
 
     private let notificationCenter: NotificationCenter
     private var notificationTokens: [NSObjectProtocol] = []
     private var backgroundedPlayer: AVPlayer?
+    private(set) var isInBackground = false
+    private(set) var isSurfaceActive = true
 
     init(notificationCenter: NotificationCenter = .default) {
         self.notificationCenter = notificationCenter
@@ -53,24 +67,71 @@ final class PlayerLayerContainerView: UIView {
         }
     }
 
+    /// Makes onscreen layer ownership explicit. An inactive surface must not
+    /// keep the shared player unless it is still the source of an in-flight PiP
+    /// transition.
+    func setSurfaceActive(_ isActive: Bool, player: AVPlayer?) {
+        isSurfaceActive = isActive
+        guard isActive else {
+            if !shouldRetainPlayerLayerInBackground() { releasePlayer() }
+            return
+        }
+
+        if isInBackground, !shouldRetainPlayerLayerInBackground() {
+            backgroundedPlayer = player
+            playerLayer.player = nil
+        } else {
+            setPlayer(player)
+        }
+    }
+
     func releasePlayer() {
         backgroundedPlayer = nil
         playerLayer.player = nil
     }
 
     func releasePlayerForBackground() {
-        guard backgroundedPlayer == nil, !isPictureInPictureActive() else { return }
-        guard let player = playerLayer.player else { return }
-        backgroundedPlayer = player
-        playerLayer.player = nil
+        isInBackground = true
+        prepareForBackground()
+        reconcilePlayerLayerRetention()
     }
 
     func restorePlayerForForeground() {
+        isInBackground = false
+        guard isSurfaceActive || shouldRetainPlayerLayerInBackground() else {
+            releasePlayer()
+            return
+        }
         guard let player = backgroundedPlayer else { return }
         backgroundedPlayer = nil
         if playerLayer.player !== player {
             playerLayer.player = player
         }
+    }
+
+    /// Re-evaluates an already-backgrounded layer after a PiP state change.
+    /// A failed start releases the layer for background-audio fallback; a late
+    /// start restores the exact same source player before PiP renders it.
+    func reconcilePlayerLayerRetention() {
+        guard isInBackground else {
+            if !isSurfaceActive, !shouldRetainPlayerLayerInBackground() {
+                releasePlayer()
+            }
+            return
+        }
+
+        if shouldRetainPlayerLayerInBackground() {
+            guard let player = backgroundedPlayer else { return }
+            backgroundedPlayer = nil
+            if playerLayer.player !== player {
+                playerLayer.player = player
+            }
+            return
+        }
+
+        guard backgroundedPlayer == nil, let player = playerLayer.player else { return }
+        backgroundedPlayer = player
+        playerLayer.player = nil
     }
 
     private func installLifecycleObservers() {
@@ -101,6 +162,24 @@ struct PlayerLayerView: UIViewRepresentable {
     /// screen surface while it is presented and takes it back on dismissal, so
     /// the very same player keeps playing instead of restarting.
     var isActiveSurface: Bool = true
+    /// PlayerStage supplies controller state because the system can change the
+    /// AVPlayer rate while the app is transitioning to the background. Legacy
+    /// surfaces fall back to the player's live state.
+    var playbackIsActive: Bool?
+
+    init(
+        player: AVPlayer,
+        pictureInPicture: PictureInPictureCoordinator,
+        videoGravity: AVLayerVideoGravity = .resizeAspect,
+        isActiveSurface: Bool = true,
+        playbackIsActive: Bool? = nil
+    ) {
+        self.player = player
+        self.pictureInPicture = pictureInPicture
+        self.videoGravity = videoGravity
+        self.isActiveSurface = isActiveSurface
+        self.playbackIsActive = playbackIsActive
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(pictureInPicture: pictureInPicture, isActiveSurface: isActiveSurface)
@@ -115,10 +194,7 @@ struct PlayerLayerView: UIViewRepresentable {
         )
         let view = PlayerLayerContainerView()
         configure(view)
-        if isActiveSurface {
-            context.coordinator.attachedLayer = view.playerLayer
-            pictureInPicture.attach(to: view.playerLayer)
-        }
+        applyOwnership(to: view, context: context)
         DiagnosticLogStore.shared.record(
             .info,
             category: "playback",
@@ -128,45 +204,58 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PlayerLayerContainerView, context: Context) {
-        let regainedOwnership = isActiveSurface && !context.coordinator.isActiveSurface
-        context.coordinator.isActiveSurface = isActiveSurface
-        if regainedOwnership {
-            // Re-binding the shared player makes this layer render again after
-            // the full screen surface released it.
-            view.releasePlayer()
-        }
-        configure(view)
-
-        guard isActiveSurface else {
-            // Only releases Picture in Picture when this layer still owns it.
-            pictureInPicture.detach(from: view.playerLayer)
-            if context.coordinator.attachedLayer === view.playerLayer {
-                context.coordinator.attachedLayer = nil
-            }
-            return
-        }
-
         if context.coordinator.pictureInPicture !== pictureInPicture {
             context.coordinator.pictureInPicture.detach(from: view.playerLayer)
             context.coordinator.pictureInPicture = pictureInPicture
         }
-        context.coordinator.attachedLayer = view.playerLayer
-        pictureInPicture.attach(to: view.playerLayer)
+        context.coordinator.isActiveSurface = isActiveSurface
+        configure(view)
+        applyOwnership(to: view, context: context)
     }
 
     static func dismantleUIView(
         _ view: PlayerLayerContainerView,
         coordinator: Coordinator
     ) {
+        let shouldRetain = coordinator.pictureInPicture.shouldRetainPlayerLayer(view.playerLayer)
         coordinator.pictureInPicture.detach(from: view.playerLayer)
-        view.releasePlayer()
+        view.setSurfaceActive(false, player: nil)
+        if !shouldRetain { view.releasePlayer() }
         coordinator.attachedLayer = nil
+    }
+
+    private func applyOwnership(
+        to view: PlayerLayerContainerView,
+        context: Context
+    ) {
+        if isActiveSurface {
+            view.setSurfaceActive(true, player: player)
+            context.coordinator.attachedLayer = view.playerLayer
+            pictureInPicture.attach(to: view.playerLayer)
+        } else if pictureInPicture.shouldRetainPlayerLayer(view.playerLayer) {
+            // PiP still renders from the outgoing surface. It is released as
+            // soon as the coordinator settles to inactive or failed.
+            view.setSurfaceActive(false, player: player)
+        } else {
+            pictureInPicture.detach(from: view.playerLayer)
+            view.setSurfaceActive(false, player: nil)
+            context.coordinator.attachedLayer = nil
+        }
+        view.reconcilePlayerLayerRetention()
     }
 
     private func configure(_ view: PlayerLayerContainerView) {
         view.backgroundColor = .black
-        view.isPictureInPictureActive = { [pictureInPicture] in pictureInPicture.isActive }
-        view.setPlayer(player)
+        view.prepareForBackground = { [pictureInPicture, player, playbackIsActive] in
+            let playerIsPlaying = player.rate != 0 || player.timeControlStatus == .playing
+            pictureInPicture.applicationDidEnterBackground(
+                playbackIsActive: playbackIsActive ?? playerIsPlaying
+            )
+        }
+        view.shouldRetainPlayerLayerInBackground = { [weak view, pictureInPicture] in
+            guard let view else { return false }
+            return pictureInPicture.shouldRetainPlayerLayer(view.playerLayer)
+        }
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity
         }

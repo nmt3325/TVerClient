@@ -65,6 +65,9 @@ final class PlaybackController: ObservableObject {
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
     private var requestGeneration = 0
+    /// Tracks our successful activation so repeated stop calls do not issue
+    /// duplicate process-wide AVAudioSession deactivations.
+    private var audioSessionIsActive = false
     private var wantsPlayback = false
     private var seeker = ChaseTimeSeeker()
     private var legibleGroup: AVMediaSelectionGroup?
@@ -112,6 +115,10 @@ final class PlaybackController: ObservableObject {
     var canSeek: Bool { !isLive && (duration ?? 0) > 0 }
     var chaseTime: CMTime { seeker.chaseTime }
     var isSeekInProgress: Bool { seeker.isSeekInProgress }
+    /// Internal lifecycle seams used by deterministic termination tests.
+    var isPeriodicTimeObserverInstalled: Bool { timeObserver != nil }
+    var isItemStatusObserverInstalled: Bool { itemStatusObservation != nil }
+    var isAudioSessionActive: Bool { audioSessionIsActive }
 
     /// 何かが鳴っている、あるいはこれから鳴らそうとしている状態。
     ///
@@ -250,14 +257,29 @@ final class PlaybackController: ObservableObject {
         resetTimingState()
     }
 
+    /// Natural completion keeps the item for replay but retires every resource
+    /// that can continue producing audio or system playback state.
+    private func completeCurrentItem() {
+        wantsPlayback = false
+        shouldResumeAfterInterruption = false
+        player.pause()
+        pictureInPicture?.stop()
+        removeTimeObserver()
+        transition(to: .ended)
+        deactivateAudioSession()
+        continuityNotice = PlaybackContinuityNotice(reason: .playedToEnd)
+    }
+
     private func clearNowPlayingInfo() {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
 
     private func deactivateAudioSession() {
+        guard audioSessionIsActive else { return }
         do {
             try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            audioSessionIsActive = false
         } catch {
             DiagnosticLogStore.shared.record(
                 .warning,
@@ -606,8 +628,10 @@ final class PlaybackController: ObservableObject {
     }
 
     private func activateAudioSession() throws {
+        guard !audioSessionIsActive else { return }
         try audioSession.setCategory(.playback, mode: .moviePlayback, options: [])
         try audioSession.setActive(true, options: [])
+        audioSessionIsActive = true
     }
 
     /// 周期タイムオブザーバ。停止したら外し、鳴らし始めるときに戻す。
@@ -634,10 +658,7 @@ final class PlaybackController: ObservableObject {
         endObserver = notificationCenter.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
             Task { @MainActor [weak self] in
                 guard let self, notification.object as? AVPlayerItem === self.player.currentItem else { return }
-                self.wantsPlayback = false
-                self.transition(to: .ended)
-                // 終わったことと、ここからできることを必ず画面に出す。
-                self.continuityNotice = PlaybackContinuityNotice(reason: .playedToEnd)
+                self.completeCurrentItem()
             }
         }
         failedObserver = notificationCenter.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] notification in
@@ -682,6 +703,10 @@ final class PlaybackController: ObservableObject {
         guard let type = AVAudioSession.InterruptionType(rawValue: typeRawValue) else { return }
         switch type {
         case .began:
+            // The system invalidates the process-wide activation even when the
+            // transport was already paused. The next explicit or automatic
+            // resume must therefore perform a real activation.
+            audioSessionIsActive = false
             // The system already stopped the audio; only our state is lying.
             guard wantsPlayback else { return }
             shouldResumeAfterInterruption = true
