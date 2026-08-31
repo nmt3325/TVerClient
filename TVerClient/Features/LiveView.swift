@@ -161,8 +161,8 @@ struct LiveView: View {
     @StateObject private var viewModel: LiveViewModel
     @ObservedObject private var playbackController: PlaybackController
     @EnvironmentObject private var areaStore: AreaStore
+    @EnvironmentObject private var tabReselection: TabReselection
     @Environment(\.openURL) private var openURL
-    @State private var selectedChannel: TVerLiveChannel?
 
     init(viewModel: LiveViewModel, playbackController: PlaybackController) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -174,7 +174,13 @@ struct LiveView: View {
             content
                 .safeAreaInset(edge: .top, spacing: 0) { notices }
                 .navigationTitle("ライブ")
+                // 行を押したら push で開く。シートだと戻り方が二通りになり、
+                // 再生を続けたまま戻る操作が標準の戻るボタンとぶつかる。
+                .navigationDestination(for: TVerLiveChannel.self) { channel in
+                    LivePlaybackView(channel: channel, playbackController: playbackController)
+                }
                 .toolbar {
+                    ToolbarItem(placement: ToolbarCompat.leading) { refreshIndicator }
                     ToolbarItem(placement: ToolbarCompat.trailing) { areaPicker }
                 }
         }
@@ -185,12 +191,12 @@ struct LiveView: View {
             guard !areaStore.isSwitchingArea else { return }
             Task { await viewModel.loadIfNeeded(area: newArea) }
         }
-        .sheet(item: $selectedChannel) { channel in
-            LivePlaybackView(channel: channel, playbackController: playbackController)
-        }
     }
 
-    /// 一覧の上に常騐する告知。古い一覧を見ていることと、エリア切替の失敗を黙らせない。
+    /// 一覧の上に常設する告知。古い一覧を見ていることと、エリア切替の失敗を黙らせない。
+    ///
+    /// 常設帯はこの `.safeAreaInset(edge: .top)` 一本に集める。リストの中や
+    /// overlay に散らすと、スクロールで隠れたり二重に出たりする。
     @ViewBuilder
     private var notices: some View {
         VStack(spacing: 0) {
@@ -208,6 +214,8 @@ struct LiveView: View {
         }
     }
 
+    /// 見た目は `FreshnessBanner` と同じ標準素材に揃える。自前の色地ではなく
+    /// ナビゲーションバーと同じ `.bar` + 下辺の Divider にする。
     private func areaSwitchFailureBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: DS.Spacing.s) {
             Image(systemName: "mappin.slash")
@@ -218,19 +226,16 @@ struct LiveView: View {
                 .font(.footnote)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            Button {
-                areaStore.clearAreaSwitchFailure()
-            } label: {
-                Image(systemName: "xmark")
-                    .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("エリア切替のお知らせを閉じる")
+            Button("閉じる") { areaStore.clearAreaSwitchFailure() }
+                .font(.footnote.weight(.semibold))
+                .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+                .accessibilityLabel("エリア切替のお知らせを閉じる")
         }
-        .padding(.leading, DS.Spacing.l)
-        .padding(.vertical, DS.Spacing.xs)
+        .padding(.horizontal, DS.Spacing.l)
+        .padding(.vertical, DS.Spacing.s)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Palette.warning.opacity(0.14))
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
         .accessibilityElement(children: .contain)
     }
 
@@ -242,7 +247,7 @@ struct LiveView: View {
             ContentStatusView(
                 .failure(
                     title: presentation.title,
-                    message: "\(presentation.message)\n\(presentation.recoverySuggestion)"
+                    message: "\\(presentation.message)\\n\\(presentation.recoverySuggestion)"
                 ),
                 retryTitle: "再試行",
                 retry: { Task { await viewModel.refresh() } }
@@ -263,48 +268,41 @@ struct LiveView: View {
     }
 
     private var channelList: some View {
-        List {
-            Section { availabilityNotice }
-            Section {
-                ForEach(viewModel.channels) { channel in
-                    row(for: channel)
+        ScrollViewReader { proxy in
+            List {
+                Section {
+                    Label(
+                        TVerAreaAvailability.headline(for: areaStore.selected),
+                        systemImage: "info.circle"
+                    )
+                    .font(.footnote)
+                    .id(StandardScrollAnchor.top)
+                } footer: {
+                    Text(TVerAreaAvailability.detail(for: areaStore.selected))
                 }
-            } header: {
-                SectionHeader(
-                    "チャンネル",
-                    subtitle: "\(viewModel.playableChannelCount)/\(viewModel.channels.count) が今すぐ見られます"
-                )
+
+                Section {
+                    ForEach(viewModel.channels) { channel in
+                        row(for: channel)
+                    }
+                } header: {
+                    Text("チャンネル")
+                } footer: {
+                    Text("\\(viewModel.playableChannelCount)/\\(viewModel.channels.count) が今すぐ見られます")
+                }
+            }
+            .listStyle(.plain)
+            .refreshable { await viewModel.refresh() }
+            // 表示中のタブをもう一度押したら先頭へ戻す。標準アプリと同じ操作。
+            .onReceive(tabReselection.events) { tab in
+                guard tab == .live else { return }
+                withAnimation { proxy.scrollTo(StandardScrollAnchor.top, anchor: .top) }
             }
         }
-        .listStyle(.plain)
-        .refreshable { await viewModel.refresh() }
-        .overlay(alignment: .top) { refreshIndicator }
-    }
-
-    /// 再生を試す前に、このエリアで何が見られるのかを先に出す。
-    private var availabilityNotice: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-            Label(TVerAreaAvailability.headline(for: areaStore.selected), systemImage: "info.circle")
-                .font(.footnote.weight(.semibold))
-            Text(TVerAreaAvailability.detail(for: areaStore.selected))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, DS.Spacing.xs)
-        .listRowSeparator(.hidden)
-        .accessibilityElement(children: .combine)
     }
 
     private func row(for channel: TVerLiveChannel) -> some View {
-        Button {
-            DiagnosticLogStore.shared.record(
-                .info,
-                category: "playback",
-                message: "Live playback selected"
-            )
-            selectedChannel = channel
-        } label: {
+        NavigationLink(value: channel) {
             MediaRow(
                 title: channel.currentProgram?.seriesTitle ?? channel.name,
                 subtitle: subtitle(for: channel),
@@ -315,14 +313,11 @@ struct LiveView: View {
                 Image(systemName: channel.isPlayable ? "play.circle.fill" : "nosign")
                     .font(.title3)
                     .foregroundStyle(channel.isPlayable ? DS.Palette.live : Color.secondary)
-                    .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
                     .accessibilityHidden(true)
             }
         }
-        .buttonStyle(.plain)
+        // 減光は `.disabled` の標準表現に任せる。自前の `.opacity` は二重に薄くなる。
         .disabled(!channel.isPlayable)
-        .opacity(channel.isPlayable ? 1 : 0.45)
-        .listRowInsets(EdgeInsets(top: 0, leading: DS.Spacing.l, bottom: 0, trailing: DS.Spacing.l))
         .accessibilityLabel(TVerAccessibilityText.live(channel: channel))
         .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
         .contextMenu { rowMenu(for: channel) }
@@ -346,33 +341,46 @@ struct LiveView: View {
     }
 
     /// いまどのエリアを見ているのかを常に出し、その場で切り替えられるようにする。
+    ///
+    /// 選択中の印は `Picker` に任せる。自前で checkmark を描くと、標準の
+    /// 選択表現（チェックの位置と読み上げ）から外れる。
     private var areaPicker: some View {
         Menu {
-            ForEach(areaStore.groupedAreas) { group in
-                Section(group.name) {
-                    ForEach(group.areas) { area in
-                        Button {
-                            switchArea(to: area)
-                        } label: {
-                            if area.code == areaStore.selected.code {
-                                Label(area.name, systemImage: "checkmark")
-                            } else {
-                                Text(area.name)
-                            }
+            Picker("エリア", selection: areaSelection) {
+                ForEach(areaStore.groupedAreas) { group in
+                    Section(group.name) {
+                        ForEach(group.areas) { area in
+                            Text(area.name).tag(area.code)
                         }
                     }
                 }
             }
+            .pickerStyle(.inline)
         } label: {
             Label(areaStore.selected.name, systemImage: "mappin.and.ellipse")
                 .labelStyle(.titleAndIcon)
-                .font(.subheadline.weight(.semibold))
-                .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
         }
         .disabled(areaStore.isSwitchingArea || !viewModel.supportsAreaSwitching)
         .accessibilityLabel("エリアを選択")
         .accessibilityValue(areaStore.selected.name)
         .accessibilityHint("いま表示しているエリアです。ダブルタップして他のエリアに切り替えられます")
+    }
+
+    /// `AreaStore.select(_:reload:)` は「選ぶ→取り直す→失敗したら巻き戻す」副作用付き。
+    /// `$areaStore.selected` を直結すると取り直しも巻き戻しも走らないので、
+    /// 書き込みを差し替えた Binding を Picker に渡す。
+    private var areaSelection: Binding<String> {
+        Binding(
+            get: { areaStore.selected.code },
+            set: { newCode in
+                guard newCode != areaStore.selected.code,
+                      let area = areaStore.groupedAreas
+                          .flatMap({ $0.areas })
+                          .first(where: { $0.code == newCode })
+                else { return }
+                switchArea(to: area)
+            }
+        )
     }
 
     /// エリアを切り替えて一覧を取り直す。取得に失敗したら `AreaStore` が選択を元に戻す。
@@ -384,13 +392,13 @@ struct LiveView: View {
         }
     }
 
+    /// 引き下げ更新の輪は `.refreshable` が出すので、ここでは出さない。
+    /// エリア切替のようにリストの外から始まる更新だけ、ツールバーで小さく知らせる。
     @ViewBuilder
     private var refreshIndicator: some View {
         if viewModel.isLoading, !viewModel.channels.isEmpty {
             ProgressView()
-                .padding(DS.Spacing.s)
-                .background(.regularMaterial, in: Circle())
-                .padding(.top, DS.Spacing.s)
+                .controlSize(.small)
                 .accessibilityLabel(areaStore.isSwitchingArea ? "エリアを切り替え中" : "更新中")
         }
     }
@@ -418,10 +426,17 @@ struct LiveView: View {
     }
 }
 
+/// ライブ詳細。一覧から push で開く。
+///
+/// 以前は `ScrollView` + `VStack` + 自前 padding の縦積みで、映像も見逃し側と
+/// 別実装だった。標準の `List`（insetGrouped）+ `Section` + `LabeledContent` に寄せ、
+/// 映像は見逃しと同じ `PlayerStage` に一本化する。
+@MainActor
 struct LivePlaybackView: View {
     let channel: TVerLiveChannel
     @ObservedObject var playbackController: PlaybackController
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
+    @StateObject private var chrome = PlayerChromeModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var isFullScreenPresented = false
@@ -430,78 +445,71 @@ struct LivePlaybackView: View {
     private var isCurrent: Bool { playbackController.currentLiveChannel?.id == channel.id }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    PlaybackVideoSurface(
-                        player: playbackController.player,
-                        pictureInPicture: pictureInPicture,
-                        accessibilityLabel: "\(channel.name)のライブ動画プレイヤー",
-                        isActiveSurface: !isFullScreenPresented,
-                        onEnterFullScreen: { isFullScreenPresented = true }
-                    )
-
-                    VStack(alignment: .leading, spacing: 7) {
-                        Label(Vocabulary.Live.onAir, systemImage: "dot.radiowaves.left.and.right")
-                            .font(.caption.bold()).foregroundStyle(.red)
-                        Text(channel.currentProgram?.seriesTitle ?? "TVer リアルタイム配信").font(.title2.bold())
-                        Text(channel.currentProgram?.title ?? channel.name).foregroundStyle(.secondary)
-                        if let program = channel.currentProgram {
-                            Label(program.timeLabel, systemImage: "clock").font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }
-
-                    playbackStatus
-
-                    dismissalNotice
-
-                    PictureInPictureControl(coordinator: pictureInPicture)
-
-                    ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
-                        Label("このライブ配信を共有", systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-
-                    if !(isCurrent && playbackController.errorPresentation != nil) {
-                        Button { openURL(channel.webURL) } label: {
-                            Label("TVer公式ライブページで開く", systemImage: "safari")
-                                .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
-                        }
-                        .buttonStyle(.bordered).controlSize(.large)
-                    }
-                }
-                .padding(20)
+        List {
+            Section {
+                stage
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.black)
+                playbackStatus
+            } footer: {
+                dismissalNotice
             }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle(channel.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                // iOS 16 では `.topBarTrailing` が無いので、契約の ToolbarCompat に寄せる。
-                ToolbarItem(placement: ToolbarCompat.leading) {
-                    Button(role: .destructive) {
-                        playbackController.stop()
-                        dismiss()
-                    } label: {
-                        Text("停止")
-                            .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
-                    }
-                    .disabled(!isCurrent)
-                    .accessibilityLabel("再生を停止して閉じる")
-                    .accessibilityHint("映像も音声も止まります")
+
+            Section("番組") {
+                LabeledContent("チャンネル") { Text(channel.name) }
+                LabeledContent("番組") {
+                    Text(channel.currentProgram?.seriesTitle ?? "TVer リアルタイム配信")
+                        .multilineTextAlignment(.trailing)
                 }
-                ToolbarItem(placement: ToolbarCompat.trailing) {
-                    // 「閉じる」だけだと停止と見間違えられる。再生が続くことを文言で言う。
+                if let program = channel.currentProgram {
+                    LabeledContent("サブタイトル") {
+                        Text(program.title)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("放送時間") { Text(program.timeLabel) }
+                }
+                LabeledContent("状態") {
+                    Label(
+                        stateLabel,
+                        systemImage: channel.isPlayable ? "dot.radiowaves.left.and.right" : "pause.circle"
+                    )
+                    .foregroundStyle(channel.isPlayable ? DS.Palette.live : Color.secondary)
+                }
+            }
+
+            Section {
+                ShareLink(
+                    item: shareItem.url,
+                    subject: Text(shareItem.subject),
+                    message: Text(shareItem.message)
+                ) {
+                    Label("このライブ配信を共有", systemImage: "square.and.arrow.up")
+                }
+                if !(isCurrent && playbackController.errorPresentation != nil) {
                     Button {
-                        dismiss()
+                        openURL(channel.webURL)
                     } label: {
-                        Text("再生したまま閉じる")
-                            .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+                        Label("TVer公式ライブページで開く", systemImage: "safari")
                     }
-                    .accessibilityLabel("再生したままこの画面を閉じる")
-                    .accessibilityHint("再生は続きます。画面下のバーから一時停止と停止ができます")
                 }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(channel.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // iOS 16 では `.topBarTrailing` が無いので、契約の ToolbarCompat に寄せる。
+            // 「再生したまま閉じる」は標準の戻るボタンが担うので置かない。
+            ToolbarItem(placement: ToolbarCompat.trailing) {
+                Button(role: .destructive) {
+                    playbackController.stop()
+                    dismiss()
+                } label: {
+                    Text("停止")
+                }
+                .disabled(!isCurrent)
+                .accessibilityLabel("再生を停止して閉じる")
+                .accessibilityHint("映像も音声も止まります")
             }
         }
         .onAppear {
@@ -513,32 +521,59 @@ struct LivePlaybackView: View {
             // 画面を離れたら預けたものを返す。別の画面が預け直したあとなら何もしない。
             playbackController.unbindPictureInPicture(pictureInPicture)
         }
-        .task(id: channel.id) { await playbackController.playLive(channel) }
+        .task(id: channel.id) {
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: "Live playback selected"
+            )
+            await playbackController.playLive(channel)
+        }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
             FullScreenPlaybackView(
                 playbackController: playbackController,
                 pictureInPicture: pictureInPicture,
                 title: channel.name,
                 subtitle: channel.currentProgram?.seriesTitle,
-                accessibilityLabel: "\(channel.name)の全画面ライブ動画プレイヤー",
+                accessibilityLabel: "\\(channel.name)の全画面ライブ動画プレイヤー",
                 supportsSeeking: false,
                 onExit: { isFullScreenPresented = false }
             )
         }
     }
 
-    /// 閉じたあとに音だけ鳴り続けているように見えないよう、どこで止められるのかを先に言う。
+    /// 見逃しと同じ `PlayerStage`。ライブなので早送りと巻き戻しは持たせない。
+    /// PiP のボタンも PlayerStage の overlay 側にあるので、本文には置かない。
+    private var stage: some View {
+        PlayerStage(
+            playbackController: playbackController,
+            pictureInPicture: pictureInPicture,
+            model: chrome,
+            title: channel.name,
+            subtitle: channel.currentProgram?.seriesTitle,
+            accessibilityLabel: "\\(channel.name)のライブ動画プレイヤー",
+            supportsSeeking: false,
+            isFullScreen: false,
+            isActiveSurface: !isFullScreenPresented,
+            onToggleFullScreen: { isFullScreenPresented = true }
+        )
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var stateLabel: String {
+        switch channel.state {
+        case .onAir: return Vocabulary.Live.onAir
+        case .paused: return Vocabulary.Live.paused
+        case .unavailable: return Vocabulary.Live.unknown
+        }
+    }
+
+    /// 戻ったあとに音だけ鳴り続けているように見えないよう、どこで止められるのかを先に言う。
     @ViewBuilder
     private var dismissalNotice: some View {
         if isCurrent, playbackController.errorPresentation == nil {
-            Label(
-                "「再生したまま閉じる」を押しても配信は続きます。停止は画面下の再生バーか、この画面左上の「停止」から。",
-                systemImage: "info.circle"
-            )
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityElement(children: .combine)
+            Text("前の画面に戻っても配信は続きます。停止は画面下の再生バーか、この画面右上の「停止」から。")
         }
     }
 
@@ -549,18 +584,18 @@ struct LivePlaybackView: View {
                 Task { await playbackController.playLive(channel) }
             }
         } else if isCurrent, playbackController.state == .resolving {
-            HStack { Spacer(); ProgressView("公式配信URLを確認中"); Spacer() }
-                .frame(minHeight: DS.Size.minimumTapTarget)
+            ProgressView("公式配信URLを確認中")
+                .frame(maxWidth: .infinity)
                 .accessibilityLabel("ライブ配信を準備中")
         } else {
-            Button { playbackController.togglePlayback() } label: {
+            Button {
+                playbackController.togglePlayback()
+            } label: {
                 Label(
                     playbackController.isPlaying ? "一時停止" : "再生",
                     systemImage: playbackController.isPlaying ? "pause.fill" : "play.fill"
                 )
-                .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
             }
-            .buttonStyle(.borderedProminent).controlSize(.large)
         }
     }
 }
