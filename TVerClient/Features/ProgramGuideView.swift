@@ -153,6 +153,8 @@ struct ProgramGuideView: View {
     /// Persisted so the grid reopens at the density the user chose.
     @AppStorage("guide.pointsPerMinute") private var storedPointsPerMinute = Double(GuideZoom.defaultPointsPerMinute)
     @AppStorage("guide.hiddenChannelIDs") private var hiddenChannelIDsText = ""
+    /// 表示方法の選択。既定はリストで、格子は選んだときだけ出す。
+    @AppStorage("guide.layoutMode") private var storedLayoutMode = GuideLayoutMode.list.rawValue
     private let notificationScheduler: ProgramNotificationScheduler
     private let catchUpLookup: GuideCatchUpLookup
 
@@ -209,6 +211,7 @@ struct ProgramGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
+                ToolbarItem(placement: ToolbarCompat.leading) { layoutModeMenu }
                 if zoomControlState.isPresented {
                     ToolbarItem(placement: ToolbarCompat.leading) {
                         Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
@@ -288,19 +291,22 @@ struct ProgramGuideView: View {
                 .accessibilityIdentifier(GuideAccessibilityIdentifier.offlineBanner)
                 Divider()
             }
-            ProgramGuideDatePicker(
+            ProgramGuideDateSelector(
                 dates: GuideBroadcastAxis.dates(in: viewModel.guide),
                 selectedDate: $selectedDate
             )
             Divider()
             Group {
-                if usesAccessibleList {
-                    ProgramGuideAccessibleList(
+                switch layoutMode {
+                case .list:
+                    ProgramGuideProgramList(
                         guide: visibleGuide,
                         selectedDate: selectedDate,
-                        onSelect: selectProgram
+                        scrollToNowToken: scrollToNowToken,
+                        onSelect: selectProgram,
+                        onRefresh: { await viewModel.load() }
                     )
-                } else {
+                case .grid:
                     ProgramGuideGrid(
                         guide: visibleGuide,
                         selectedDate: selectedDate,
@@ -313,7 +319,8 @@ struct ProgramGuideView: View {
             .id(selectedDate)
         }
         .overlay(alignment: .top) {
-            if viewModel.isLoading, !viewModel.guide.isEmpty {
+            // リスト表示は `.refreshable` の標準の回転表示に任せる。
+            if layoutMode == .grid, viewModel.isLoading, !viewModel.guide.isEmpty {
                 ProgressView()
                     .padding(9)
                     .background(.regularMaterial, in: Circle())
@@ -357,7 +364,8 @@ struct ProgramGuideView: View {
     private var zoomControlState: GuideZoomControlState {
         GuideZoomControlState(
             hasPrograms: hasVisibleProgramsForSelectedDate,
-            usesAccessibleList: usesAccessibleList,
+            // 第2引数は「リスト表示中か」。リストに密度の概念は無いのでズームを出さない。
+            usesAccessibleList: layoutMode == .list,
             pointsPerMinute: pointsPerMinute
         )
     }
@@ -413,9 +421,44 @@ struct ProgramGuideView: View {
         .accessibilityLabel("チャンネルを絞り込む")
     }
 
-    /// 格子は VoiceOver でも特大文字でも成立しないので、そのときは線形リストにする。
+    /// 格子は VoiceOver でも特大文字でも成立しないので、そのときはリストを強制する。
     private var usesAccessibleList: Bool {
         isVoiceOverRunning || dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// 実際に出す表示方法。利用者の選択を使い、強制リストのときだけ上書きする。
+    private var layoutMode: GuideLayoutMode {
+        GuideLayoutModeResolver.resolve(
+            stored: storedLayoutMode,
+            usesAccessibleList: usesAccessibleList
+        )
+    }
+
+    /// 表示方法の切り替え。以前は読み上げ中だけリストになったが、いまは自分で選べる。
+    private var layoutModeMenu: some View {
+        Menu {
+            Picker("表示形式", selection: $storedLayoutMode) {
+                ForEach(GuideLayoutMode.allCases) { mode in
+                    Label(mode.title, systemImage: mode.systemImage)
+                        .tag(mode.rawValue)
+                }
+            }
+            .pickerStyle(.inline)
+            .disabled(usesAccessibleList)
+            if usesAccessibleList {
+                Text("読み上げ中と特大文字のあいだはリスト表示のままにします")
+            }
+        } label: {
+            Image(systemName: layoutMode.systemImage)
+                .frame(
+                    width: ProgramGuideMetrics.minimumTapTarget,
+                    height: ProgramGuideMetrics.minimumTapTarget
+                )
+        }
+        .accessibilityIdentifier(GuideAccessibilityIdentifier.layoutMode)
+        .accessibilityLabel("表示形式")
+        .accessibilityValue(layoutMode.title)
+        .accessibilityHint("番組表をリストと格子で切り替えます")
     }
 
     /// 予約済みの通知を見て解除するための入り口。
@@ -478,193 +521,6 @@ struct ProgramGuideView: View {
     }
 }
 
-private struct ProgramGuideDatePicker: View {
-    let dates: [Date]
-    @Binding var selectedDate: Date
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(dates, id: \.self) { date in
-                        let isSelected = ProgramGuideMetrics.isSameDay(date, selectedDate)
-                        Button {
-                            selectedDate = date
-                        } label: {
-                            VStack(spacing: 2) {
-                                Text(date, format: .dateTime.month().day())
-                                    .font(.subheadline.weight(.semibold))
-                                Text(relativeLabel(for: date))
-                                    .font(.caption)
-                            }
-                            .foregroundStyle(isSelected ? Color.white : Color.primary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(
-                                minWidth: dynamicTypeSize.isAccessibilitySize ? 96 : 68,
-                                minHeight: dynamicTypeSize.isAccessibilitySize ? 64 : 44
-                            )
-                            .padding(.horizontal, 4)
-                            .background(isSelected ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay {
-                                if !isSelected {
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(Color(uiColor: .separator).opacity(0.35))
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(accessibilityDate(date))
-                        .accessibilityAddTraits(isSelected ? .isSelected : [])
-                        .id(date)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .onAppear {
-                DispatchQueue.main.async {
-                    proxy.scrollTo(selectedDate, anchor: .center)
-                }
-            }
-            .onChange(of: selectedDate) { date in
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo(date, anchor: .center)
-                }
-            }
-        }
-    }
-
-    private func relativeLabel(for date: Date) -> String {
-        if ProgramGuideMetrics.calendar.isDateInToday(date) {
-            return "今日"
-        }
-        if ProgramGuideMetrics.calendar.isDateInTomorrow(date) {
-            return "明日"
-        }
-        if ProgramGuideMetrics.calendar.isDateInYesterday(date) {
-            return "昨日"
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ja_JP")
-        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
-        formatter.dateFormat = "EEE"
-        return formatter.string(from: date)
-    }
-
-    private func accessibilityDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ja_JP")
-        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
-        formatter.dateFormat = "M月d日EEEE"
-        return TVerAccessibilityText.guideDate(date, relativeLabel: relativeLabel(for: date))
-    }
-}
-
-private struct ProgramGuideAccessibleList: View {
-    let guide: [TVerGuideChannel]
-    let selectedDate: Date
-    let onSelect: (TVerLiveChannel, TVerLiveProgram, CatchUpAvailability) -> Void
-    @EnvironmentObject private var availabilityStore: CatchUpAvailabilityStore
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 20) {
-                ForEach(guide) { item in
-                    let programs = GuideBroadcastAxis.programs(item.programs, on: selectedDate)
-                        .sorted { $0.startAt < $1.startAt }
-                    if !programs.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label(item.channel.name, systemImage: "tv")
-                                .font(.headline)
-                                .accessibilityAddTraits(.isHeader)
-                                .onAppear {
-                                    availabilityStore.prefetch(
-                                        channelID: item.channel.id,
-                                        programs: programs
-                                    )
-                                }
-
-                            ForEach(programs) { program in
-                                let now = Date()
-                                let isOnAir = program.startAt <= now && now < program.endAt
-                                let availability = availabilityStore.availability(
-                                    channelID: item.channel.id,
-                                    program: program,
-                                    channelState: item.channel.state,
-                                    now: now
-                                )
-                                let hasNothingToPlay = GuideAvailabilityPresentation
-                                    .hasNothingToPlay(isOnAir: isOnAir, availability: availability)
-                                Button {
-                                    onSelect(item.channel, program, availability)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack(alignment: .firstTextBaseline) {
-                                            Text(GuideBroadcastAxis.timeRangeLabel(for: program))
-                                                .font(.subheadline.monospacedDigit().weight(.semibold))
-                                            if isOnAir {
-                                                Text("放送中")
-                                                    .font(.subheadline.bold())
-                                                    .foregroundStyle(DS.Palette.live)
-                                            }
-                                            if let kind = GuideAvailabilityPresentation
-                                                .badgeKind(isOnAir: isOnAir, availability: availability)
-                                            {
-                                                MediaBadge(kind)
-                                            }
-                                        }
-                                        Text(program.seriesTitle)
-                                            .font(.headline)
-                                        if program.title != program.seriesTitle {
-                                            Text(program.title)
-                                                .font(.body)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .multilineTextAlignment(.leading)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .foregroundStyle(.primary)
-                                    .padding(14)
-                                    .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget, alignment: .leading)
-                                    .background(Color(uiColor: .secondarySystemGroupedBackground))
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                                // 見逃しが無くても詳細の閲覧と通知予約は使えるので、押せなくしない。
-                                .opacity(hasNothingToPlay ? 0.72 : 1)
-                                .accessibilityElement(children: .ignore)
-                                .accessibilityLabel(
-                                    GuideAvailabilityPresentation.accessibilityLabel(
-                                        base: TVerAccessibilityText.guideProgram(
-                                            stationName: item.channel.name,
-                                            program: program,
-                                            isOnAir: isOnAir
-                                        ),
-                                        isOnAir: isOnAir,
-                                        availability: availability
-                                    )
-                                )
-                                .accessibilityHint(
-                                    GuideAvailabilityPresentation.accessibilityHint(
-                                        isOnAir: isOnAir,
-                                        availability: availability
-                                    )
-                                )
-                                .accessibilityAddTraits(isOnAir ? .isSelected : [])
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(16)
-        }
-        .accessibilityElement(children: .contain)
-    }
-}
-
 struct ProgramGuideSelection: Identifiable {
     let channel: TVerLiveChannel
     let program: TVerLiveProgram
@@ -693,6 +549,8 @@ private struct ProgramGuideDetailSheet: View {
     let notificationScheduler: ProgramNotificationScheduler
     let catchUpLookup: GuideCatchUpLookup
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
+    /// 埋め込み再生の操作面。標準の再生画面と同じ部品を使う。
+    @StateObject private var playerChrome = PlayerChromeModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var requestedPlayback = false
@@ -750,12 +608,19 @@ private struct ProgramGuideDetailSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if requestedPlayback {
-                        PlaybackVideoSurface(
-                            player: playbackController.player,
+                        // ライブなのでシークは出さない。PiP は PlayerStage の重なり側にある。
+                        PlayerStage(
+                            playbackController: playbackController,
                             pictureInPicture: pictureInPicture,
+                            model: playerChrome,
+                            title: selection.program.seriesTitle,
+                            subtitle: selection.channel.name,
                             accessibilityLabel: "\(selection.program.seriesTitle)のライブ動画プレイヤー",
-                            cornerRadius: 10
+                            supportsSeeking: false
                         )
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     } else {
                         CachedProgramImage(
                             url: selection.program.thumbnailURL ?? selection.channel.iconURL,
@@ -854,10 +719,6 @@ private struct ProgramGuideDetailSheet: View {
                         .background(Color(uiColor: .secondarySystemGroupedBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .accessibilityElement(children: .contain)
-                    }
-
-                    if requestedPlayback {
-                        PictureInPictureControl(coordinator: pictureInPicture)
                     }
 
                     ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
@@ -1177,6 +1038,8 @@ enum GuideAccessibilityIdentifier {
     static let catchUpNotFound = "guide.catchup.notfound"
     static let catchUpBadge = "guide.catchup.badge"
     static let offlineBanner = "guide.offline.banner"
+    /// 表示形式（リスト / 番組表）の切り替え。
+    static let layoutMode = "guide.layout.mode"
 }
 
 /// Outcome of looking up the catch-up (見逃し配信) episode for a finished broadcast slot.
