@@ -228,14 +228,30 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     private var needsDeferredLifecyclePublication = false
     private var deferredLifecyclePublicationTask: Task<Void, Never>?
 
+    /// PiP を出せるかどうかの既定判定。
+    ///
+    /// 実行環境（LiveContainer など）を理由に一律で無効にはしない。以前は再生が
+    /// 固まるのを疑って LiveContainer を締め出していたが、その結果として LiveContainer
+    /// では小窓ボタンが一度も出なかった。AVKit がコントローラを作れない場合は
+    /// installDriver 側で静かに .unsupported へ倒れるので、無効化はそこに任せる。
+    nonisolated static func defaultSupportCheck(
+        isSupportedByDevice: Bool,
+        isLiveContainer: Bool
+    ) -> Bool {
+        _ = isLiveContainer
+        return isSupportedByDevice
+    }
+
     init(
         startsAutomaticallyFromInline: Bool = true,
         notificationCenter: NotificationCenter = .default,
         automaticStartReadinessTimeoutNanoseconds: UInt64 = 750_000_000,
         unconfirmedStopTimeoutNanoseconds: UInt64 = 500_000_000,
         isSupported: @escaping () -> Bool = {
-            !AppRuntimeEnvironment.isLiveContainer
-                && AVPictureInPictureController.isPictureInPictureSupported()
+            PictureInPictureCoordinator.defaultSupportCheck(
+                isSupportedByDevice: AVPictureInPictureController.isPictureInPictureSupported(),
+                isLiveContainer: AppRuntimeEnvironment.isLiveContainer
+            )
         },
         driverFactory: @escaping DriverFactory = {
             AVPictureInPictureControllerDriver(playerLayer: $0)

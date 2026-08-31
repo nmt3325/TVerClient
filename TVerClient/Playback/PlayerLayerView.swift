@@ -186,10 +186,23 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> PlayerLayerContainerView {
-        let runtimeLabel = AppRuntimeEnvironment.isLiveContainer ? "disabled-livecontainer" : "enabled"
+        // 環境名ではなく実際の可否を残す。フリーズが再発したときに、PiP が
+        // 動いていたのかどうかを診断ログだけで切り分けられるようにするため。
+        let runtimeLabel: String
+        switch pictureInPicture.availability {
+        case .unsupported:
+            runtimeLabel = "unsupported"
+        case .unavailable:
+            runtimeLabel = "waiting"
+        case .available:
+            runtimeLabel = "enabled"
+        }
         Self.recordAfterViewUpdate(
             "Video surface creation started",
-            metadata: ["pictureInPicture": runtimeLabel]
+            metadata: [
+                "pictureInPicture": runtimeLabel,
+                "container": AppRuntimeEnvironment.label,
+            ]
         )
         let view = PlayerLayerContainerView()
         configure(view)

@@ -6,6 +6,19 @@ import XCTest
 
 @MainActor
 final class PictureInPictureTests: XCTestCase {
+    func testDefaultSupportCheckKeepsPictureInPictureAvailableInsideLiveContainer() {
+        // 実行環境を理由にした一律無効化はしない。ここを戻すと LiveContainer では
+        // 小窓ボタンが一度も出せなくなる。
+        XCTAssertTrue(PictureInPictureCoordinator.defaultSupportCheck(
+            isSupportedByDevice: true,
+            isLiveContainer: true
+        ))
+        XCTAssertFalse(PictureInPictureCoordinator.defaultSupportCheck(
+            isSupportedByDevice: false,
+            isLiveContainer: false
+        ))
+    }
+
     func testUnsupportedCoordinatorReportsFailureWithoutCreatingDriver() {
         var factoryCalled = false
         let coordinator = PictureInPictureCoordinator(
