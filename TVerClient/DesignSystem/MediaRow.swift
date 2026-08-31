@@ -61,9 +61,14 @@ struct MediaThumbnail: View {
             .clipped()
 
             if let progress, progress > 0 {
-                MediaProgressBar(progress: progress)
+                // 進捗は標準の `ProgressView(value:)` に任せる。自前の Capsule で
+                // 描くと tint も角丸も OS の更新から取り残される。
+                ProgressView(value: min(max(progress, 0), 1))
+                    .progressViewStyle(.linear)
+                    .tint(DS.Palette.catchUp)
                     .padding(.horizontal, DS.Spacing.xs)
                     .padding(.bottom, DS.Spacing.xs)
+                    .accessibilityHidden(true)
             }
         }
         .frame(width: width, height: height)
@@ -74,6 +79,9 @@ struct MediaThumbnail: View {
 }
 
 /// Resume indicator laid over the bottom edge of a thumbnail.
+///
+/// 標準の `ProgressView(value:)` に置き換えたので `MediaThumbnail` からは
+/// 使っていない。他ブランチが参照している可能性があるため型は残す。
 struct MediaProgressBar: View {
     let progress: Double
 
@@ -127,7 +135,6 @@ struct MediaRow<Accessory: View>: View {
     var body: some View {
         layout
             .padding(.vertical, DS.Spacing.s)
-            .frame(minHeight: DS.Size.rowMinimumHeight, alignment: .top)
             .contentShape(Rectangle())
     }
 

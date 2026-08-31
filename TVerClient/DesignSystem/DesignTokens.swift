@@ -41,6 +41,10 @@ enum DS {
         static let downloaded = Color.green
         static let warning = Color.orange
         static let separator = Color.primary.opacity(0.08)
+        /// 容量バーのように面積を塗る用途の色。`separator` は区切り線の色なので、
+        /// 塗りに流用すると「線」と「面」で同じ意味を二重に持ってしまう。
+        static let capacityOther = Color(uiColor: .secondarySystemFill)
+        static let capacityFree = Color(uiColor: .tertiarySystemFill)
         static let surface = Color(uiColor: .secondarySystemBackground)
 
         /// Page background behind plain lists.
