@@ -70,3 +70,19 @@ struct DownloadStorageUsage: Equatable, Sendable {
         return Double(usedBytes) / Double(totalBytes)
     }
 }
+
+
+/// Minimal download queue surface used by automatic series subscriptions.
+/// Keeping discovery outside DownloadCenter makes subscription refresh deterministic to test.
+@MainActor
+protocol OfflineDownloadEnqueuing: AnyObject {
+    func state(for programID: String) -> DownloadState
+
+    @discardableResult
+    func start(
+        _ program: TVerProgram,
+        allowingCellular: Bool
+    ) -> DownloadStartResult
+}
+
+extension DownloadCenter: OfflineDownloadEnqueuing {}

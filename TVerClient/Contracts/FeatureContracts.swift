@@ -50,3 +50,20 @@ enum GuidePlaybackRouter {
         return .unavailable
     }
 }
+
+
+/// Loads the currently published episodes for one TVer series.
+///
+/// Implementations must preserve TVer payload order and de-duplicate by episode ID.
+protocol TVerSeriesEpisodeServicing: Sendable {
+    func fetchSeriesEpisodes(
+        seriesID: String,
+        forceRefresh: Bool
+    ) async throws -> [TVerProgram]
+}
+
+extension TVerSeriesEpisodeServicing {
+    func fetchSeriesEpisodes(seriesID: String) async throws -> [TVerProgram] {
+        try await fetchSeriesEpisodes(seriesID: seriesID, forceRefresh: false)
+    }
+}
