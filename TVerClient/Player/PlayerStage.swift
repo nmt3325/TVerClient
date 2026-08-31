@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import SwiftUI
 import UIKit
 
@@ -48,7 +49,9 @@ final class PlayerBackgroundTapView: UIView {
         isOpaque = false
         isAccessibilityElement = false
         accessibilityIdentifier = Self.accessibilityIdentifier
-        singleTapRecognizer.require(toFail: doubleTapRecognizer)
+        // 単発タップをダブルタップの失敗待ちにしない。待たせるとコントロールの
+        // 表示が指を離してから 300ms ほど遅れ、標準プレイヤーの即応と違う。
+        // ダブルタップが成立したときの打ち消しは PlayerStage 側が受け持つ。
         addGestureRecognizer(singleTapRecognizer)
         addGestureRecognizer(doubleTapRecognizer)
     }
@@ -125,7 +128,13 @@ struct PlayerStage: View {
     var showsContinuityNotice: Bool = true
     var onToggleFullScreen: (() -> Void)?
 
+    /// UIKit のダブルタップ判定（およそ 0.3 秒）を包む窓。
+    private static let doubleTapCompensationWindow: TimeInterval = 0.6
+
     @State private var showsSpinner = false
+    /// 単発タップで先に適用したトグルの回数と、その時刻。
+    @State private var immediateToggleCount = 0
+    @State private var lastImmediateToggleAt: Date?
     @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -149,9 +158,9 @@ struct PlayerStage: View {
                 // chrome is visible, the equivalent plane inside
                 // PlayerOverlayControls sits behind its buttons and scrubber.
                 PlayerBackgroundTapSurface(
-                    onSingleTap: { model.toggleControls() },
+                    onSingleTap: { handleBackgroundSingleTap() },
                     onDoubleTap: { location in
-                        handleSkipTap(at: location, width: proxy.size.width)
+                        handleBackgroundDoubleTap(at: location, width: proxy.size.width)
                     }
                 )
                 .allowsHitTesting(!model.areControlsVisible)
@@ -175,14 +184,18 @@ struct PlayerStage: View {
                     supportsSeeking: supportsSeeking,
                     isFullScreen: isFullScreen,
                     showsContinuityNotice: showsContinuityNotice,
+                    safeAreaInsets: proxy.safeAreaInsets,
                     onToggleFullScreen: onToggleFullScreen,
-                    onBackgroundSingleTap: { model.toggleControls() },
+                    onBackgroundSingleTap: { handleBackgroundSingleTap() },
                     onBackgroundDoubleTap: { location in
-                        handleSkipTap(at: location, width: proxy.size.width)
+                        handleBackgroundDoubleTap(at: location, width: proxy.size.width)
                     }
                 )
                 .opacity(model.areControlsVisible ? 1 : 0)
                 .allowsHitTesting(model.areControlsVisible)
+                // 消えている操作系を VoiceOver が読んでしまうと、画面に
+                // ないボタンを押せるように見える。見えていない間は読み上げから畳む。
+                .accessibilityHidden(!model.areControlsVisible)
                 .animation(
                     reduceMotion ? nil : .easeInOut(duration: 0.2),
                     value: model.areControlsVisible
@@ -209,10 +222,33 @@ struct PlayerStage: View {
         }
     }
 
+    /// 単発タップは判定を待たずにその場でトグルする。標準プレイヤーは指を
+    /// 離した瞬間にコントロールが出るので、ダブルタップの失敗待ちで遅らせない。
+    private func handleBackgroundSingleTap() {
+        if !isWithinDoubleTapWindow { immediateToggleCount = 0 }
+        immediateToggleCount += 1
+        lastImmediateToggleAt = Date()
+        model.toggleControls()
+    }
+
+    /// ダブルタップ判定が成立し得る間だけ、単発タップの打ち消しを有効にする。
+    private var isWithinDoubleTapWindow: Bool {
+        guard let lastImmediateToggleAt else { return false }
+        return Date().timeIntervalSince(lastImmediateToggleAt) < Self.doubleTapCompensationWindow
+    }
+
     /// A double tap on the left or right half skips, and repeated taps stack
     /// up (10, 20, 30 ...) the way the system player does. A double tap falls
     /// back to the normal chrome toggle until a finite seek range is ready.
-    private func handleSkipTap(at location: CGPoint, width: CGFloat) {
+    ///
+    /// 直前の単発タップで適用したトグルはここで打ち消す。UIKit が単発を
+    /// 何回配送したかに依らず、ダブルタップの前後で表示状態が勝手に
+    /// 反転しないようにするため。
+    private func handleBackgroundDoubleTap(at location: CGPoint, width: CGFloat) {
+        let appliedToggles = isWithinDoubleTapWindow ? immediateToggleCount : 0
+        immediateToggleCount = 0
+        lastImmediateToggleAt = nil
+        if !appliedToggles.isMultiple(of: 2) { model.toggleControls() }
         switch PlayerStageBackgroundTapAction.resolve(
             x: location.x,
             width: width,

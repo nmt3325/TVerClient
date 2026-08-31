@@ -37,43 +37,6 @@ struct PlaybackFailureView: View {
     }
 }
 
-/// Standalone timeline for surfaces that do not overlay their controls.
-///
-/// The old implementation wrapped a `Slider` in `TimelineView(.periodic(by: 1))`,
-/// which rebuilt the slider under the finger every second and made seeking
-/// impossible. It now draws the shared scrubber and commits a single seek.
-struct PlaybackTimelineView: View {
-    @ObservedObject var playbackController: PlaybackController
-
-    var body: some View {
-        VStack(spacing: DS.Spacing.xs) {
-            PlaybackScrubber(
-                elapsed: playbackController.currentTime,
-                duration: playbackController.duration ?? 0,
-                bufferedFraction: playbackController.loadedFraction,
-                isEnabled: playbackController.canSeek,
-                onScrubStarted: { playbackController.beginScrubbing() },
-                onScrubChanged: { playbackController.previewScrub(to: $0) },
-                onScrubEnded: { playbackController.endScrubbing(at: $0) },
-                onAdjust: { playbackController.seek(by: $0) }
-            )
-            HStack {
-                Text(ScrubberMath.formattedTime(playbackController.currentTime))
-                Spacer()
-                Text(durationText)
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
-            .accessibilityHidden(true)
-        }
-    }
-
-    private var durationText: String {
-        guard let duration = playbackController.duration else { return "--:--" }
-        return ScrubberMath.formattedTime(duration)
-    }
-}
-
 @MainActor
 struct PlaybackVideoSurface: View {
     let player: AVPlayer
@@ -118,7 +81,6 @@ struct PlaybackVideoSurface: View {
             .buttonStyle(.plain)
             .accessibilityLabel("全画面")
             .accessibilityHint("動画を画面いっぱいに表示します")
-            .accessibilityIdentifier(PlaybackAccessibilityIdentifier.fullScreenEnter)
             .padding(6)
         }
     }
