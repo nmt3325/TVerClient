@@ -70,13 +70,15 @@ struct DiagnosticsView: View {
                     .disabled(isRunning)
 
                     ForEach(results, id: \.target) { result in
-                        HStack {
-                            Label(result.target.displayName, systemImage: result.isReachable ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundStyle(result.isReachable ? DS.Palette.downloaded : DS.Palette.live)
-                            Spacer()
+                        LabeledContent {
                             Text(result.summary)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        } label: {
+                            Label {
+                                Text(result.target.displayName)
+                            } icon: {
+                                Image(systemName: result.isReachable ? "checkmark.circle" : "xmark.octagon")
+                                    .foregroundStyle(result.isReachable ? Color.secondary : DS.Palette.live)
+                            }
                         }
                         .accessibilityElement(children: .combine)
                     }
@@ -98,22 +100,20 @@ struct DiagnosticsView: View {
                     .disabled(isSelfChecking)
 
                     if let report = logStore.selfCheckReport {
-                        HStack {
-                            Label(report.status.badgeTitle, systemImage: report.status.systemImage)
-                                .font(.caption.bold())
-                                .foregroundStyle(report.status.color)
-                            Spacer()
+                        LabeledContent {
                             Text(report.startedAt, style: .time)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                        } label: {
+                            Label {
+                                Text(report.status.badgeTitle)
+                            } icon: {
+                                Image(systemName: report.status.systemImage)
+                                    .foregroundStyle(report.status.color)
+                            }
                         }
                         .accessibilityElement(children: .combine)
 
                         ForEach(report.steps) { step in
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(step.name)
-                                    .font(.caption.bold())
-                                Spacer()
+                            LabeledContent(step.name) {
                                 Text(step.line)
                                     .font(.caption2.monospaced())
                                     .foregroundStyle(step.isOK ? Color.secondary : DS.Palette.warning)
@@ -140,20 +140,19 @@ struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(healthSummaries) { summary in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Label(
-                                        summary.endpoint.displayName,
-                                        systemImage: summary.isHealthy
-                                            ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-                                    )
-                                    .font(.caption.bold())
-                                    .foregroundStyle(summary.isHealthy ? DS.Palette.downloaded : DS.Palette.warning)
-                                    Spacer()
-                                    if let outcome = summary.lastOutcome {
-                                        Text(outcome.badgeTitle)
-                                            .font(.caption2.bold())
-                                            .foregroundStyle(outcome.color)
+                            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                                LabeledContent {
+                                    Text(summary.lastOutcome?.badgeTitle ?? "未計測")
+                                        .foregroundStyle(summary.lastOutcome?.color ?? Color.secondary)
+                                } label: {
+                                    Label {
+                                        Text(summary.endpoint.displayName)
+                                    } icon: {
+                                        Image(
+                                            systemName: summary.isHealthy
+                                                ? "checkmark.circle" : "exclamationmark.triangle"
+                                        )
+                                        .foregroundStyle(summary.isHealthy ? Color.secondary : DS.Palette.warning)
                                     }
                                 }
                                 Text(summary.countsDescription)
@@ -175,21 +174,22 @@ struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(recentProblems) { event in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
+                            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                                LabeledContent {
                                     Text(event.outcome.badgeTitle)
-                                        .font(.caption2.bold())
                                         .foregroundStyle(event.outcome.color)
-                                    Text(event.endpoint.displayName)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(event.at, style: .time)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                } label: {
+                                    Label {
+                                        Text(event.endpoint.displayName)
+                                    } icon: {
+                                        Image(systemName: event.outcome.systemImage)
+                                            .foregroundStyle(event.outcome.color)
+                                    }
                                 }
+                                // 時刻は describe(_:) の先頭に入っているので、行で重ねては出さない。
                                 Text(EndpointHealthStore.describe(event))
                                     .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
                             .accessibilityElement(children: .combine)
@@ -231,16 +231,16 @@ struct DiagnosticsView: View {
                     .accessibilityHint("他のアプリへ診断ログをそのまま渡します")
 
                     if let copyConfirmation {
-                        Label(copyConfirmation, systemImage: "checkmark.circle.fill")
+                        Label(copyConfirmation, systemImage: "checkmark.circle")
                             .font(.footnote)
-                            .foregroundStyle(DS.Palette.downloaded)
+                            .foregroundStyle(.secondary)
                     }
 
                     Button(role: .destructive) {
                         showsClearConfirmation = true
                     } label: {
+                        // List の行はすでに 44pt あるので、自前の最小高さは付けない。
                         Label("ログを消去", systemImage: "trash")
-                            .frame(minHeight: DS.Size.minimumTapTarget)
                     }
                     .accessibilityLabel("診断ログをすべて消去")
                     .accessibilityHint("確認してから削除します。消去後は元に戻せません")
@@ -268,32 +268,31 @@ struct DiagnosticsView: View {
                         }
                     } label: {
                         Label("用語の説明", systemImage: "text.book.closed")
-                            .frame(minHeight: DS.Size.minimumTapTarget)
                     }
                     .accessibilityHint("この画面に出てくる言葉の意味を開きます")
                 }
 
-                Section("最近のログ（\(logStore.entries.count)件）") {
+                Section {
                     if logStore.entries.isEmpty {
                         Text("ログはまだありません")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(logStore.entries.suffix(100).reversed()) { entry in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(entry.level.rawValue)
-                                        .font(.caption2.bold())
-                                        .foregroundStyle(entry.level.color)
-                                    Text(entry.category)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
+                            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                                LabeledContent {
                                     Text(entry.timestamp, style: .time)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                } label: {
+                                    Label {
+                                        Text(entry.category)
+                                    } icon: {
+                                        Image(systemName: entry.level.systemImage)
+                                            .foregroundStyle(entry.level.color)
+                                            .accessibilityLabel(entry.level.rawValue)
+                                    }
                                 }
                                 Text(entry.message)
                                     .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
                             .accessibilityElement(children: .combine)
@@ -309,6 +308,10 @@ struct DiagnosticsView: View {
                             }
                         }
                     }
+                } header: {
+                    Text("最近のログ")
+                } footer: {
+                    Text("\(logStore.entries.count)件を記録しています。新しい順に最大100件まで表示します。")
                 }
             }
             .listStyle(.insetGrouped)
@@ -436,12 +439,22 @@ private extension EndpointOutcome {
         }
     }
 
+    /// 意味のある色だけ残す。正常は標準の副次色に寄せ、色で語るのは注意と失敗だけ。
     var color: Color {
         switch self {
-        case .ok: return DS.Palette.downloaded
+        case .ok: return .secondary
         case .degraded: return DS.Palette.warning
-        case .fallbackUsed: return DS.Palette.catchUp
+        case .fallbackUsed: return DS.Palette.warning
         case .failed: return DS.Palette.live
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .ok: return "checkmark.circle"
+        case .degraded: return "exclamationmark.triangle"
+        case .fallbackUsed: return "arrow.triangle.branch"
+        case .failed: return "xmark.octagon"
         }
     }
 }
@@ -463,15 +476,15 @@ private extension StartupSelfCheckStatus {
 
     var systemImage: String {
         switch self {
-        case .ok: return "checkmark.seal.fill"
-        case .degraded: return "exclamationmark.triangle.fill"
-        case .failed: return "xmark.octagon.fill"
+        case .ok: return "checkmark.seal"
+        case .degraded: return "exclamationmark.triangle"
+        case .failed: return "xmark.octagon"
         }
     }
 
     var color: Color {
         switch self {
-        case .ok: return DS.Palette.downloaded
+        case .ok: return .secondary
         case .degraded: return DS.Palette.warning
         case .failed: return DS.Palette.live
         }
@@ -481,9 +494,17 @@ private extension StartupSelfCheckStatus {
 private extension DiagnosticLogLevel {
     var color: Color {
         switch self {
-        case .info: return DS.Palette.inactive
+        case .info: return .secondary
         case .warning: return DS.Palette.warning
         case .error: return DS.Palette.live
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .info: return "info.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.octagon"
         }
     }
 }
