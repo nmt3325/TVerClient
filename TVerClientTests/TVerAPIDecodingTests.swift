@@ -125,6 +125,55 @@ final class TVerAPIDecodingTests: XCTestCase {
             client.decodeSeriesEpisodes(TVerFixture.data("platform_series_episodes")).value
         )
         XCTAssertEqual(episodes.map(\.id), ["ep000010", "ep000011"])
+
+        let programs = client.seriesPrograms(fromEpisodes: episodes)
+        XCTAssertEqual(programs.map(\.id), ["ep000010", "ep000011"])
+        XCTAssertEqual(programs.map(\.seriesID), ["sr000001", "sr000001"])
+        XCTAssertEqual(programs.first?.seriesTitle, "サンプル番組A")
+        XCTAssertEqual(programs.first?.availableUntilAt, Date(timeIntervalSince1970: 1_896_652_800))
+        XCTAssertEqual(
+            programs.first?.thumbnailURL?.absoluteString,
+            "https://statics.tver.jp/images/placeholder/ep000010.jpg"
+        )
+    }
+
+    func testSeriesProgramMappingKeepsPayloadOrderAndMissingDate() {
+        let episodes = [
+            EpisodeContent(
+                id: "newer",
+                seriesID: "series",
+                title: "先に届いた話",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: "2月8日",
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+            EpisodeContent(
+                id: "without-date",
+                seriesID: "series",
+                title: "日付なし",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: nil,
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+            EpisodeContent(
+                id: "newer",
+                seriesID: "series",
+                title: "重複",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: "1月1日",
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+        ]
+
+        let programs = client.seriesPrograms(fromEpisodes: episodes)
+        XCTAssertEqual(programs.map(\.id), ["newer", "without-date"])
+        XCTAssertEqual(programs.last?.broadcastLabel, "")
     }
 
     func testRankedSeriesIDsFollowRank() throws {

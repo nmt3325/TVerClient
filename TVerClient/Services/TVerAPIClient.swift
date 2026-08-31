@@ -49,7 +49,7 @@ enum TVerNetworking {
 
 final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramGuideServicing,
     TVerScheduleSnapshotProviding, TVerLiveSnapshotProviding, TVerProgramGuideSnapshotProviding,
-    @unchecked Sendable
+    TVerSeriesEpisodeServicing, @unchecked Sendable
 {
     private static let browserURL = URL(string: "https://platform-api.tver.jp/v2/api/platform_users/browser/create")!
     private static let serviceBaseURL = URL(string: "https://platform-api.tver.jp/service/api/v1/")!
@@ -96,6 +96,21 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
 
     func fetchSchedule(forceRefresh: Bool) async throws -> [ProgramDay] {
         try await fetchScheduleSnapshot(forceRefresh: forceRefresh).days
+    }
+
+    /// Loads one series without routing the episodes through schedule date groups.
+    /// Payload order is significant here: grouping by broadcast date would both
+    /// reorder episodes and discard entries whose optional date label is absent.
+    func fetchSeriesEpisodes(seriesID: String, forceRefresh: Bool) async throws -> [TVerProgram] {
+        let normalizedSeriesID = seriesID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSeriesID.isEmpty else { return [] }
+        let credentials = try await createBrowserCredentials()
+        let episodes = try await fetchEpisodes(
+            seriesID: normalizedSeriesID,
+            credentials: credentials,
+            forceRefresh: forceRefresh
+        )
+        return makePrograms(from: episodes)
     }
 
     /// 一覧と、その一覧をどれだけ信用してよいかを一緒に返す。
@@ -762,31 +777,40 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         }
     }
 
-    private func makeProgramDays(from episodes: [EpisodeContent]) -> [ProgramDay] {
+    /// Converts platform episodes to app models while keeping first-seen payload order.
+    /// Only the identifier and title are required; date labels are optional on the
+    /// series surface and must not make an otherwise playable episode disappear.
+    private func makePrograms(from episodes: [EpisodeContent]) -> [TVerProgram] {
         var seenEpisodeIDs = Set<String>()
-        var programsByDate: [Date: [TVerProgram]] = [:]
-
-        for episode in episodes {
+        return episodes.compactMap { episode in
             guard let episodeID = episode.id, !episodeID.isEmpty,
-                  let title = episode.title, !title.isEmpty,
-                  let broadcastLabel = episode.broadcastDateLabel,
-                  seenEpisodeIDs.insert(episodeID).inserted,
-                  let date = broadcastDate(from: broadcastLabel)
-            else {
-                continue
-            }
+                  seenEpisodeIDs.insert(episodeID).inserted
+            else { return nil }
+            return makeProgram(from: episode, episodeID: episodeID)
+        }
+    }
 
-            let program = TVerProgram(
-                id: episodeID,
-                seriesID: episode.seriesID,
-                title: title,
-                seriesTitle: episode.seriesTitle ?? "",
-                description: episode.description ?? "",
-                broadcastLabel: broadcastLabel,
-                availableUntil: availableUntilLabel(epochSeconds: episode.endAt),
-                availableUntilAt: availableUntilDate(epochSeconds: episode.endAt),
-                thumbnailURL: thumbnailURL(path: episode.thumbnailPath, episodeID: episodeID)
-            )
+    private func makeProgram(from episode: EpisodeContent, episodeID: String) -> TVerProgram? {
+        guard let title = episode.title, !title.isEmpty else { return nil }
+        return TVerProgram(
+            id: episodeID,
+            seriesID: episode.seriesID,
+            title: title,
+            seriesTitle: episode.seriesTitle ?? "",
+            description: episode.description ?? "",
+            broadcastLabel: episode.broadcastDateLabel ?? "",
+            availableUntil: availableUntilLabel(epochSeconds: episode.endAt),
+            availableUntilAt: availableUntilDate(epochSeconds: episode.endAt),
+            thumbnailURL: thumbnailURL(path: episode.thumbnailPath, episodeID: episodeID)
+        )
+    }
+
+    private func makeProgramDays(from episodes: [EpisodeContent]) -> [ProgramDay] {
+        var programsByDate: [Date: [TVerProgram]] = [:]
+        for program in makePrograms(from: episodes) {
+            guard !program.broadcastLabel.isEmpty,
+                  let date = broadcastDate(from: program.broadcastLabel)
+            else { continue }
             programsByDate[date, default: []].append(program)
         }
 
@@ -1825,6 +1849,12 @@ extension TVerAPIClient {
     /// the schedule depends on is covered by the same fixtures.
     func programDays(fromEpisodes episodes: [EpisodeContent]) -> [ProgramDay] {
         makeProgramDays(from: episodes)
+    }
+
+    /// Series-specific fixture seam. Unlike `programDays`, this preserves payload
+    /// order and keeps episodes that do not carry a parseable broadcast date.
+    func seriesPrograms(fromEpisodes episodes: [EpisodeContent]) -> [TVerProgram] {
+        makePrograms(from: episodes)
     }
 
     /// Catch-up candidates built from decoded episodes.

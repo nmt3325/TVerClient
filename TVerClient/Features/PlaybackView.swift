@@ -11,6 +11,7 @@ struct PlaybackView: View {
     let program: TVerProgram
     @ObservedObject var playbackController: PlaybackController
     @EnvironmentObject private var downloadCenter: DownloadCenter
+    @EnvironmentObject private var seriesSubscriptions: SeriesSubscriptionStore
     @ObservedObject var libraryStore: ProgramLibraryStore
     @StateObject private var pictureInPicture = PictureInPictureCoordinator()
     @StateObject private var chrome = PlayerChromeModel()
@@ -141,6 +142,7 @@ struct PlaybackView: View {
             VStack(alignment: .leading, spacing: DS.Spacing.l) {
                 header
                 actionRow
+                seriesSubscriptionRow
                 statusSection
                 if !relatedPrograms.isEmpty { relatedSection }
             }
@@ -207,6 +209,79 @@ struct PlaybackView: View {
             .accessibilityLabel("TVer公式ページで開く")
         }
         .controlSize(.large)
+    }
+
+    @ViewBuilder
+    private var seriesSubscriptionRow: some View {
+        if let seriesID = program.seriesID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !seriesID.isEmpty
+        {
+            let isSubscribed = seriesSubscriptions.isSubscribed(seriesID: seriesID)
+            let activity = seriesSubscriptions.activity(for: seriesID)
+            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                Button {
+                    if isSubscribed {
+                        seriesSubscriptions.unsubscribe(seriesID: seriesID)
+                    } else {
+                        Task { await seriesSubscriptions.subscribe(to: program) }
+                    }
+                } label: {
+                    HStack(spacing: DS.Spacing.s) {
+                        if activity?.isBusy == true {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: isSubscribed ? "arrow.down.circle.fill" : "arrow.down.circle")
+                        }
+                        Text(isSubscribed ? "新着の自動ダウンロードを停止" : "新着を自動ダウンロード")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(isSubscribed ? "ON" : "OFF")
+                            .font(.caption.bold())
+                    }
+                    .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
+                }
+                .buttonStyle(.bordered)
+                .tint(isSubscribed ? DS.Palette.catchUp : .accentColor)
+                .accessibilityLabel(
+                    "\(program.seriesTitle)の新着自動ダウンロードを\(isSubscribed ? "オフ" : "オン")にする"
+                )
+                .accessibilityHint(
+                    isSubscribed
+                        ? "購読を解除しても、保存済みの番組は残ります"
+                        : "現在配信中の話は基準にするだけで、今後公開された新着だけを保存します"
+                )
+
+                if let text = seriesActivityText(activity) {
+                    Text(text)
+                        .font(.caption)
+                        .foregroundStyle(activityIsFailure(activity) ? DS.Palette.warning : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(text)
+                }
+            }
+        }
+    }
+
+    private func seriesActivityText(_ activity: SeriesSubscriptionActivity?) -> String? {
+        switch activity {
+        case .none:
+            return "単話のダウンロードとは別の設定です。"
+        case .waitingForBaseline:
+            return "購読中です。次回オンライン時に現在の配信話を基準にします。"
+        case .baselining:
+            return "現在の配信話を確認中です。既存話は自動ダウンロードしません。"
+        case .checking:
+            return "購読中の新着を確認しています。"
+        case .subscribed:
+            return "購読開始後に公開された新着だけを自動ダウンロードします。"
+        case let .failed(message):
+            return "購読は継続中です。基準の取得に失敗しました: \(message)"
+        }
+    }
+
+    private func activityIsFailure(_ activity: SeriesSubscriptionActivity?) -> Bool {
+        if case .failed = activity { return true }
+        return false
     }
 
     @ViewBuilder

@@ -10,9 +10,11 @@ struct LibraryView: View {
     @ObservedObject var libraryStore: ProgramLibraryStore
     @ObservedObject var playbackController: PlaybackController
     @EnvironmentObject private var downloadCenter: DownloadCenter
+    @EnvironmentObject private var seriesSubscriptions: SeriesSubscriptionStore
 
     @State private var selectedProgram: TVerProgram?
     @State private var pendingAction: PendingDestructiveAction?
+    @State private var pendingUnsubscribe: SeriesSubscription?
     @State private var isShowingDiagnostics = false
 
     /// 取り返しのつかない操作は、経路にかかわらずこの入れ物を通して確認する。
@@ -37,6 +39,7 @@ struct LibraryView: View {
 
     private var isEmpty: Bool {
         downloadCenter.records.isEmpty
+            && seriesSubscriptions.subscriptions.isEmpty
             && libraryStore.favoritePrograms.isEmpty
             && libraryStore.recentPrograms.isEmpty
     }
@@ -78,6 +81,7 @@ struct LibraryView: View {
                         .listRowSeparator(.hidden)
                     }
                 } else {
+                    seriesSubscriptionsSection
                     downloadingSection
                     savedSection
                     favoritesSection
@@ -87,7 +91,13 @@ struct LibraryView: View {
             .listStyle(.plain)
             .navigationTitle("ライブラリ")
             .toolbar { settingsToolbar }
-            .refreshable { downloadCenter.refreshStorage() }
+            .refreshable {
+                downloadCenter.refreshStorage()
+                await seriesSubscriptions.refreshAll(
+                    downloads: downloadCenter,
+                    forceRefresh: true
+                )
+            }
             .confirmationDialog(
                 Text(pendingAction?.confirmation.title ?? ""),
                 isPresented: Binding(
@@ -109,6 +119,24 @@ struct LibraryView: View {
                 Button("やめる", role: .cancel) { pendingAction = nil }
             } message: { action in
                 Text(action.confirmation.message)
+            }
+            .alert(
+                "自動ダウンロードを解除しますか？",
+                isPresented: Binding(
+                    get: { pendingUnsubscribe != nil },
+                    set: { isPresented in
+                        if !isPresented { pendingUnsubscribe = nil }
+                    }
+                ),
+                presenting: pendingUnsubscribe
+            ) { subscription in
+                Button("購読解除", role: .destructive) {
+                    seriesSubscriptions.unsubscribe(seriesID: subscription.seriesID)
+                    pendingUnsubscribe = nil
+                }
+                Button("やめる", role: .cancel) { pendingUnsubscribe = nil }
+            } message: { subscription in
+                Text("「\(subscription.seriesTitle)」の今後の新着を停止します。保存済み・ダウンロード中の番組は残ります。")
             }
         }
         .sheet(item: $selectedProgram) { program in
@@ -264,6 +292,123 @@ struct LibraryView: View {
     }
 
     // MARK: - Sections
+
+    @ViewBuilder
+    private var seriesSubscriptionsSection: some View {
+        if !seriesSubscriptions.subscriptions.isEmpty {
+            Section {
+                switch seriesSubscriptions.refreshState {
+                case .refreshing:
+                    HStack(spacing: DS.Spacing.s) {
+                        ProgressView()
+                        Text("購読シリーズの新着を確認中")
+                            .font(.footnote)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("購読シリーズの新着を確認中")
+                case let .completed(summary):
+                    Text(summary.message)
+                        .font(.footnote)
+                        .foregroundStyle(summary.failedSeriesCount > 0 ? DS.Palette.warning : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(summary.message)
+                case .idle:
+                    EmptyView()
+                }
+
+                if let failure = seriesSubscriptions.lastPersistenceFailure {
+                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(DS.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ForEach(seriesSubscriptions.subscriptions) { subscription in
+                    seriesSubscriptionRow(subscription)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingUnsubscribe = subscription
+                            } label: {
+                                Label("購読解除", systemImage: "bell.slash")
+                            }
+                        }
+                }
+            } header: {
+                SectionHeader(
+                    "新着の自動ダウンロード",
+                    subtitle: "\(seriesSubscriptions.subscriptions.count)シリーズ"
+                ) {
+                    Button {
+                        refreshSeriesSubscriptions()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .frame(
+                                minWidth: DS.Size.minimumTapTarget,
+                                minHeight: DS.Size.minimumTapTarget
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(seriesSubscriptions.refreshState.isRefreshing)
+                    .accessibilityLabel("購読シリーズを今すぐ更新")
+                    .accessibilityHint("TVerのキャッシュを再検証して新着を確認します")
+                }
+            } footer: {
+                Text("購読解除しても、保存済み・ダウンロード中の番組は残ります。")
+            }
+        }
+    }
+
+    private func seriesSubscriptionRow(_ subscription: SeriesSubscription) -> some View {
+        let detail = seriesSubscriptionDetail(subscription)
+        return HStack(alignment: .top, spacing: DS.Spacing.s) {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundStyle(DS.Palette.catchUp)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
+                Text(subscription.seriesTitle)
+                    .font(.body.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if subscription.deferredCount > 0 {
+                Text("待ち \(subscription.deferredCount)")
+                    .font(.caption.bold())
+                    .foregroundStyle(DS.Palette.warning)
+            }
+        }
+        .padding(.vertical, DS.Spacing.xxs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(subscription.seriesTitle)。\(detail)")
+        .accessibilityHint("左にスワイプすると購読を解除できます。保存済みの番組は残ります")
+    }
+
+    private func seriesSubscriptionDetail(_ subscription: SeriesSubscription) -> String {
+        var parts: [String] = []
+        if let checkedAt = subscription.lastCheckedAt {
+            parts.append("最終確認 \(Self.subscriptionDateFormatter.string(from: checkedAt))")
+        } else {
+            parts.append("現在の配信話をまだ確認できていません")
+        }
+        if subscription.deferredCount > 0 {
+            parts.append("Wi-Fi待ち・再試行待ち \(subscription.deferredCount)件")
+        }
+        if case let .failed(message) = seriesSubscriptions.activity(for: subscription.seriesID) {
+            parts.append("更新失敗: \(message)")
+        } else if seriesSubscriptions.activity(for: subscription.seriesID)?.isBusy == true {
+            parts.append("確認中")
+        }
+        return parts.joined(separator: "・")
+    }
+
+    private func refreshSeriesSubscriptions() {
+        downloadCenter.refreshStorage()
+        Task {
+            await seriesSubscriptions.refreshAll(downloads: downloadCenter, forceRefresh: true)
+        }
+    }
 
     @ViewBuilder
     private var downloadingSection: some View {
@@ -601,6 +746,13 @@ struct LibraryView: View {
         )
         selectedProgram = program
     }
+
+    private static let subscriptionDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.setLocalizedDateFormatFromTemplate("MdHm")
+        return formatter
+    }()
 
     private static let deadlineFormatter: DateFormatter = {
         let formatter = DateFormatter()
