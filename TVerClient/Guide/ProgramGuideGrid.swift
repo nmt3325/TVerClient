@@ -1,6 +1,31 @@
 import SwiftUI
 import UIKit
 
+enum GuideZoomPinchBindingUpdater {
+    private static let zoomTolerance: CGFloat = 0.001
+    private static let contentOffsetTolerance: CGFloat = 0.5
+
+    static func apply(
+        _ snapshot: GuideZoomPinchSnapshot,
+        zoom: Binding<CGFloat>,
+        contentOffset: Binding<CGPoint>
+    ) {
+        let currentZoom = zoom.wrappedValue
+        let currentOffset = contentOffset.wrappedValue
+        let shouldUpdateZoom = abs(snapshot.pointsPerMinute - currentZoom) > zoomTolerance
+        let shouldUpdateOffset = abs(snapshot.contentOffset.x - currentOffset.x) > contentOffsetTolerance
+            || abs(snapshot.contentOffset.y - currentOffset.y) > contentOffsetTolerance
+        guard shouldUpdateZoom || shouldUpdateOffset else { return }
+
+        if shouldUpdateZoom {
+            zoom.wrappedValue = snapshot.pointsPerMinute
+        }
+        if shouldUpdateOffset {
+            contentOffset.wrappedValue = snapshot.contentOffset
+        }
+    }
+}
+
 /// Newspaper-style program grid.
 ///
 /// Vertical geometry is driven by `pointsPerMinute`, so pinching recomputes
@@ -260,10 +285,14 @@ struct ProgramGuideGrid: View {
             focalY: focalY,
             viewportHeight: viewportHeight
         )
-        guard abs(changed.pointsPerMinute - zoom) > 0.001 else { return }
-        zoom = changed.pointsPerMinute
-        // The pure snapshot keeps both the time anchor and horizontal station.
-        contentOffset = changed.contentOffset
+        // Focal movement changes the anchor offset even while quantisation
+        // keeps the zoom in the same bucket. Apply each changed component
+        // independently so that movement is not dropped or written back twice.
+        GuideZoomPinchBindingUpdater.apply(
+            changed,
+            zoom: $zoom,
+            contentOffset: $contentOffset
+        )
     }
 
     private func finishPinch(_ terminalState: GuideZoomPinchTerminalState) {
@@ -729,10 +758,17 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
         context.coordinator.hostingController.view.frame = CGRect(origin: .zero, size: contentSize)
         scrollView.contentSize = contentSize
 
-        // While pinching, the offset is driven by the zoom anchor and has to be
-        // applied even though the scroll view still counts as dragging.
+        synchronizeBoundContentOffset(
+            in: scrollView,
+            isPinching: context.coordinator.isPinching
+        )
+    }
+
+    /// While pinching, the offset is driven by the zoom anchor and has to be
+    /// applied even though the scroll view still counts as dragging.
+    func synchronizeBoundContentOffset(in scrollView: UIScrollView, isPinching: Bool) {
         let isUserScrolling = scrollView.isDragging || scrollView.isDecelerating
-        guard context.coordinator.isPinching || !isUserScrolling else { return }
+        guard isPinching || !isUserScrolling else { return }
         let target = clampedOffset(contentOffset, in: scrollView)
         if abs(scrollView.contentOffset.x - target.x) > 0.5
             || abs(scrollView.contentOffset.y - target.y) > 0.5
