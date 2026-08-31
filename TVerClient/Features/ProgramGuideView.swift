@@ -774,6 +774,14 @@ private struct ProgramGuideDetailSheet: View {
                 libraryStore: libraryStore
             )
         }
+        .onAppear {
+            // ここを結んでおかないと、小窓の「元の画面に戻る」が AVKit へ false を
+            // 返し、小窓だけが消えて何も起きない。停止でも小窓が生き残る。
+            playbackController.bindPictureInPicture(pictureInPicture)
+        }
+        .onDisappear {
+            playbackController.unbindPictureInPicture(pictureInPicture)
+        }
     }
 
     /// 再生できるものが無い状態。再生以外の導線は残す。

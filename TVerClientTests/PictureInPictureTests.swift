@@ -632,6 +632,72 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertNil(abandonedLayer.player)
     }
 
+    func testFailedStartRemainsStartableFromTheButton() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+        coordinator.start()
+        driver.simulateFailure(NSError(domain: "PictureInPictureTests", code: 11))
+
+        // 一度失敗しただけでボタンが永久に押せなくなるのが、
+        // 「PiP が動かない」の正体だった。
+        XCTAssertTrue(coordinator.canStart)
+
+        coordinator.start()
+        XCTAssertEqual(driver.startCount, 2)
+        XCTAssertEqual(coordinator.state, .starting)
+    }
+
+    func testReadinessAfterFailureClearsTheStaleFailure() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+        coordinator.start()
+        driver.simulateFailure(NSError(domain: "PictureInPictureTests", code: 12))
+        XCTAssertNotNil(coordinator.errorMessage)
+
+        driver.updatePossible(true)
+
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertNil(coordinator.errorMessage)
+        XCTAssertTrue(coordinator.canStart)
+    }
+
+    func testReturningToForegroundClearsFailedState() async {
+        let notifications = NotificationCenter()
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver, notificationCenter: notifications)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+        coordinator.start()
+        driver.simulateFailure(NSError(domain: "PictureInPictureTests", code: 13))
+        XCTAssertNotNil(coordinator.lastFailure)
+
+        notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        await waitUntil("前面に戻ったら失敗の痕跡が消える") {
+            coordinator.state == .inactive && coordinator.lastFailure == nil
+        }
+        XCTAssertTrue(coordinator.canStart)
+    }
+
+    func testMissingSystemControllerDegradesInsteadOfCrashing() {
+        let coordinator = PictureInPictureCoordinator(
+            isSupported: { true },
+            driverFactory: { _ in nil }
+        )
+
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+
+        XCTAssertEqual(coordinator.availability, .unsupported)
+        XCTAssertFalse(coordinator.canStart)
+
+        coordinator.start()
+        XCTAssertEqual(coordinator.state, .failed(.unsupported))
+    }
+
     private func waitUntil(
         _ message: String,
         timeout: TimeInterval = 2,

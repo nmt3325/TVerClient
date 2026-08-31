@@ -99,9 +99,11 @@ final class AVPictureInPictureControllerDriver: NSObject, PictureInPictureContro
         set { controller.canStartPictureInPictureAutomaticallyFromInline = newValue }
     }
 
-    init(playerLayer: AVPlayerLayer) {
+    /// AVKit がコントローラを返さないことは実機で起きる。そこで落とすと
+    /// 再生画面自体が死ぬので、使えないことを返すだけにとどめる。
+    init?(playerLayer: AVPlayerLayer) {
         guard let controller = AVPictureInPictureController(playerLayer: playerLayer) else {
-            preconditionFailure("Picture in Picture controller could not be created")
+            return nil
         }
         self.controller = controller
         super.init()
@@ -172,7 +174,7 @@ extension AVPictureInPictureControllerDriver: @preconcurrency AVPictureInPicture
 
 @MainActor
 final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObject {
-    typealias DriverFactory = @MainActor (AVPlayerLayer) -> any PictureInPictureControllerDriving
+    typealias DriverFactory = @MainActor (AVPlayerLayer) -> (any PictureInPictureControllerDriving)?
 
     /// These values are updated synchronously because ownership decisions need
     /// an authoritative answer inside UIViewRepresentable lifecycle callbacks.
@@ -194,6 +196,9 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     private let unconfirmedStopTimeoutNanoseconds: UInt64
 
     private var driver: (any PictureInPictureControllerDriving)?
+    /// AVKit がコントローラを作れなかった事実は、可否の再計算で
+    /// 消してはいけない。消すと「ボタンは出るが永久に押せない」に戻る。
+    private var driverCreationFailed = false
     private var driverGeneration: UInt = 0
     private var transitionGeneration: UInt = 0
     private var desiredPictureInPictureActive = false
@@ -255,7 +260,19 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     }
 
     var isActive: Bool { state == .active }
-    var canStart: Bool { availability == .available && state == .inactive }
+
+    /// 一度失敗しただけでボタンを死なせてはいけない。`start()` は
+    /// 失敗状態からでも通るので、押せる条件もそれに合わせる。
+    var canStart: Bool {
+        guard availability == .available else { return false }
+        switch state {
+        case .inactive, .failed:
+            return true
+        case .starting, .active, .stopping:
+            return false
+        }
+    }
+
     var errorMessage: String? { lastFailure?.localizedDescription }
 
     /// True only for the exact source layer AVKit still needs. Besides active
@@ -359,7 +376,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     }
 
     func refreshAvailability() {
-        guard isSupported() else {
+        guard isSupported(), !driverCreationFailed else {
             setAvailability(.unsupported)
             return
         }
@@ -367,7 +384,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     }
 
     func start() {
-        guard isSupported() else {
+        guard isSupported(), !driverCreationFailed else {
             fail(with: .unsupported)
             return
         }
@@ -462,6 +479,9 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         setApplicationState(.active)
         automaticStartRequestedForCurrentBackground = false
         playbackWasActiveOnBackgroundEntry = false
+        // 背面での自動開始が弾かれた失敗は、前面へ戻った時点で意味を
+        // 失う。残すと赤い注意書きが出たままボタンも押せない。
+        clearFailedStateForRetry()
         reconcileAfterRetentionIntentEnds()
     }
 
@@ -496,11 +516,20 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         let newAvailability: PictureInPictureAvailability = possible ? .available : .unavailable
         setAvailability(newAvailability)
         if possible {
+            // 準備が整う前に押して失敗した状態を引きずらない。
+            clearFailedStateForRetry()
             cancelAutomaticReadinessWindow()
             requestAutomaticStartIfNeeded()
         } else if hasPendingAutomaticStartIntent {
             scheduleAutomaticReadinessWindowIfNeeded()
         }
+    }
+
+    /// 失敗の痕跡を畳んで、もう一度押せる状態に戻す。
+    private func clearFailedStateForRetry() {
+        guard case .failed = state else { return }
+        setLastFailure(nil)
+        setState(.inactive)
     }
 
     private func fail(with failure: PictureInPictureFailure) {
@@ -644,7 +673,15 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     private func installDriver(for playerLayer: AVPlayerLayer) {
         driverGeneration &+= 1
         let callbackDriverGeneration = driverGeneration
-        let newDriver = driverFactory(playerLayer)
+        driverCreationFailed = false
+        guard let newDriver = driverFactory(playerLayer) else {
+            // 作れないならこの端末では使えない。ボタンを出して
+            // 押しても何も起きない状態にするより、最初から黙っておく。
+            driver = nil
+            driverCreationFailed = true
+            setAvailability(.unsupported)
+            return
+        }
         let callbackDriverIdentifier = ObjectIdentifier(newDriver)
         driver = newDriver
         newDriver.canStartPictureInPictureAutomaticallyFromInline = startsAutomaticallyFromInline
@@ -689,6 +726,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         shouldDetachAfterTransition = false
         cancelledStartAwaitingCallback = false
         requiresFreshDriverBeforeNextStart = false
+        driverCreationFailed = false
         setLastFailure(nil)
         setState(.inactive)
         setAvailability(isSupported() ? .unavailable : .unsupported)

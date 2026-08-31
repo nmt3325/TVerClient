@@ -91,6 +91,10 @@ struct PlaybackView: View {
             // この画面が持っている調整役を再生側へ預ける。
             playbackController.bindPictureInPicture(pictureInPicture)
         }
+        .onDisappear {
+            // 画面を離れたら預けたものを返す。別の画面が預け直したあとなら何もしない。
+            playbackController.unbindPictureInPicture(pictureInPicture)
+        }
         .task(id: program.id) {
             libraryStore.recordRecentlyViewed(program)
             // 最小化して開き直しただけなら、最初からに戻さず続きを見せる。
