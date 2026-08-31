@@ -64,6 +64,53 @@ final class TVerSeriesAPITests: XCTestCase {
         XCTAssertEqual(seriesRequestCount, 2, "the middle request must use the fresh series cache")
     }
 
+    func testForcedSeriesRefreshRejectsStaleIfErrorFallback() async throws {
+        var seriesRequestCount = 0
+        SeriesAPIStubURLProtocol.handler = { request in
+            if request.httpMethod == "POST" {
+                return Self.response(
+                    for: request,
+                    json: #"{"code":0,"result":{"platform_uid":"series-uid","platform_token":"series-token"}}"#
+                )
+            }
+
+            seriesRequestCount += 1
+            if seriesRequestCount == 1 {
+                return Self.response(
+                    for: request,
+                    json: Self.seriesJSON,
+                    headers: ["ETag": #""series-v1""#]
+                )
+            }
+            return Self.response(
+                for: request,
+                statusCode: 503,
+                json: #"{"message":"temporary"}"#
+            )
+        }
+
+        let client = TVerAPIClient(
+            session: session,
+            cacheTTL: 0,
+            staleIfErrorTTL: 300
+        )
+        _ = try await client.fetchSeriesEpisodes(seriesID: "sr000001", forceRefresh: false)
+
+        do {
+            _ = try await client.fetchSeriesEpisodes(seriesID: "sr000001", forceRefresh: true)
+            XCTFail("a forced baseline must fail instead of accepting stale data")
+        } catch {
+            // Expected: the subscription remains unbaselined and can retry later.
+        }
+
+        let nonForcedFallback = try await client.fetchSeriesEpisodes(
+            seriesID: "sr000001",
+            forceRefresh: false
+        )
+        XCTAssertEqual(nonForcedFallback.map(\.id), ["ep-later", "ep-without-date"])
+        XCTAssertEqual(seriesRequestCount, 3, "ordinary stale-if-error behavior must remain intact")
+    }
+
     private static let seriesJSON = #"{"code":0,"result":{"contents":[{"contents":[{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"後の日付だがpayload先頭","seriesTitle":"シリーズ","description":"説明","broadcastDateLabel":"2月8日放送","endAt":1897257600,"thumbnailPath":"/images/later.jpg"}},{"type":"episode","content":{"id":"ep-without-date","seriesID":"sr000001","title":"日付なし","seriesTitle":"シリーズ","description":"説明","endAt":1897257600,"thumbnailPath":"/images/no-date.jpg"}},{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"重複は無視","seriesTitle":"シリーズ","broadcastDateLabel":"1月1日放送"}},{"type":"episode","content":{"id":"missing-title","seriesID":"sr000001"}}]}]}}"#
 
     private static func response(

@@ -17,10 +17,10 @@ enum DownloadNetworkStatus: String, Equatable, Sendable {
 /// Started lazily so a test that injects its own status closure never opens a
 /// real network path.
 @MainActor
-final class DownloadNetworkMonitor {
+final class DownloadNetworkMonitor: ObservableObject {
     static let shared = DownloadNetworkMonitor()
 
-    private(set) var status: DownloadNetworkStatus = .wifi
+    @Published private(set) var status: DownloadNetworkStatus = .wifi
 
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "dev.nmt3325.TVerClient.download-path")
