@@ -1,5 +1,6 @@
 import AVKit
 import SwiftUI
+import UIKit
 
 /// タブの識別子。選択状態を保存し、画面間の誘導を可能にするために必要。
 enum RootTab: String, Hashable {
@@ -16,10 +17,12 @@ enum RootTab: String, Hashable {
 /// 各タスクは自分の画面を直すが、このファイルは変更しない。
 @MainActor
 struct RootTabView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var playbackController = PlaybackController()
     @StateObject private var libraryStore = ProgramLibraryStore()
     @StateObject private var diagnosticLogStore = DiagnosticLogStore.shared
     @StateObject private var downloadCenter = DownloadCenter()
+    @StateObject private var seriesSubscriptions = SeriesSubscriptionStore(service: TVerAPIClient())
     @StateObject private var catchUpAvailability = CatchUpAvailabilityStore(lookup: TVerAPIClient())
     @StateObject private var areaStore = AreaStore(service: TVerAPIClient())
 
@@ -85,6 +88,7 @@ struct RootTabView: View {
         }
         .tint(DS.Palette.catchUp)
         .environmentObject(downloadCenter)
+        .environmentObject(seriesSubscriptions)
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -101,9 +105,33 @@ struct RootTabView: View {
         }
         .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
         .task {
+            // Download records must be restored before subscription discovery so
+            // an already queued or saved episode is never enqueued a second time.
             downloadCenter.restore()
+            seriesSubscriptions.restore()
             downloadCenter.refreshStorage()
+            await seriesSubscriptions.refreshAll(
+                downloads: downloadCenter,
+                forceRefresh: false
+            )
             await areaStore.refreshAreas()
+        }
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            Task {
+                await seriesSubscriptions.refreshAll(
+                    downloads: downloadCenter,
+                    forceRefresh: false
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.willTerminateNotification
+        )) { _ in
+            // Do not stop on ordinary backgrounding: PiP owns that transition.
+            // A real application termination must synchronously release audio,
+            // the current item, Now Playing state, observers, and PiP.
+            playbackController.stop()
         }
     }
 }
