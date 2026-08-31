@@ -23,9 +23,7 @@ struct ProgramGuideGrid: View {
     @State private var zoom = GuideZoom.defaultPointsPerMinute
     @State private var columns: [GuideColumnLayout] = []
     @State private var visibleWindow = GuideVisibleWindow.unbounded
-    @State private var pinchAnchorMinutes: CGFloat?
-    @State private var pinchStartPointsPerMinute = GuideZoom.defaultPointsPerMinute
-    @State private var isPinching = false
+    @State private var pinchSession: GuideZoomPinchSession?
     @State private var lastPrefetchKey = ""
 
     private var contentSize: CGSize {
@@ -63,7 +61,9 @@ struct ProgramGuideGrid: View {
                             onPinchChanged: { scale, focalY in
                                 updatePinch(scale: scale, focalY: focalY, viewportHeight: bodyHeight)
                             },
-                            onPinchEnded: endPinch
+                            onPinchEnded: { finishPinch(.ended) },
+                            onPinchCancelled: { finishPinch(.cancelled) },
+                            onPinchFailed: { finishPinch(.failed) }
                         ) {
                             ProgramGuideCanvas(
                                 columns: columns,
@@ -88,7 +88,7 @@ struct ProgramGuideGrid: View {
                     }
                 }
                 .onAppear {
-                    zoom = GuideZoom.clamp(pointsPerMinute)
+                    zoom = GuideZoomPreference.normalizedPointsPerMinute(pointsPerMinute)
                     rebuildLayout()
                     scrollToStartPosition(bodyHeight: bodyHeight)
                     updateVisibleWindow(viewportSize: viewportSize)
@@ -244,34 +244,41 @@ struct ProgramGuideGrid: View {
     // MARK: - Zoom
 
     private func beginPinch(contentY: CGFloat) {
-        isPinching = true
-        pinchStartPointsPerMinute = zoom
-        pinchAnchorMinutes = ProgramGuideMetrics.minutes(
-            atOffsetY: contentY,
-            pointsPerMinute: pinchStartPointsPerMinute
+        pinchSession = GuideZoomPinchSession(
+            pointsPerMinute: zoom,
+            contentOffset: contentOffset,
+            contentY: contentY
         )
     }
 
     private func updatePinch(scale: CGFloat, focalY: CGFloat, viewportHeight: CGFloat) {
-        guard isPinching, let anchorMinutes = pinchAnchorMinutes else { return }
-        // Quantised so a continuous gesture does not re-lay out the whole grid
-        // for every pixel the fingers travel.
-        let target = GuideZoom.clamp(((pinchStartPointsPerMinute * scale) / 0.02).rounded() * 0.02)
-        guard abs(target - zoom) > 0.001 else { return }
-        zoom = target
-        // 指を置いた位置の時刻をそのままにする。横方向は触らないので
-        // 見ていたチャンネルもずれない。
-        contentOffset.y = ProgramGuideMetrics.anchoredOffsetY(
-            anchorMinutes: anchorMinutes,
+        guard let pinchSession else { return }
+        // Quantised inside the pure session so a continuous gesture does not
+        // re-lay out the whole grid for every pixel the fingers travel.
+        let changed = pinchSession.changed(
+            scale: scale,
             focalY: focalY,
-            pointsPerMinute: target,
             viewportHeight: viewportHeight
         )
+        guard abs(changed.pointsPerMinute - zoom) > 0.001 else { return }
+        zoom = changed.pointsPerMinute
+        // The pure snapshot keeps both the time anchor and horizontal station.
+        contentOffset = changed.contentOffset
     }
 
-    private func endPinch() {
-        isPinching = false
-        pinchAnchorMinutes = nil
+    private func finishPinch(_ terminalState: GuideZoomPinchTerminalState) {
+        guard let pinchSession else { return }
+        let resolution = pinchSession.resolve(
+            terminalState,
+            currentSnapshot: GuideZoomPinchSnapshot(
+                pointsPerMinute: zoom,
+                contentOffset: contentOffset
+            )
+        )
+        self.pinchSession = nil
+        zoom = resolution.snapshot.pointsPerMinute
+        contentOffset = resolution.snapshot.contentOffset
+        guard resolution.shouldPersist else { return }
         guard abs(pointsPerMinute - zoom) > 0.0001 else { return }
         pointsPerMinute = zoom
     }
@@ -279,9 +286,9 @@ struct ProgramGuideGrid: View {
     /// Keeps the middle of the viewport steady when the zoom is changed from
     /// the toolbar rather than by a pinch.
     private func applyZoomChange(to newValue: CGFloat, bodyHeight: CGFloat) {
-        guard !isPinching else { return }
+        guard pinchSession == nil else { return }
         let previous = zoom
-        let updated = GuideZoom.clamp(newValue)
+        let updated = GuideZoomPreference.normalizedPointsPerMinute(newValue)
         guard abs(updated - previous) > 0.001 else { return }
         zoom = updated
         guard bodyHeight > 0 else { return }
@@ -681,6 +688,8 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
     var onPinchBegan: ((CGFloat, CGFloat) -> Void)?
     var onPinchChanged: ((CGFloat, CGFloat) -> Void)?
     var onPinchEnded: (() -> Void)?
+    var onPinchCancelled: (() -> Void)?
+    var onPinchFailed: (() -> Void)?
     @ViewBuilder let content: Content
 
     func makeCoordinator() -> Coordinator {
@@ -703,6 +712,7 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
             action: #selector(Coordinator.handlePinch(_:))
         )
         pinch.delegate = context.coordinator
+        context.coordinator.guidePinchGestureRecognizer = pinch
         scrollView.addGestureRecognizer(pinch)
 
         let hostedView = context.coordinator.hostingController.view!
@@ -742,6 +752,7 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
         var parent: SynchronizedGuideScrollView
         let hostingController: UIHostingController<Content>
         private(set) var isPinching = false
+        weak var guidePinchGestureRecognizer: UIPinchGestureRecognizer?
 
         init(parent: SynchronizedGuideScrollView) {
             self.parent = parent
@@ -761,29 +772,52 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
             let focalY = contentY - scrollView.contentOffset.y
             switch gesture.state {
             case .began:
-                isPinching = true
-                // Two-finger panning fights the zoom anchor, so the pan is
-                // parked for the length of the pinch.
-                scrollView.panGestureRecognizer.isEnabled = false
-                parent.onPinchBegan?(contentY, focalY)
+                beginPinch(in: scrollView) { parent.onPinchBegan?(contentY, focalY) }
             case .changed:
                 guard isPinching else { return }
                 parent.onPinchChanged?(gesture.scale, focalY)
-            case .ended, .cancelled, .failed:
-                guard isPinching else { return }
-                isPinching = false
-                scrollView.panGestureRecognizer.isEnabled = true
-                parent.onPinchEnded?()
+            case .ended:
+                completePinch(in: scrollView) { parent.onPinchEnded?() }
+            case .cancelled:
+                completePinch(in: scrollView) { parent.onPinchCancelled?() }
+            case .failed:
+                completePinch(in: scrollView) { parent.onPinchFailed?() }
             default:
                 break
             }
+        }
+
+        /// Parks the pan recognizer only while this custom pinch is active.
+        func beginPinch(in scrollView: UIScrollView, notify: () -> Void) {
+            isPinching = true
+            scrollView.panGestureRecognizer.isEnabled = false
+            notify()
+        }
+
+        /// Restores scrolling before notifying SwiftUI. The restoration is
+        /// unconditional for every recognizer terminal state, including a
+        /// terminal callback delivered after UIKit already cleared our flag.
+        func completePinch(in scrollView: UIScrollView, notify: () -> Void) {
+            let shouldNotify = isPinching
+            isPinching = false
+            scrollView.panGestureRecognizer.isEnabled = true
+            guard shouldNotify else { return }
+            notify()
         }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            true
+            guard
+                let guidePinchGestureRecognizer,
+                let scrollView = guidePinchGestureRecognizer.view as? UIScrollView
+            else { return false }
+            let panGestureRecognizer = scrollView.panGestureRecognizer
+            return (gestureRecognizer === guidePinchGestureRecognizer
+                && otherGestureRecognizer === panGestureRecognizer)
+                || (otherGestureRecognizer === guidePinchGestureRecognizer
+                    && gestureRecognizer === panGestureRecognizer)
         }
     }
 }

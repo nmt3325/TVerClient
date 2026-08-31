@@ -228,3 +228,124 @@ enum ProgramGuideMetrics {
         )
     }
 }
+
+/// Sanitises the persisted guide density before it reaches layout code.
+/// `UserDefaults` can retain values written by older builds (or non-finite
+/// values written by diagnostics), so every display pass uses this seam and
+/// writes a corrected value back when needed.
+enum GuideZoomPreference {
+    static func normalizedStoredValue(_ value: Double) -> Double {
+        guard value.isFinite else { return Double(GuideZoom.defaultPointsPerMinute) }
+        return Double(GuideZoom.clamp(CGFloat(value)))
+    }
+
+    static func normalizedPointsPerMinute(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return GuideZoom.defaultPointsPerMinute }
+        return GuideZoom.clamp(value)
+    }
+
+    static func requiresWriteBack(_ value: Double) -> Bool {
+        guard value.isFinite else { return true }
+        return abs(value - normalizedStoredValue(value)) > 0.0001
+    }
+}
+
+/// Pure presentation state shared by the toolbar and its deterministic tests.
+struct GuideZoomControlState: Equatable {
+    let isPresented: Bool
+    let pointsPerMinute: CGFloat
+
+    init(hasPrograms: Bool, usesAccessibleList: Bool, pointsPerMinute: CGFloat) {
+        isPresented = hasPrograms && !usesAccessibleList
+        self.pointsPerMinute = GuideZoomPreference.normalizedPointsPerMinute(pointsPerMinute)
+    }
+
+    var canZoomOut: Bool {
+        pointsPerMinute > GuideZoom.minimumPointsPerMinute + 0.01
+    }
+
+    var canZoomIn: Bool {
+        pointsPerMinute < GuideZoom.maximumPointsPerMinute - 0.01
+    }
+
+    var accessibilityValue: String {
+        let percentage = Int((pointsPerMinute / GuideZoom.defaultPointsPerMinute * 100).rounded())
+        return "表示密度、標準の\(percentage)パーセント"
+    }
+}
+
+enum GuideZoomPinchTerminalState: CaseIterable, Equatable {
+    case ended
+    case cancelled
+    case failed
+}
+
+struct GuideZoomPinchSnapshot: Equatable {
+    let pointsPerMinute: CGFloat
+    let contentOffset: CGPoint
+}
+
+struct GuideZoomPinchResolution: Equatable {
+    let snapshot: GuideZoomPinchSnapshot
+    let shouldPersist: Bool
+}
+
+/// Pure state for one recognizer cycle. Ending commits the current snapshot;
+/// cancellation and failure restore both the opening density and scroll offset.
+struct GuideZoomPinchSession: Equatable {
+    static let quantizationStep: CGFloat = 0.02
+
+    let initialSnapshot: GuideZoomPinchSnapshot
+    let anchorMinutes: CGFloat
+
+    init(pointsPerMinute: CGFloat, contentOffset: CGPoint, contentY: CGFloat) {
+        let normalizedZoom = GuideZoomPreference.normalizedPointsPerMinute(pointsPerMinute)
+        initialSnapshot = GuideZoomPinchSnapshot(
+            pointsPerMinute: normalizedZoom,
+            contentOffset: contentOffset
+        )
+        anchorMinutes = ProgramGuideMetrics.minutes(
+            atOffsetY: contentY,
+            pointsPerMinute: normalizedZoom
+        )
+    }
+
+    func changed(scale: CGFloat, focalY: CGFloat, viewportHeight: CGFloat) -> GuideZoomPinchSnapshot {
+        guard scale.isFinite, scale > 0 else { return initialSnapshot }
+        let step = Self.quantizationStep
+        let target = GuideZoomPreference.normalizedPointsPerMinute(
+            ((initialSnapshot.pointsPerMinute * scale) / step).rounded() * step
+        )
+        let offsetY = ProgramGuideMetrics.anchoredOffsetY(
+            anchorMinutes: anchorMinutes,
+            focalY: focalY,
+            pointsPerMinute: target,
+            viewportHeight: viewportHeight
+        )
+        return GuideZoomPinchSnapshot(
+            pointsPerMinute: target,
+            contentOffset: CGPoint(x: initialSnapshot.contentOffset.x, y: offsetY)
+        )
+    }
+
+    func resolve(
+        _ terminalState: GuideZoomPinchTerminalState,
+        currentSnapshot: GuideZoomPinchSnapshot
+    ) -> GuideZoomPinchResolution {
+        switch terminalState {
+        case .ended:
+            let normalized = GuideZoomPinchSnapshot(
+                pointsPerMinute: GuideZoomPreference.normalizedPointsPerMinute(
+                    currentSnapshot.pointsPerMinute
+                ),
+                contentOffset: currentSnapshot.contentOffset
+            )
+            return GuideZoomPinchResolution(
+                snapshot: normalized,
+                shouldPersist: abs(normalized.pointsPerMinute - initialSnapshot.pointsPerMinute) > 0.0001
+            )
+        case .cancelled, .failed:
+            return GuideZoomPinchResolution(snapshot: initialSnapshot, shouldPersist: false)
+        }
+    }
+}
