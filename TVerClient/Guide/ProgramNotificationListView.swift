@@ -29,6 +29,26 @@ final class ProgramNotificationListModel: ObservableObject {
         announce("通知を解除しました。")
     }
 
+    /// スワイプと編集モードから来る、位置指定の解除。
+    ///
+    /// 位置は表示順（`reservations` の並び）で届く。まとめて消えることがあるので、
+    /// 先に対象を取り出してから解除する。
+    func cancel(at offsets: IndexSet) async {
+        let targets = offsets.sorted().compactMap { index -> ProgramNotificationReservation? in
+            reservations.indices.contains(index) ? reservations[index] : nil
+        }
+        guard !targets.isEmpty else { return }
+        for target in targets {
+            await scheduler.cancel(identifier: target.identifier)
+        }
+        await reload()
+        announce(
+            targets.count > 1
+                ? "\(targets.count)件の通知を解除しました。"
+                : "通知を解除しました。"
+        )
+    }
+
     func cancelAll() async {
         let count = await scheduler.cancelAll()
         await reload()
@@ -73,6 +93,12 @@ struct ProgramNotificationListView: View {
                             minWidth: ProgramGuideMetrics.minimumTapTarget,
                             minHeight: ProgramGuideMetrics.minimumTapTarget
                         )
+                }
+                ToolbarItem(placement: ToolbarCompat.trailing) {
+                    EditButton()
+                        .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
+                        .disabled(model.reservations.isEmpty)
+                        .accessibilityHint("行ごとに通知を解除できるようにします")
                 }
                 ToolbarItem(placement: ToolbarCompat.trailing) {
                     Button(role: .destructive) {
@@ -152,6 +178,18 @@ struct ProgramNotificationListView: View {
             Section {
                 ForEach(model.reservations) { reservation in
                     row(for: reservation)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingCancellation = reservation
+                            } label: {
+                                Label("解除", systemImage: "bell.slash")
+                            }
+                        }
+                }
+                // 編集モードとスワイプ削除は、確認を挟まず即座に解除する。
+                // どちらも標準の取り消し操作で、押し間違いは通知を再予約すれば戻せる。
+                .onDelete { offsets in
+                    Task { await model.cancel(at: offsets) }
                 }
             } header: {
                 Text("\(model.reservations.count)件の予約")
