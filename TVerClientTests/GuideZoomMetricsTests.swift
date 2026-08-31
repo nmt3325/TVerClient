@@ -1,3 +1,5 @@
+import SwiftUI
+import UIKit
 import XCTest
 @testable import TVerClient
 
@@ -200,4 +202,227 @@ final class GuideZoomMetricsTests: XCTestCase {
             XCTAssertLessThanOrEqual(offset, maximum + 0.0001)
         }
     }
+
+    // MARK: - Persisted and toolbar state
+
+    func testPersistedZoomIsClampedAndNonFiniteValuesReturnToDefault() {
+        XCTAssertEqual(
+            GuideZoomPreference.normalizedStoredValue(0.1),
+            Double(GuideZoom.minimumPointsPerMinute),
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            GuideZoomPreference.normalizedStoredValue(99),
+            Double(GuideZoom.maximumPointsPerMinute),
+            accuracy: 0.0001
+        )
+        for corrupted in [Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertEqual(
+                GuideZoomPreference.normalizedStoredValue(corrupted),
+                Double(GuideZoom.defaultPointsPerMinute),
+                accuracy: 0.0001
+            )
+            XCTAssertTrue(GuideZoomPreference.requiresWriteBack(corrupted))
+        }
+        XCTAssertTrue(GuideZoomPreference.requiresWriteBack(0.1))
+        XCTAssertTrue(GuideZoomPreference.requiresWriteBack(99))
+        XCTAssertFalse(
+            GuideZoomPreference.requiresWriteBack(Double(GuideZoom.defaultPointsPerMinute))
+        )
+    }
+
+    func testZoomControlsOnlyAppearForAProgramGrid() {
+        XCTAssertTrue(
+            GuideZoomControlState(
+                hasPrograms: true,
+                usesAccessibleList: false,
+                pointsPerMinute: GuideZoom.defaultPointsPerMinute
+            ).isPresented
+        )
+        XCTAssertFalse(
+            GuideZoomControlState(
+                hasPrograms: false,
+                usesAccessibleList: false,
+                pointsPerMinute: GuideZoom.defaultPointsPerMinute
+            ).isPresented
+        )
+        XCTAssertFalse(
+            GuideZoomControlState(
+                hasPrograms: true,
+                usesAccessibleList: true,
+                pointsPerMinute: GuideZoom.defaultPointsPerMinute
+            ).isPresented
+        )
+    }
+
+    func testZoomControlsDisableAtTheirStops() {
+        let minimum = GuideZoomControlState(
+            hasPrograms: true,
+            usesAccessibleList: false,
+            pointsPerMinute: GuideZoom.minimumPointsPerMinute
+        )
+        XCTAssertFalse(minimum.canZoomOut)
+        XCTAssertTrue(minimum.canZoomIn)
+
+        let maximum = GuideZoomControlState(
+            hasPrograms: true,
+            usesAccessibleList: false,
+            pointsPerMinute: GuideZoom.maximumPointsPerMinute
+        )
+        XCTAssertTrue(maximum.canZoomOut)
+        XCTAssertFalse(maximum.canZoomIn)
+    }
+
+    func testZoomControlsExposeStableIdentifiersAndCurrentDensity() {
+        XCTAssertEqual(GuideAccessibilityIdentifier.zoomOut, "guide.zoom.out")
+        XCTAssertEqual(GuideAccessibilityIdentifier.zoomIn, "guide.zoom.in")
+        XCTAssertEqual(
+            GuideZoomControlState(
+                hasPrograms: true,
+                usesAccessibleList: false,
+                pointsPerMinute: GuideZoom.defaultPointsPerMinute
+            ).accessibilityValue,
+            "表示密度、標準の100パーセント"
+        )
+    }
+
+    // MARK: - Pinch lifecycle
+
+    func testPinchEndCommitsChangedZoomAndKeepsTheTimeAnchor() {
+        let initialOffset = CGPoint(x: 90, y: 400)
+        let focalY: CGFloat = 120
+        let session = GuideZoomPinchSession(
+            pointsPerMinute: 2,
+            contentOffset: initialOffset,
+            contentY: initialOffset.y + focalY
+        )
+
+        let changed = session.changed(scale: 1.5, focalY: focalY, viewportHeight: 600)
+        let resolution = session.resolve(.ended, currentSnapshot: changed)
+
+        XCTAssertEqual(changed.pointsPerMinute, 3, accuracy: 0.0001)
+        XCTAssertEqual(changed.contentOffset.x, initialOffset.x, accuracy: 0.0001)
+        XCTAssertEqual(
+            ProgramGuideMetrics.minutes(
+                atOffsetY: changed.contentOffset.y + focalY,
+                pointsPerMinute: changed.pointsPerMinute
+            ),
+            session.anchorMinutes,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(resolution.snapshot, changed)
+        XCTAssertTrue(resolution.shouldPersist)
+    }
+
+    func testPinchCancelAndFailureRestoreOpeningZoomAndOffset() {
+        let initialOffset = CGPoint(x: 75, y: 480)
+        let session = GuideZoomPinchSession(
+            pointsPerMinute: 2,
+            contentOffset: initialOffset,
+            contentY: 600
+        )
+        let changed = session.changed(scale: 1.6, focalY: 120, viewportHeight: 640)
+        XCTAssertNotEqual(changed, session.initialSnapshot)
+
+        for terminalState in [
+            GuideZoomPinchTerminalState.cancelled,
+            GuideZoomPinchTerminalState.failed,
+        ] {
+            let resolution = session.resolve(terminalState, currentSnapshot: changed)
+            XCTAssertEqual(resolution.snapshot, session.initialSnapshot)
+            XCTAssertFalse(resolution.shouldPersist)
+        }
+    }
+
+    @MainActor
+    func testPinchRecognizerOnlyArbitratesWithItsOwningScrollPan() {
+        let representable = SynchronizedGuideScrollView(
+            contentOffset: .constant(.zero),
+            contentSize: CGSize(width: 1_000, height: 2_000)
+        ) {
+            EmptyView()
+        }
+        let coordinator = representable.makeCoordinator()
+        let scrollView = UIScrollView()
+        let pinch = UIPinchGestureRecognizer()
+        let unrelatedTap = UITapGestureRecognizer()
+        scrollView.addGestureRecognizer(pinch)
+        scrollView.addGestureRecognizer(unrelatedTap)
+        coordinator.guidePinchGestureRecognizer = pinch
+
+        XCTAssertTrue(
+            coordinator.gestureRecognizer(
+                pinch,
+                shouldRecognizeSimultaneouslyWith: scrollView.panGestureRecognizer
+            )
+        )
+        XCTAssertFalse(
+            coordinator.gestureRecognizer(
+                pinch,
+                shouldRecognizeSimultaneouslyWith: unrelatedTap
+            )
+        )
+        XCTAssertFalse(
+            coordinator.gestureRecognizer(
+                pinch,
+                shouldRecognizeSimultaneouslyWith: UIScrollView().panGestureRecognizer
+            )
+        )
+    }
+
+    @MainActor
+    func testEveryPinchCompletionPathRestoresScrollPan() {
+        let representable = SynchronizedGuideScrollView(
+            contentOffset: .constant(.zero),
+            contentSize: CGSize(width: 1_000, height: 2_000)
+        ) {
+            EmptyView()
+        }
+        let coordinator = representable.makeCoordinator()
+        let scrollView = UIScrollView()
+
+        for terminalState in GuideZoomPinchTerminalState.allCases {
+            var didBegin = false
+            var completedState: GuideZoomPinchTerminalState?
+            coordinator.beginPinch(in: scrollView) { didBegin = true }
+            XCTAssertTrue(didBegin)
+            XCTAssertFalse(scrollView.panGestureRecognizer.isEnabled)
+
+            coordinator.completePinch(in: scrollView) { completedState = terminalState }
+            XCTAssertEqual(completedState, terminalState)
+            XCTAssertTrue(scrollView.panGestureRecognizer.isEnabled)
+            XCTAssertFalse(coordinator.isPinching)
+        }
+    }
+
+    func testPinchChangesStayInsideZoomAndContentBounds() {
+        let viewportHeight: CGFloat = 800
+        let session = GuideZoomPinchSession(
+            pointsPerMinute: GuideZoom.defaultPointsPerMinute,
+            contentOffset: CGPoint(x: 30, y: 1_600),
+            contentY: 1_700
+        )
+
+        let zoomedOut = session.changed(scale: 0.001, focalY: 100, viewportHeight: viewportHeight)
+        XCTAssertEqual(
+            zoomedOut.pointsPerMinute,
+            GuideZoom.minimumPointsPerMinute,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(zoomedOut.contentOffset.y, 0, accuracy: 0.0001)
+
+        let zoomedIn = session.changed(scale: 100, focalY: 100, viewportHeight: viewportHeight)
+        XCTAssertEqual(
+            zoomedIn.pointsPerMinute,
+            GuideZoom.maximumPointsPerMinute,
+            accuracy: 0.0001
+        )
+        XCTAssertGreaterThanOrEqual(zoomedIn.contentOffset.y, 0)
+        XCTAssertLessThanOrEqual(
+            zoomedIn.contentOffset.y,
+            ProgramGuideMetrics.dayHeight(pointsPerMinute: GuideZoom.maximumPointsPerMinute)
+                - viewportHeight
+        )
+    }
+
 }

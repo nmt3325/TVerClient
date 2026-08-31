@@ -209,27 +209,35 @@ struct ProgramGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
-                ToolbarItem(placement: ToolbarCompat.leading) {
-                    Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
-                        Image(systemName: "minus.magnifyingglass")
-                            .frame(
-                                width: ProgramGuideMetrics.minimumTapTarget,
-                                height: ProgramGuideMetrics.minimumTapTarget
-                            )
+                if zoomControlState.isPresented {
+                    ToolbarItem(placement: ToolbarCompat.leading) {
+                        Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                                .frame(
+                                    width: ProgramGuideMetrics.minimumTapTarget,
+                                    height: ProgramGuideMetrics.minimumTapTarget
+                                )
+                        }
+                        .disabled(!zoomControlState.canZoomOut)
+                        .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomOut)
+                        .accessibilityLabel("番組表を縮小")
+                        .accessibilityValue(zoomControlState.accessibilityValue)
+                        .accessibilityHint("1時間あたりの表示を縮めます")
                     }
-                    .disabled(!canZoomOut)
-                    .accessibilityLabel("番組表を縮小")
-                }
-                ToolbarItem(placement: ToolbarCompat.leading) {
-                    Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
-                        Image(systemName: "plus.magnifyingglass")
-                            .frame(
-                                width: ProgramGuideMetrics.minimumTapTarget,
-                                height: ProgramGuideMetrics.minimumTapTarget
-                            )
+                    ToolbarItem(placement: ToolbarCompat.leading) {
+                        Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                                .frame(
+                                    width: ProgramGuideMetrics.minimumTapTarget,
+                                    height: ProgramGuideMetrics.minimumTapTarget
+                                )
+                        }
+                        .disabled(!zoomControlState.canZoomIn)
+                        .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomIn)
+                        .accessibilityLabel("番組表を拡大")
+                        .accessibilityValue(zoomControlState.accessibilityValue)
+                        .accessibilityHint("1時間あたりの表示を広げます")
                     }
-                    .disabled(!canZoomIn)
-                    .accessibilityLabel("番組表を拡大")
                 }
                 ToolbarItem(placement: ToolbarCompat.trailing) { channelFilterMenu }
                 ToolbarItem(placement: ToolbarCompat.trailing) { notificationListButton }
@@ -246,6 +254,7 @@ struct ProgramGuideView: View {
                 }
             }
         }
+        .onAppear(perform: normalizeStoredPointsPerMinute)
         .task { await viewModel.loadIfNeeded() }
         .onChange(of: viewModel.guide) { guide in
             let dates = GuideBroadcastAxis.dates(in: guide)
@@ -331,19 +340,33 @@ struct ProgramGuideView: View {
 
     /// Zoom of the grid, in points per broadcast minute.
     private var pointsPerMinute: CGFloat {
-        GuideZoom.clamp(CGFloat(storedPointsPerMinute))
+        GuideZoomPreference.normalizedPointsPerMinute(CGFloat(storedPointsPerMinute))
     }
 
     private var pointsPerMinuteBinding: Binding<CGFloat> {
         Binding(
-            get: { GuideZoom.clamp(CGFloat(storedPointsPerMinute)) },
-            set: { storedPointsPerMinute = Double(GuideZoom.clamp($0)) }
+            get: {
+                GuideZoomPreference.normalizedPointsPerMinute(CGFloat(storedPointsPerMinute))
+            },
+            set: {
+                storedPointsPerMinute = GuideZoomPreference.normalizedStoredValue(Double($0))
+            }
         )
     }
 
-    private var canZoomIn: Bool { pointsPerMinute < GuideZoom.maximumPointsPerMinute - 0.01 }
+    private var zoomControlState: GuideZoomControlState {
+        GuideZoomControlState(
+            hasPrograms: hasVisibleProgramsForSelectedDate,
+            usesAccessibleList: usesAccessibleList,
+            pointsPerMinute: pointsPerMinute
+        )
+    }
 
-    private var canZoomOut: Bool { pointsPerMinute > GuideZoom.minimumPointsPerMinute + 0.01 }
+    private var hasVisibleProgramsForSelectedDate: Bool {
+        visibleGuide.contains { item in
+            !GuideBroadcastAxis.programs(item.programs, on: selectedDate).isEmpty
+        }
+    }
 
     private var hiddenChannelIDs: Set<String> {
         Set(hiddenChannelIDsText.split(separator: "\n").map(String.init))
@@ -408,9 +431,14 @@ struct ProgramGuideView: View {
         .accessibilityHint("予約した放送開始通知を確認して解除します")
     }
 
+    private func normalizeStoredPointsPerMinute() {
+        guard GuideZoomPreference.requiresWriteBack(storedPointsPerMinute) else { return }
+        storedPointsPerMinute = GuideZoomPreference.normalizedStoredValue(storedPointsPerMinute)
+    }
+
     private func zoom(to value: CGFloat) {
         withAnimation(.easeInOut(duration: 0.18)) {
-            storedPointsPerMinute = Double(GuideZoom.clamp(value))
+            storedPointsPerMinute = GuideZoomPreference.normalizedStoredValue(Double(value))
         }
     }
 
@@ -1143,6 +1171,8 @@ private struct ProgramGuideDetailSheet: View {
 }
 
 enum GuideAccessibilityIdentifier {
+    static let zoomOut = "guide.zoom.out"
+    static let zoomIn = "guide.zoom.in"
     static let playButton = "guide.play.button"
     static let catchUpNotFound = "guide.catchup.notfound"
     static let catchUpBadge = "guide.catchup.badge"
