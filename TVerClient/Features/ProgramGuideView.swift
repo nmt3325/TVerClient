@@ -768,11 +768,14 @@ private struct ProgramGuideDetailSheet: View {
             }
         }
         .sheet(item: $catchUpPlayback) { program in
-            PlaybackView(
-                program: program,
-                playbackController: playbackController,
-                libraryStore: libraryStore
-            )
+            // 視聴画面は自前のバーを持たないので、シートで出すときはここで包む。
+            NavigationStack {
+                PlaybackView(
+                    program: program,
+                    playbackController: playbackController,
+                    libraryStore: libraryStore
+                )
+            }
         }
         .onAppear {
             // ここを結んでおかないと、小窓の「元の画面に戻る」が AVKit へ false を

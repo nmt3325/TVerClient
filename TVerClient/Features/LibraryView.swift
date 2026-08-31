@@ -256,16 +256,13 @@ struct LibraryView: View {
     }
 
     private func playbackDestination(for program: TVerProgram) -> some View {
-        // `PlaybackView` は自前の `NavigationStack` を持つ（t3 所有）。push 先に
-        // そのまま置くとナビゲーションバーが二段になるので、外側を隠して内側の
-        // 「停止」「最小化」だけを残す。t3 側が自前の `NavigationStack` を外したら、
-        // この 1 行も同時に外すこと。
+        // 視聴画面はこの NavigationStack にそのまま積む。入れ子にすると
+        // バーが二段になるだけでなく、push 直後に落ちることがある。
         PlaybackView(
             program: program,
             playbackController: playbackController,
             libraryStore: libraryStore
         )
-        .toolbar(.hidden, for: .navigationBar)
         .onAppear {
             DiagnosticLogStore.shared.record(
                 .info,

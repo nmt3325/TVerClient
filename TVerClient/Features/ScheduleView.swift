@@ -355,15 +355,15 @@ struct ScheduleView: View {
         }
     }
 
-    /// 視聴画面は自前の NavigationStack とバーを持つ。押し出した先で外側の
-    /// バーまで出すと2段になるので、そちらは隠す。畳むのは「最小化」が行う。
+    /// 視聴画面はこのタブの NavigationStack にそのまま積む。以前は視聴画面が
+    /// 自前の NavigationStack を持っていたため push 先で入れ子になり、検索欄を
+    /// 持つこのタブでは再生に入ろうとした瞬間に落ちていた。
     private func playbackDestination(for program: TVerProgram) -> some View {
         PlaybackView(
             program: program,
             playbackController: playbackController,
             libraryStore: libraryStore
         )
-        .toolbar(.hidden, for: .navigationBar)
     }
 
     @ViewBuilder

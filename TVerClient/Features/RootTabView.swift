@@ -14,7 +14,7 @@ enum RootTab: String, Hashable {
 /// アプリの土台。
 ///
 /// オーケストレータ契約。タブ選択の保持と、再生中バーの常設はここが持つ。
-/// 各タスクは自分の画面を直すが、このファイルは変更しない。
+/// 再生中バーはタブバーを覆わないよう、各タブの中身へ載せる。
 @MainActor
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -44,41 +44,64 @@ struct RootTabView: View {
         )
     }
 
+    /// 再生中バーはタブバーの上へ載せる。TabView 自体に付けると、バーが下部
+    /// タブと同じ場所に重なってタブを覆ってしまうため、各タブの中身へ付ける。
+    private func withPresenceBar<Content: View>(_ content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // 再生シートを閉じても、止める場所と戻る場所が必ず画面に残る。
+                if let presence = playbackController.presence {
+                    PlaybackPresenceBar(
+                        presence: presence,
+                        onToggle: { playbackController.togglePlayback() },
+                        onStop: { playbackController.stop() },
+                        onOpen: {
+                            // タブを合わせたうえで、そのタブに再生画面を出し直させる。
+                            selection.wrappedValue = presence.isLive ? .live : .catchUp
+                            playbackController.requestPlayerPresentation()
+                        }
+                    )
+                    .transition(.move(edge: .bottom))
+                }
+            }
+            .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
+    }
+
     var body: some View {
         TabView(selection: selection) {
-            ScheduleView(
+            withPresenceBar(ScheduleView(
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
                 libraryStore: libraryStore
-            )
+            ))
             .tabItem {
                 Label("見逃し", systemImage: "play.rectangle.on.rectangle")
             }
             .tag(RootTab.catchUp)
 
-            ProgramGuideView(
+            withPresenceBar(ProgramGuideView(
                 viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
                 libraryStore: libraryStore
-            )
+            ))
             .tabItem {
                 Label("番組表", systemImage: "calendar.day.timeline.left")
             }
             .tag(RootTab.guide)
 
-            LiveView(
+            withPresenceBar(LiveView(
                 viewModel: LiveViewModel(service: TVerAPIClient()),
                 playbackController: playbackController
-            )
+            ))
             .tabItem {
                 Label("ライブ", systemImage: "dot.radiowaves.left.and.right")
             }
             .tag(RootTab.live)
 
-            LibraryView(
+            withPresenceBar(LibraryView(
                 libraryStore: libraryStore,
                 playbackController: playbackController
-            )
+            ))
             .tabItem {
                 Label("ライブラリ", systemImage: "rectangle.stack")
             }
@@ -91,23 +114,6 @@ struct RootTabView: View {
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)
         .environmentObject(tabReselection)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            // 再生シートを閉じても、止める場所と戻る場所が必ず画面に残る。
-            if let presence = playbackController.presence {
-                PlaybackPresenceBar(
-                    presence: presence,
-                    onToggle: { playbackController.togglePlayback() },
-                    onStop: { playbackController.stop() },
-                    onOpen: {
-                        // タブを合わせたうえで、そのタブに再生画面を出し直させる。
-                        selection.wrappedValue = presence.isLive ? .live : .catchUp
-                        playbackController.requestPlayerPresentation()
-                    }
-                )
-                .transition(.move(edge: .bottom))
-            }
-        }
-        .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
         .task {
             seriesSubscriptions.configureAutomaticDownloads(downloadCenter)
             DownloadNetworkMonitor.shared.start()

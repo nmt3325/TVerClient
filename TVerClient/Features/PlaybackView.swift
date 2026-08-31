@@ -40,48 +40,48 @@ struct PlaybackView: View {
         Array(libraryStore.recentPrograms.filter { $0.id != program.id }.prefix(6))
     }
 
+    /// この画面は自分で NavigationStack を持たない。push 先で入れ子になると
+    /// 検索欄を持つタブでは再生に入った瞬間に落ちる。シートで出す側が包む。
     var body: some View {
-        NavigationStack {
-            GeometryReader { proxy in
-                VStack(spacing: 0) {
-                    stage
-                        .frame(width: proxy.size.width, height: stageHeight(in: proxy.size))
-                    // 横向きでは映像とコントロールだけを残す。番組情報を積むと、
-                    // その分だけ操作系が画面の下へ押し出されて届かなくなる。
-                    if !isCompactHeight { details }
-                }
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                stage
+                    .frame(width: proxy.size.width, height: stageHeight(in: proxy.size))
+                // 横向きでは映像とコントロールだけを残す。番組情報を積むと、
+                // その分だけ操作系が画面の下へ押し出されて届かなくなる。
+                if !isCompactHeight { details }
             }
-            .background(Color(uiColor: .systemBackground))
-            .navigationTitle("視聴")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: ToolbarCompat.leading) {
-                    DownloadButton(program: program)
-                }
-                ToolbarItem(placement: ToolbarCompat.trailing) {
-                    // 「閉じる」だけだと停止と読み違えられる。止める操作と画面を
-                    // 畳む操作を、名前のとおりに別々に置く。
-                    HStack(spacing: DS.Spacing.xs) {
-                        Button {
-                            playbackController.stop()
-                            dismiss()
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .frame(
-                                    minWidth: DS.Size.minimumTapTarget,
-                                    minHeight: DS.Size.minimumTapTarget
-                                )
-                        }
-                        .accessibilityLabel("再生を停止して閉じる")
-
-                        Button("最小化") { dismiss() }
+        }
+        .background(Color(uiColor: .systemBackground))
+        .navigationTitle("視聴")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: ToolbarCompat.leading) {
+                DownloadButton(program: program)
+            }
+            ToolbarItem(placement: ToolbarCompat.trailing) {
+                // 「閉じる」だけだと停止と読み違えられる。止める操作と画面を
+                // 畳む操作を、名前のとおりに別々に置く。
+                HStack(spacing: DS.Spacing.xs) {
+                    Button {
+                        playbackController.stop()
+                        dismiss()
+                    } label: {
+                        Image(systemName: "stop.fill")
                             .frame(
                                 minWidth: DS.Size.minimumTapTarget,
                                 minHeight: DS.Size.minimumTapTarget
                             )
-                            .accessibilityLabel("最小化")
-                            .accessibilityHint("再生は続きます。画面下のバーから停止できます")
                     }
+                    .accessibilityLabel("再生を停止して閉じる")
+
+                    Button("最小化") { dismiss() }
+                        .frame(
+                            minWidth: DS.Size.minimumTapTarget,
+                            minHeight: DS.Size.minimumTapTarget
+                        )
+                        .accessibilityLabel("最小化")
+                        .accessibilityHint("再生は続きます。画面下のバーから停止できます")
                 }
             }
         }
