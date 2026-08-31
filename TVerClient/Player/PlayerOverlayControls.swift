@@ -51,6 +51,9 @@ struct PlayerOverlayControls: View {
     var isFullScreen: Bool = false
     /// 中断の告知を映像の上に重ねるかどうか。
     var showsContinuityNotice: Bool = true
+    /// 画面の安全領域。ノッチやホームインジケータの上に操作系を
+    /// 寄せないよう、固定の余白ではなくこれを見て詰める。
+    var safeAreaInsets = EdgeInsets()
     var onToggleFullScreen: (() -> Void)?
     var onBackgroundSingleTap: () -> Void = {}
     var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
@@ -92,8 +95,20 @@ struct PlayerOverlayControls: View {
                 .accessibilitySortPriority(1)
         }
         .accessibilityElement(children: .contain)
-        .padding(.horizontal, isFullScreen ? DS.Spacing.xl : DS.Spacing.m)
-        .padding(.vertical, DS.Spacing.s)
+        .padding(chromeInsets)
+    }
+
+    /// 固定の余白と安全領域の大きいほうを採る。横向きではノッチ側だけ
+    /// 余白が増えるので、左右で違う値になるのが正しい。
+    private var chromeInsets: EdgeInsets {
+        let horizontal = isFullScreen ? DS.Spacing.xl : DS.Spacing.m
+        let vertical = DS.Spacing.s
+        return EdgeInsets(
+            top: max(vertical, safeAreaInsets.top),
+            leading: max(horizontal, safeAreaInsets.leading + DS.Spacing.xs),
+            bottom: max(vertical, safeAreaInsets.bottom),
+            trailing: max(horizontal, safeAreaInsets.trailing + DS.Spacing.xs)
+        )
     }
 
     // MARK: - Top
@@ -346,7 +361,20 @@ struct PlayerOverlayControls: View {
         }
         .font(.caption2.monospacedDigit())
         .foregroundStyle(.white.opacity(0.8))
-        .accessibilityHidden(true)
+        // 残り時間は「あと何分見られるか」の判断に必要なので、読み上げから
+        // 外さない。数字の羅列は聴いて分からないので、日本語に開いた文にする。
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(timeAccessibilityLabel)
+    }
+
+    /// 「1分30秒経過、残り58分30秒」。尺が未定のときは経過だけを読む。
+    private var timeAccessibilityLabel: String {
+        let elapsed = playbackController.currentTime
+        let elapsedText = "\(ScrubberMath.spokenTime(elapsed))経過"
+        guard let duration = playbackController.duration, duration.isFinite, duration > 0 else {
+            return elapsedText
+        }
+        return "\(elapsedText)、残り\(ScrubberMath.spokenTime(max(0, duration - elapsed)))"
     }
 
     private var liveLabel: some View {

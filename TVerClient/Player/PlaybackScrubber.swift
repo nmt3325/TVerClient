@@ -166,8 +166,10 @@ final class PlaybackScrubberInteractionView: UIView {
         deferredCancellationTask = nil
     }
 
+    /// 触覚は「動きを減らす」とは別の軸。ReduceMotion で止めると、視覚
+    /// 効果を抑えたいだけの人から精密スクラブの手応えまで失われる。触覚
+    /// 自体の可否（システムの触覚設定や非対応端末）は UIKit 側が判断する。
     private func impact() {
-        guard !UIAccessibility.isReduceMotionEnabled else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 }
@@ -240,8 +242,10 @@ struct PlaybackScrubber: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var displayTime: TimeInterval { isScrubbing ? scrubTime : elapsed }
-    private var trackHeight: CGFloat { isScrubbing ? 8 : 4 }
-    private var knobSize: CGFloat { isScrubbing ? 18 : 12 }
+    /// 標準スライダーに寄せた寸法。掴むとトラックもノブも太くなるので、
+    /// 指の下でも今の位置が見える。ヒット枠の 44pt は変えない。
+    private var trackHeight: CGFloat { isScrubbing ? 10 : 6 }
+    private var knobSize: CGFloat { isScrubbing ? 22 : 14 }
 
     var body: some View {
         GeometryReader { proxy in
@@ -299,7 +303,8 @@ struct PlaybackScrubber: View {
         .accessibilityLabel("再生位置")
         .accessibilityValue(ScrubberMath.accessibilityValue(elapsed: displayTime, duration: duration))
         .accessibilityHint("上下に指をずらすと精密に操作できます")
-        .accessibilityAddTraits(.isButton)
+        // .isButton を付けると「ボタン」と読まれ、標準スライダーと同じ
+        // 調整可能な要素として扱われない。±10 秒は調整アクションのままにする。
         .accessibilityAdjustableAction { direction in
             guard isEnabled else { return }
             switch direction {

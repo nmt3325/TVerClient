@@ -51,6 +51,12 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var playbackSpeed: PlaybackSpeed = .normal
     @Published private(set) var subtitleOptions: [MediaSelectionEntry] = []
     @Published private(set) var audioOptions: [MediaSelectionEntry] = []
+    /// 「再生画面をもう一度出して」という要求の通し番。
+    ///
+    /// Picture in Picture の復帰ボタンやミニプレイヤーは、自分では画面を
+    /// 提示できない。ここを進めることだけを共通の合図にして、何を出すかは
+    /// 各タブのルート画面が `onPlayerPresentationRequest` で決める。
+    @Published private(set) var presentationRequestToken = 0
 
     let player: AVPlayer
     private let resolver: any TVerStreamResolving
@@ -146,12 +152,24 @@ final class PlaybackController: ObservableObject {
     /// 画面が持っている Picture in Picture を預かる。`stop()` は必ずこれも畳む。
     func bindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
         pictureInPicture = coordinator
+        // 小窓の「元の画面に戻る」は、このフックを繋いでおかないと AVKit へ
+        // false を返し、何も起きないまま小窓だけが消える。
+        coordinator.restoresUserInterface = { [weak self] in
+            self?.requestPlayerPresentation()
+        }
     }
 
     /// 預かっていたものを返す。すでに別の画面のものへ差し替わっているときは何もしない。
     func unbindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
         guard pictureInPicture === coordinator else { return }
+        coordinator.restoresUserInterface = nil
         pictureInPicture = nil
+    }
+
+    /// 再生画面の提示を願い出る。誰も拾わなければ何も起きないし、
+    /// 再生の状態をこれで変えてはいけない。
+    func requestPlayerPresentation() {
+        presentationRequestToken += 1
     }
 
     func play(_ program: TVerProgram) async {
