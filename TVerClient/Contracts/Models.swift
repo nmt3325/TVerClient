@@ -7,6 +7,11 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
     let seriesTitle: String
     let description: String
     let broadcastLabel: String
+    /// TVer の episode `startAt` から得た配信開始時刻。
+    ///
+    /// 新着自動ダウンロードは、この値が有効かつ購読時刻より後の場合だけ行う。
+    /// 欠落・不正な時刻は過去話の一括取得を避けるため、新着とはみなさない。
+    let publishedAt: Date?
     /// 画面に出す配信期限の文言。年を含まない。
     let availableUntil: String?
     /// 配信期限そのもの。
@@ -24,6 +29,7 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
         seriesTitle: String,
         description: String,
         broadcastLabel: String,
+        publishedAt: Date? = nil,
         availableUntil: String?,
         availableUntilAt: Date? = nil,
         thumbnailURL: URL?
@@ -34,6 +40,7 @@ struct TVerProgram: Identifiable, Codable, Hashable, Sendable {
         self.seriesTitle = seriesTitle
         self.description = description
         self.broadcastLabel = broadcastLabel
+        self.publishedAt = publishedAt
         self.availableUntil = availableUntil
         self.availableUntilAt = availableUntilAt
         self.thumbnailURL = thumbnailURL

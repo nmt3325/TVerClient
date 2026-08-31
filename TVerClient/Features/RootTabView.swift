@@ -105,6 +105,7 @@ struct RootTabView: View {
         }
         .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
         .task {
+            seriesSubscriptions.configureAutomaticDownloads(downloadCenter)
             DownloadNetworkMonitor.shared.start()
             // Download records must be restored before subscription discovery so
             // an already queued or saved episode is never enqueued a second time.
@@ -127,7 +128,12 @@ struct RootTabView: View {
             }
         }
         .onReceive(DownloadNetworkMonitor.shared.$status) { status in
-            seriesSubscriptions.networkStatusDidChange(status, downloads: downloadCenter)
+            Task {
+                await seriesSubscriptions.networkStatusDidChange(
+                    status,
+                    downloads: downloadCenter
+                )
+            }
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.willTerminateNotification

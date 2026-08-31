@@ -57,6 +57,8 @@ final class TVerSeriesAPITests: XCTestCase {
 
         XCTAssertEqual(first.map(\.id), ["ep-later", "ep-without-date"])
         XCTAssertEqual(first.map(\.seriesID), ["sr000001", "sr000001"])
+        XCTAssertEqual(first.first?.publishedAt, Date(timeIntervalSince1970: 1_896_652_800))
+        XCTAssertNil(first.last?.publishedAt)
         XCTAssertEqual(first.last?.broadcastLabel, "")
         XCTAssertEqual(first, cached)
         XCTAssertEqual(first, revalidated)
@@ -111,7 +113,54 @@ final class TVerSeriesAPITests: XCTestCase {
         XCTAssertEqual(seriesRequestCount, 3, "ordinary stale-if-error behavior must remain intact")
     }
 
-    private static let seriesJSON = #"{"code":0,"result":{"contents":[{"contents":[{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"後の日付だがpayload先頭","seriesTitle":"シリーズ","description":"説明","broadcastDateLabel":"2月8日放送","endAt":1897257600,"thumbnailPath":"/images/later.jpg"}},{"type":"episode","content":{"id":"ep-without-date","seriesID":"sr000001","title":"日付なし","seriesTitle":"シリーズ","description":"説明","endAt":1897257600,"thumbnailPath":"/images/no-date.jpg"}},{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"重複は無視","seriesTitle":"シリーズ","broadcastDateLabel":"1月1日放送"}},{"type":"episode","content":{"id":"missing-title","seriesID":"sr000001"}}]}]}}"#
+
+    func testBrowserCredentialFailureUsesValidDiskSeriesCacheOnlyWhenNonForced() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TVerSeriesAPITests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = "platform-api.tver.jp/service/api/v1/callSeriesEpisodes/sr000001"
+        let writer = TVerResponseCache(directory: directory, currentDate: { storedAt })
+        await writer.store(
+            data: Data(Self.seriesJSON.utf8),
+            for: key,
+            at: storedAt,
+            eTag: #""series-disk""#,
+            lastModified: nil
+        )
+
+        var browserRequestCount = 0
+        SeriesAPIStubURLProtocol.handler = { request in
+            browserRequestCount += 1
+            XCTAssertEqual(request.httpMethod, "POST")
+            throw URLError(.notConnectedToInternet)
+        }
+        let now = storedAt.addingTimeInterval(60)
+        let reader = TVerResponseCache(directory: directory, currentDate: { now })
+        let client = TVerAPIClient(
+            session: session,
+            responseCache: reader,
+            offlineFallbackTTL: 300,
+            dateProvider: { now }
+        )
+
+        let fallback = try await client.fetchSeriesEpisodes(
+            seriesID: "sr000001",
+            forceRefresh: false
+        )
+        XCTAssertEqual(fallback.map(\.id), ["ep-later", "ep-without-date"])
+        XCTAssertEqual(fallback.first?.publishedAt, Date(timeIntervalSince1970: 1_896_652_800))
+
+        do {
+            _ = try await client.fetchSeriesEpisodes(seriesID: "sr000001", forceRefresh: true)
+            XCTFail("a forced initial baseline must reject the disk fallback")
+        } catch {
+            // Expected: forced baselines require a fresh credentialed response.
+        }
+        XCTAssertEqual(browserRequestCount, 2)
+    }
+
+    private static let seriesJSON = #"{"code":0,"result":{"contents":[{"contents":[{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"後の日付だがpayload先頭","seriesTitle":"シリーズ","description":"説明","broadcastDateLabel":"2月8日放送","startAt":1896652800,"endAt":1897257600,"thumbnailPath":"/images/later.jpg"}},{"type":"episode","content":{"id":"ep-without-date","seriesID":"sr000001","title":"日付なし","seriesTitle":"シリーズ","description":"説明","startAt":"invalid","endAt":1897257600,"thumbnailPath":"/images/no-date.jpg"}},{"type":"episode","content":{"id":"ep-later","seriesID":"sr000001","title":"重複は無視","seriesTitle":"シリーズ","broadcastDateLabel":"1月1日放送"}},{"type":"episode","content":{"id":"missing-title","seriesID":"sr000001"}}]}]}}"#
 
     private static func response(
         for request: URLRequest,
