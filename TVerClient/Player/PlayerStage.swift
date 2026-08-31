@@ -117,6 +117,9 @@ struct PlayerStage: View {
     var supportsSeeking: Bool = true
     var isFullScreen: Bool = false
     var isActiveSurface: Bool = true
+    /// Interaction-only hosts can omit AVKit ownership while still rendering
+    /// the exact production chrome hierarchy.
+    var rendersVideoLayer: Bool = true
     /// 中断の告知を映像の上に出すかどうか。縦向きの埋め込みプレイヤーは
     /// 映像が小さいので、下の番組情報側に出したほうが読める。
     var showsContinuityNotice: Bool = true
@@ -130,15 +133,17 @@ struct PlayerStage: View {
         GeometryReader { proxy in
             ZStack {
                 Color.black
-                PlayerLayerView(
-                    player: playbackController.player,
-                    pictureInPicture: pictureInPicture,
-                    videoGravity: model.videoGravity,
-                    isActiveSurface: isActiveSurface,
-                    playbackIsActive: playbackController.isPlaying
-                )
-                .accessibilityElement()
-                .accessibilityLabel(accessibilityLabel)
+                if rendersVideoLayer {
+                    PlayerLayerView(
+                        player: playbackController.player,
+                        pictureInPicture: pictureInPicture,
+                        videoGravity: model.videoGravity,
+                        isActiveSurface: isActiveSurface,
+                        playbackIsActive: playbackController.isPlaying
+                    )
+                    .accessibilityElement()
+                    .accessibilityLabel(accessibilityLabel)
+                }
 
                 // When chrome is hidden this plane owns the whole video. When
                 // chrome is visible, the equivalent plane inside
@@ -186,13 +191,22 @@ struct PlayerStage: View {
         }
         .background(Color.black)
         .task(id: playbackController.isLoading) { await updateSpinner() }
-        .onAppear { syncAutoHideSuspension() }
+        .task(id: shouldSuspendAutoHide) {
+            // A lifecycle callback runs inside SwiftUI's graph update. Yield
+            // before publishing through the observed chrome model so the
+            // current transaction can finish first.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            syncAutoHideSuspension(shouldSuspend: shouldSuspendAutoHide)
+        }
         // 掴んだまま画面が閉じると指を離した合図が来ない。同じモデルで開き直したときに
         // 自動非表示が止まったままにならないよう、ここでも必ず落とす。
-        .onDisappear { model.endHeldInteraction() }
-        .onChange(of: playbackController.isPlaying) { _ in syncAutoHideSuspension() }
-        .onChange(of: isVoiceOverRunning) { _ in syncAutoHideSuspension() }
-        .onChange(of: playbackController.continuityNotice) { _ in syncAutoHideSuspension() }
+        .onDisappear {
+            Task { @MainActor [weak model] in
+                await Task.yield()
+                model?.endHeldInteraction()
+            }
+        }
     }
 
     /// A double tap on the left or right half skips, and repeated taps stack
@@ -216,10 +230,13 @@ struct PlayerStage: View {
     /// Auto hide is wrong while paused: the controls are the only affordance
     /// left. VoiceOver users likewise need them to stay on screen, and a
     /// continuity notice has to stay readable until it is acted on.
-    private func syncAutoHideSuspension() {
-        let shouldSuspend = !playbackController.isPlaying
+    private var shouldSuspendAutoHide: Bool {
+        !playbackController.isPlaying
             || isVoiceOverRunning
             || playbackController.continuityNotice != nil
+    }
+
+    private func syncAutoHideSuspension(shouldSuspend: Bool) {
         if model.isAutoHideSuspended != shouldSuspend {
             model.isAutoHideSuspended = shouldSuspend
         }
@@ -228,6 +245,8 @@ struct PlayerStage: View {
 
     /// Only show a spinner once loading actually feels slow.
     private func updateSpinner() async {
+        await Task.yield()
+        guard !Task.isCancelled else { return }
         guard playbackController.isLoading else {
             showsSpinner = false
             return

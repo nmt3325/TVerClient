@@ -1,5 +1,48 @@
 import AVFoundation
 import SwiftUI
+import UIKit
+
+/// A native hit-test leaf placed beneath a SwiftUI control. The scrubber must
+/// keep its full 44pt interaction region in front of the background tap plane
+/// even while seeking is temporarily disabled. Because this view is a child of
+/// the SwiftUI host, gestures on the control still observe the touch while the
+/// sibling background recognizers do not.
+@MainActor
+final class PlayerControlHitTargetView: UIView {
+    static let playPauseIdentifier = "playback.hit-target.play-pause"
+    static let scrubberIdentifier = "playback.hit-target.scrubber"
+
+    init(identifier: String, blocksBackgroundTaps: Bool) {
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        isOpaque = false
+        isAccessibilityElement = false
+        isUserInteractionEnabled = blocksBackgroundTaps
+        accessibilityIdentifier = identifier
+    }
+
+    required init?(coder: NSCoder) {
+        preconditionFailure("PlayerControlHitTargetView is created in code only")
+    }
+}
+
+@MainActor
+private struct PlayerControlHitTarget: UIViewRepresentable {
+    let identifier: String
+    var blocksBackgroundTaps = false
+
+    func makeUIView(context: Context) -> PlayerControlHitTargetView {
+        PlayerControlHitTargetView(
+            identifier: identifier,
+            blocksBackgroundTaps: blocksBackgroundTaps
+        )
+    }
+
+    func updateUIView(_ view: PlayerControlHitTargetView, context: Context) {
+        view.accessibilityIdentifier = identifier
+        view.isUserInteractionEnabled = blocksBackgroundTaps
+    }
+}
 
 /// Everything drawn on top of the video: title row, transport, scrubber and
 /// the settings menu. Shared by the inline and the full screen player so both
@@ -34,8 +77,10 @@ struct PlayerOverlayControls: View {
         // スクラブが onScrubEnded を伴わずに終わる経路がある（別のジェスチャに奪われた、
         // 途中で画面が閉じた）。掴んだ印をそこだけで落としていると、自動非表示が
         // 止まったまま操作パネルが出っぱなしになる。
-        .onChange(of: playbackController.isScrubbing) { isScrubbing in
-            guard !isScrubbing else { return }
+        .task(id: playbackController.isScrubbing) {
+            guard !playbackController.isScrubbing else { return }
+            await Task.yield()
+            guard !Task.isCancelled, !playbackController.isScrubbing else { return }
             model.endHeldInteraction()
         }
     }
@@ -230,6 +275,9 @@ struct PlayerOverlayControls: View {
                 model.registerInteraction()
                 playbackController.togglePlayback()
             }
+            .background(
+                PlayerControlHitTarget(identifier: PlayerControlHitTargetView.playPauseIdentifier)
+            )
             PlayerIconButton(
                 systemImage: "goforward.10",
                 label: "10秒送る",
@@ -266,6 +314,12 @@ struct PlayerOverlayControls: View {
                             model.endHeldInteraction()
                         },
                         onAdjust: { playbackController.seek(by: $0) }
+                    )
+                    .background(
+                        PlayerControlHitTarget(
+                            identifier: PlayerControlHitTargetView.scrubberIdentifier,
+                            blocksBackgroundTaps: true
+                        )
                     )
                     timeLabels
                 } else {
