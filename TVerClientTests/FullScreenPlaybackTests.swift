@@ -1,6 +1,8 @@
 import AVFoundation
 import AVKit
+import SwiftUI
 @testable import TVerClient
+import UIKit
 import XCTest
 
 @MainActor
@@ -140,6 +142,94 @@ final class FullScreenPlaybackTests: XCTestCase {
         model.cancelAutoHide()
     }
 
+    func testHostedStageRoutesBlankTapsBehindButtonsAndScrubber() {
+        let controller = PlaybackController(player: AVPlayer())
+        let coordinator = PictureInPictureCoordinator(isSupported: { false })
+        let model = PlayerChromeModel(autoHideDelay: 60)
+        let stage = PlayerStage(
+            playbackController: controller,
+            pictureInPicture: coordinator,
+            model: model,
+            title: "テスト番組",
+            accessibilityLabel: "テスト番組の動画プレイヤー",
+            isFullScreen: true,
+            onToggleFullScreen: {}
+        )
+        .frame(width: 640, height: 360)
+        let host = UIHostingController(rootView: stage)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 360))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        window.layoutIfNeeded()
+        host.view.layoutIfNeeded()
+        defer {
+            model.cancelAutoHide()
+            window.isHidden = true
+        }
+
+        let tapSurfaces = descendants(of: host.view, matching: PlayerBackgroundTapView.self)
+        XCTAssertEqual(tapSurfaces.count, 2, "visible and hidden chrome each keep an isolated tap plane")
+
+        let blankHit = host.view.hitTest(CGPoint(x: 8, y: 180), with: nil)
+        guard let activeTapSurface = tapSurfaces.first(where: {
+            blankHit === $0 || blankHit?.isDescendant(of: $0) == true
+        }) else {
+            XCTFail("an unoccupied video pixel must reach the visible chrome tap plane")
+            return
+        }
+
+        XCTAssertEqual(activeTapSurface.singleTapRecognizer.numberOfTapsRequired, 1)
+        XCTAssertEqual(activeTapSurface.doubleTapRecognizer.numberOfTapsRequired, 2)
+        XCTAssertFalse(
+            hitBelongsToTapSurface(
+                host.view.hitTest(CGPoint(x: 320, y: 172), with: nil),
+                surfaces: tapSurfaces
+            ),
+            "the play/pause button must win hit testing"
+        )
+        XCTAssertFalse(
+            hitBelongsToTapSurface(
+                host.view.hitTest(CGPoint(x: 100, y: 314), with: nil),
+                surfaces: tapSurfaces
+            ),
+            "the scrubber must win hit testing"
+        )
+
+        activeTapSurface.performSingleTap()
+        XCTAssertFalse(model.areControlsVisible, "a blank single tap hides visible controls")
+    }
+
+    func testBackgroundDoubleTapDecisionKeepsLeftAndRightSeekDistinct() {
+        XCTAssertEqual(
+            PlayerStageBackgroundTapAction.resolve(
+                x: 40,
+                width: 400,
+                supportsSeeking: true,
+                canSeek: true
+            ),
+            .skip(forward: false)
+        )
+        XCTAssertEqual(
+            PlayerStageBackgroundTapAction.resolve(
+                x: 360,
+                width: 400,
+                supportsSeeking: true,
+                canSeek: true
+            ),
+            .skip(forward: true)
+        )
+        XCTAssertEqual(
+            PlayerStageBackgroundTapAction.resolve(
+                x: 360,
+                width: 400,
+                supportsSeeking: true,
+                canSeek: false
+            ),
+            .toggleControls
+        )
+    }
+
     func testPictureInPictureOwnershipMovesBetweenInlineAndFullScreenLayers() {
         let driver = FakeFullScreenPictureInPictureDriver()
         driver.isPictureInPicturePossible = true
@@ -177,6 +267,23 @@ final class FullScreenPlaybackTests: XCTestCase {
         XCTAssertTrue(inlineLayer.player === player)
         XCTAssertNil(fullScreenLayer.player)
         XCTAssertTrue(coordinator.isAttached(to: inlineLayer))
+    }
+
+    private func descendants<T: UIView>(of view: UIView, matching type: T.Type) -> [T] {
+        var matches = view.subviews.compactMap { $0 as? T }
+        for subview in view.subviews {
+            matches.append(contentsOf: descendants(of: subview, matching: type))
+        }
+        return matches
+    }
+
+    private func hitBelongsToTapSurface(
+        _ hitView: UIView?,
+        surfaces: [PlayerBackgroundTapView]
+    ) -> Bool {
+        surfaces.contains { surface in
+            hitView === surface || hitView?.isDescendant(of: surface) == true
+        }
     }
 
     private func waitUntil(
