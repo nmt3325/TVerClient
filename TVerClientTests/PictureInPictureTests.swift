@@ -198,10 +198,141 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertEqual(driver.startCount, 2)
     }
 
+    func testBackgroundingPlayingSourceStartsPiPExactlyOnceAndRetainsIt() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        coordinator.start()
+
+        XCTAssertEqual(driver.startCount, 1)
+        XCTAssertEqual(coordinator.state, .starting)
+        XCTAssertTrue(coordinator.shouldRetainPlayerLayer(layer))
+
+        driver.simulateDidStart()
+        XCTAssertTrue(coordinator.shouldRetainPlayerLayer(layer))
+
+        coordinator.stop()
+        coordinator.stop()
+        XCTAssertEqual(driver.stopCount, 1)
+        XCTAssertEqual(coordinator.state, .stopping)
+        XCTAssertTrue(coordinator.shouldRetainPlayerLayer(layer))
+
+        driver.simulateDidStop()
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(layer))
+    }
+
+    func testManualPiPStartBeforeBackgroundDoesNotDoubleStart() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        coordinator.attach(to: AVPlayerLayer(player: AVPlayer()))
+
+        coordinator.start()
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+
+        XCTAssertEqual(driver.startCount, 1)
+        XCTAssertEqual(coordinator.state, .starting)
+    }
+
+    func testDisabledAutomaticIntentLeavesBackgroundLayerReleasable() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(
+            driver: driver,
+            startsAutomaticallyFromInline: false
+        )
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+
+        XCTAssertEqual(driver.startCount, 0)
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(layer))
+    }
+
+    func testAutomaticStartWaitsForAvailabilityButStillRunsOnlyOnce() {
+        let driver = FakePictureInPictureDriver()
+        let coordinator = makeCoordinator(driver: driver)
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        XCTAssertEqual(driver.startCount, 0)
+
+        driver.updatePossible(true)
+        driver.updatePossible(true)
+
+        XCTAssertEqual(driver.startCount, 1)
+        XCTAssertEqual(coordinator.state, .starting)
+    }
+
+    func testFailedAutomaticStartReleasesBackgroundSourceForAudioFallback() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        let center = NotificationCenter()
+        let view = PlayerLayerContainerView(notificationCenter: center)
+        let player = AVPlayer()
+        view.setPlayer(player)
+        coordinator.attach(to: view.playerLayer)
+        view.prepareForBackground = {
+            coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        }
+        view.shouldRetainPlayerLayerInBackground = {
+            coordinator.shouldRetainPlayerLayer(view.playerLayer)
+        }
+
+        view.releasePlayerForBackground()
+        XCTAssertEqual(driver.startCount, 1)
+        XCTAssertTrue(view.playerLayer.player === player)
+
+        driver.simulateFailure(NSError(domain: "PictureInPictureTests", code: 99))
+        view.reconcilePlayerLayerRetention()
+
+        XCTAssertNil(view.playerLayer.player)
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(view.playerLayer))
+    }
+
+    func testLayerHandoffWaitsUntilPiPSourceHasStopped() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        let player = AVPlayer()
+        let sourceLayer = AVPlayerLayer(player: player)
+        let nextLayer = AVPlayerLayer(player: player)
+        coordinator.attach(to: sourceLayer)
+        coordinator.start()
+        driver.simulateDidStart()
+
+        coordinator.attach(to: nextLayer)
+        XCTAssertTrue(sourceLayer.player === player)
+        XCTAssertNil(nextLayer.player)
+
+        coordinator.stop()
+        XCTAssertTrue(sourceLayer.player === player)
+        XCTAssertNil(nextLayer.player)
+
+        driver.simulateDidStop()
+        XCTAssertNil(sourceLayer.player)
+        XCTAssertTrue(nextLayer.player === player)
+        XCTAssertTrue(coordinator.isAttached(to: nextLayer))
+    }
+
     private func makeCoordinator(
-        driver: FakePictureInPictureDriver
+        driver: FakePictureInPictureDriver,
+        startsAutomaticallyFromInline: Bool = true,
+        notificationCenter: NotificationCenter = .default
     ) -> PictureInPictureCoordinator {
         let coordinator = PictureInPictureCoordinator(
+            startsAutomaticallyFromInline: startsAutomaticallyFromInline,
+            notificationCenter: notificationCenter,
             isSupported: { true },
             driverFactory: { _ in driver }
         )

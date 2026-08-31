@@ -118,6 +118,28 @@ final class FullScreenPlaybackTests: XCTestCase {
         XCTAssertTrue(layerView.isActiveSurface)
     }
 
+    func testVODPlayerStageKeepsTheFullScreenActionWiredToItsOverlay() {
+        let controller = PlaybackController(player: AVPlayer())
+        let coordinator = PictureInPictureCoordinator(isSupported: { false })
+        let model = PlayerChromeModel(autoHideDelay: 60)
+        var requestedFullScreen = false
+
+        let stage = PlayerStage(
+            playbackController: controller,
+            pictureInPicture: coordinator,
+            model: model,
+            title: "テスト番組",
+            accessibilityLabel: "テスト番組の動画プレイヤー",
+            onToggleFullScreen: { requestedFullScreen = true }
+        )
+
+        XCTAssertFalse(stage.isFullScreen)
+        XCTAssertTrue(stage.isActiveSurface)
+        stage.onToggleFullScreen?()
+        XCTAssertTrue(requestedFullScreen)
+        model.cancelAutoHide()
+    }
+
     func testPictureInPictureOwnershipMovesBetweenInlineAndFullScreenLayers() {
         let driver = FakeFullScreenPictureInPictureDriver()
         driver.isPictureInPicturePossible = true
@@ -131,24 +153,30 @@ final class FullScreenPlaybackTests: XCTestCase {
 
         coordinator.attach(to: inlineLayer)
         XCTAssertEqual(coordinator.availability, .available)
+        XCTAssertTrue(inlineLayer.player === player)
 
-        // Entering full screen moves Picture in Picture to the new layer.
+        // Claiming the full-screen surface clears the outgoing inline layer.
         coordinator.attach(to: fullScreenLayer)
-        XCTAssertEqual(coordinator.availability, .available)
+        XCTAssertNil(inlineLayer.player)
+        XCTAssertTrue(fullScreenLayer.player === player)
+        XCTAssertTrue(coordinator.isAttached(to: fullScreenLayer))
 
-        // The inline surface releasing its own layer must be a no-op now.
+        // A stale release from the inline representable cannot disturb the
+        // layer that now owns playback.
         coordinator.detach(from: inlineLayer)
+        XCTAssertTrue(fullScreenLayer.player === player)
         XCTAssertEqual(coordinator.availability, .available)
 
-        // Leaving full screen releases the full screen layer and the inline
-        // surface takes ownership back, still on the same AVPlayer.
         coordinator.detach(from: fullScreenLayer)
+        XCTAssertNil(fullScreenLayer.player)
         XCTAssertEqual(coordinator.availability, .unavailable)
 
+        // Dismissal gives the same player instance back to inline.
+        inlineLayer.player = player
         coordinator.attach(to: inlineLayer)
-        XCTAssertEqual(coordinator.availability, .available)
         XCTAssertTrue(inlineLayer.player === player)
-        XCTAssertTrue(fullScreenLayer.player === player)
+        XCTAssertNil(fullScreenLayer.player)
+        XCTAssertTrue(coordinator.isAttached(to: inlineLayer))
     }
 
     private func waitUntil(

@@ -129,7 +129,14 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     private let notificationCenter: NotificationCenter
     private let startsAutomaticallyFromInline: Bool
     private var driver: (any PictureInPictureControllerDriving)?
-    private weak var attachedLayer: AVPlayerLayer?
+    /// Strong while PiP is in flight so dismantling the source SwiftUI view
+    /// cannot deallocate the AVPlayerLayer out from under AVKit.
+    private var attachedLayer: AVPlayerLayer?
+    private var pendingAttachmentLayer: AVPlayerLayer?
+    private var pendingAttachmentPlayer: AVPlayer?
+    private var shouldDetachAfterTransition = false
+    private var automaticStartRequestedForCurrentBackground = false
+    private var playbackWasActiveOnBackgroundEntry = false
     private var notificationTokens: [NSObjectProtocol] = []
 
     init(
@@ -160,42 +167,62 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     var canStart: Bool { availability == .available && state == .inactive }
     var errorMessage: String? { lastFailure?.localizedDescription }
 
+    /// True only for the exact source layer AVKit still needs. An outgoing
+    /// inline/full-screen surface may retain the shared player during PiP, but
+    /// every other inactive surface must release it.
+    func shouldRetainPlayerLayer(_ playerLayer: AVPlayerLayer) -> Bool {
+        guard attachedLayer === playerLayer else { return false }
+        if driver?.isPictureInPictureActive == true { return true }
+        switch state {
+        case .starting, .active, .stopping:
+            return true
+        case .inactive, .failed:
+            return false
+        }
+    }
+
+    func isAttached(to playerLayer: AVPlayerLayer) -> Bool {
+        attachedLayer === playerLayer
+    }
+
     func attach(to playerLayer: AVPlayerLayer) {
         // SwiftUI may call updateUIView repeatedly while observing this object.
         // Republishing availability from that update path creates a feedback
         // loop that can starve the view task responsible for starting playback.
         guard attachedLayer !== playerLayer else { return }
 
-        detach()
-        attachedLayer = playerLayer
-
-        guard isSupported() else {
-            availability = .unsupported
+        if let attachedLayer, shouldRetainPlayerLayer(attachedLayer) {
+            // The new onscreen surface waits empty until the PiP source has
+            // completed its transition. This avoids two AVPlayerLayers owning
+            // the shared player at the same time.
+            if pendingAttachmentLayer !== playerLayer {
+                pendingAttachmentLayer?.player = nil
+                pendingAttachmentLayer = playerLayer
+                pendingAttachmentPlayer = playerLayer.player
+            }
+            shouldDetachAfterTransition = true
+            playerLayer.player = nil
             return
         }
 
-        let newDriver = driverFactory(playerLayer)
-        newDriver.delegate = self
-        newDriver.canStartPictureInPictureAutomaticallyFromInline = startsAutomaticallyFromInline
-        newDriver.possibilityDidChange = { [weak self] possible in
-            self?.setPossible(possible)
-        }
-        driver = newDriver
-        setPossible(newDriver.isPictureInPicturePossible)
+        replaceAttachedLayer(with: playerLayer)
     }
 
     func detach(from playerLayer: AVPlayerLayer? = nil) {
-        if let playerLayer, attachedLayer !== playerLayer { return }
-        if driver?.isPictureInPictureActive == true {
-            driver?.stopPictureInPicture()
+        if let playerLayer, pendingAttachmentLayer === playerLayer {
+            pendingAttachmentLayer = nil
+            pendingAttachmentPlayer = nil
+            playerLayer.player = nil
+            return
         }
-        driver?.possibilityDidChange = nil
-        driver?.delegate = nil
-        driver = nil
-        attachedLayer = nil
-        lastFailure = nil
-        state = .inactive
-        availability = isSupported() ? .unavailable : .unsupported
+        if let playerLayer, attachedLayer !== playerLayer { return }
+        guard let attachedLayer else { return }
+
+        if shouldRetainPlayerLayer(attachedLayer) {
+            shouldDetachAfterTransition = true
+            return
+        }
+        performDetach()
     }
 
     func refreshAvailability() {
@@ -226,14 +253,11 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     }
 
     /// Stops Picture in Picture, including a start that has not been confirmed
-    /// yet.
-    ///
-    /// `.starting` used to be a dead end: the driver reports nothing back for a
-    /// start it dropped, and a stop request was ignored in that state. The same
-    /// applies to a `.active` state whose driver is no longer running, where no
-    /// delegate callback can ever leave `.stopping` again.
+    /// yet. Repeated stop calls are deliberately a no-op while teardown is in
+    /// flight so application termination can call the wider playback stop
+    /// contract more than once without issuing duplicate AVKit requests.
     func stop() {
-        guard let driver else { return }
+        guard state != .stopping, let driver else { return }
         let driverIsRunning = driver.isPictureInPictureActive
         guard state == .active || state == .starting || driverIsRunning else { return }
 
@@ -247,10 +271,64 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
         }
     }
 
+    /// Records the real background transition and requests automatic PiP once.
+    /// PlayerLayerContainerView also calls this before releasing its layer, so
+    /// observer ordering can never destroy the source before the request.
+    func applicationDidEnterBackground(playbackIsActive: Bool? = nil) {
+        setApplicationState(.background)
+        let inferredPlayback = attachedLayer?.player.map {
+            $0.rate != 0 || $0.timeControlStatus == .playing
+        } ?? false
+        playbackWasActiveOnBackgroundEntry = playbackWasActiveOnBackgroundEntry
+            || playbackIsActive == true
+            || inferredPlayback
+        requestAutomaticStartIfNeeded()
+    }
+
+    private func applicationWillResignActive() {
+        setApplicationState(.inactive)
+    }
+
+    private func applicationDidBecomeActive() {
+        setApplicationState(.active)
+        automaticStartRequestedForCurrentBackground = false
+        playbackWasActiveOnBackgroundEntry = false
+    }
+
+    private func requestAutomaticStartIfNeeded() {
+        guard applicationState == .background,
+              startsAutomaticallyFromInline,
+              playbackWasActiveOnBackgroundEntry,
+              !automaticStartRequestedForCurrentBackground else { return }
+
+        switch state {
+        case .starting, .active, .stopping:
+            // AVKit (or the PiP button) won the race. Mark this background
+            // cycle handled and never send a second start request.
+            automaticStartRequestedForCurrentBackground = true
+            return
+        case .failed:
+            return
+        case .inactive:
+            break
+        }
+
+        guard availability == .available else { return }
+        automaticStartRequestedForCurrentBackground = true
+        start()
+    }
+
+    private func setApplicationState(_ newState: PictureInPictureApplicationState) {
+        guard applicationState != newState else { return }
+        applicationState = newState
+    }
+
     private func setPossible(_ possible: Bool) {
         let newAvailability: PictureInPictureAvailability = possible ? .available : .unavailable
-        guard availability != newAvailability else { return }
-        availability = newAvailability
+        if availability != newAvailability {
+            availability = newAvailability
+        }
+        if possible { requestAutomaticStartIfNeeded() }
     }
 
     private func fail(with failure: PictureInPictureFailure) {
@@ -266,12 +344,89 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
     func handleDidStop() {
         lastFailure = nil
         state = .inactive
-        refreshAvailability()
+        if !completeDeferredLayerTransition() {
+            refreshAvailability()
+        }
     }
 
     func handleFailedToStart(_ error: Error) {
         fail(with: .failedToStart(error))
         refreshAvailability()
+        _ = completeDeferredLayerTransition()
+    }
+
+    private func replaceAttachedLayer(with playerLayer: AVPlayerLayer) {
+        let previousLayer = attachedLayer
+        tearDownDriver()
+        previousLayer?.player = nil
+        pendingAttachmentLayer = nil
+        pendingAttachmentPlayer = nil
+        shouldDetachAfterTransition = false
+        attachedLayer = playerLayer
+
+        guard isSupported() else {
+            availability = .unsupported
+            return
+        }
+
+        let newDriver = driverFactory(playerLayer)
+        newDriver.delegate = self
+        newDriver.canStartPictureInPictureAutomaticallyFromInline = startsAutomaticallyFromInline
+        newDriver.possibilityDidChange = { [weak self] possible in
+            self?.setPossible(possible)
+        }
+        driver = newDriver
+        setPossible(newDriver.isPictureInPicturePossible)
+    }
+
+    private func performDetach() {
+        let previousLayer = attachedLayer
+        tearDownDriver()
+        previousLayer?.player = nil
+        pendingAttachmentLayer?.player = nil
+        pendingAttachmentLayer = nil
+        pendingAttachmentPlayer = nil
+        attachedLayer = nil
+        shouldDetachAfterTransition = false
+        lastFailure = nil
+        state = .inactive
+        availability = isSupported() ? .unavailable : .unsupported
+    }
+
+    private func tearDownDriver() {
+        if driver?.isPictureInPictureActive == true {
+            driver?.stopPictureInPicture()
+        }
+        driver?.possibilityDidChange = nil
+        driver?.delegate = nil
+        driver = nil
+    }
+
+    /// Completes an inline/full-screen hand-off that had to wait for PiP. The
+    /// old source player is cleared before the new layer becomes eligible.
+    @discardableResult
+    private func completeDeferredLayerTransition() -> Bool {
+        guard driver?.isPictureInPictureActive != true else { return false }
+        switch state {
+        case .starting, .active, .stopping:
+            return false
+        case .inactive, .failed:
+            break
+        }
+
+        if let pendingAttachmentLayer {
+            let player = pendingAttachmentPlayer
+            self.pendingAttachmentLayer = nil
+            pendingAttachmentPlayer = nil
+            pendingAttachmentLayer.player = player
+            replaceAttachedLayer(with: pendingAttachmentLayer)
+            return true
+        }
+        if shouldDetachAfterTransition {
+            performDetach()
+            return true
+        }
+        return false
     }
 
     private func installApplicationObservers() {
@@ -280,21 +435,21 @@ final class PictureInPictureCoordinator: NSObject, ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.applicationState = .inactive }
+            Task { @MainActor [weak self] in self?.applicationWillResignActive() }
         })
         notificationTokens.append(notificationCenter.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.applicationState = .background }
+            Task { @MainActor [weak self] in self?.applicationDidEnterBackground() }
         })
         notificationTokens.append(notificationCenter.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.applicationState = .active }
+            Task { @MainActor [weak self] in self?.applicationDidBecomeActive() }
         })
     }
 }

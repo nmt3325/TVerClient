@@ -35,10 +35,21 @@ struct PlayerStage: View {
                     player: playbackController.player,
                     pictureInPicture: pictureInPicture,
                     videoGravity: model.videoGravity,
-                    isActiveSurface: isActiveSurface
+                    isActiveSurface: isActiveSurface,
+                    playbackIsActive: playbackController.isPlaying
                 )
                 .accessibilityElement()
                 .accessibilityLabel(accessibilityLabel)
+
+                // Keep the exclusive single/double-tap recognizer on a
+                // dedicated background sibling. Putting it on the enclosing
+                // ZStack makes every Button and scrub gesture underneath it
+                // compete with the ancestor recognizer.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(skipOrToggleGesture(width: proxy.size.width))
+                    .accessibilityHidden(true)
+
                 if showsSpinner {
                     ProgressView()
                         .progressViewStyle(.circular)
@@ -65,8 +76,6 @@ struct PlayerStage: View {
                     value: model.areControlsVisible
                 )
             }
-            .contentShape(Rectangle())
-            .gesture(skipOrToggleGesture(width: proxy.size.width))
         }
         .background(Color.black)
         .task(id: playbackController.isLoading) { await updateSpinner() }
