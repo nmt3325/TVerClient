@@ -395,6 +395,111 @@ final class GuideZoomMetricsTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testFocalMovementWithinQuantizedBucketUpdatesBindingAndScrollView() {
+        let viewportHeight: CGFloat = 600
+        let firstFocalY: CGFloat = 100
+        let secondFocalY: CGFloat = 160
+        let initialOffset = CGPoint(x: 40, y: 400)
+        let session = GuideZoomPinchSession(
+            pointsPerMinute: 2,
+            contentOffset: initialOffset,
+            contentY: initialOffset.y + firstFocalY
+        )
+        let first = session.changed(
+            scale: 1.1,
+            focalY: firstFocalY,
+            viewportHeight: viewportHeight
+        )
+        let second = session.changed(
+            scale: 1.1,
+            focalY: secondFocalY,
+            viewportHeight: viewportHeight
+        )
+        XCTAssertEqual(first.pointsPerMinute, second.pointsPerMinute, accuracy: 0.0001)
+        XCTAssertNotEqual(first.contentOffset, second.contentOffset)
+
+        var zoom = session.initialSnapshot.pointsPerMinute
+        var contentOffset = session.initialSnapshot.contentOffset
+        var zoomWriteCount = 0
+        var offsetWriteCount = 0
+        let zoomBinding = Binding<CGFloat>(
+            get: { zoom },
+            set: {
+                zoom = $0
+                zoomWriteCount += 1
+            }
+        )
+        let offsetBinding = Binding<CGPoint>(
+            get: { contentOffset },
+            set: {
+                contentOffset = $0
+                offsetWriteCount += 1
+            }
+        )
+        let contentSize = CGSize(
+            width: 1_000,
+            height: ProgramGuideMetrics.dayHeight(pointsPerMinute: first.pointsPerMinute)
+        )
+        let representable = SynchronizedGuideScrollView(
+            contentOffset: offsetBinding,
+            contentSize: contentSize
+        ) {
+            EmptyView()
+        }
+        let coordinator = representable.makeCoordinator()
+        let scrollView = UIScrollView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: viewportHeight)
+        )
+        scrollView.delegate = coordinator
+        scrollView.contentSize = contentSize
+        coordinator.beginPinch(in: scrollView) {}
+        XCTAssertFalse(scrollView.panGestureRecognizer.isEnabled)
+
+        GuideZoomPinchBindingUpdater.apply(
+            first,
+            zoom: zoomBinding,
+            contentOffset: offsetBinding
+        )
+        representable.synchronizeBoundContentOffset(
+            in: scrollView,
+            isPinching: coordinator.isPinching
+        )
+        XCTAssertEqual(zoomWriteCount, 1)
+        XCTAssertEqual(offsetWriteCount, 1)
+        XCTAssertEqual(scrollView.contentOffset.y, first.contentOffset.y, accuracy: 0.0001)
+
+        GuideZoomPinchBindingUpdater.apply(
+            second,
+            zoom: zoomBinding,
+            contentOffset: offsetBinding
+        )
+        representable.synchronizeBoundContentOffset(
+            in: scrollView,
+            isPinching: coordinator.isPinching
+        )
+        XCTAssertEqual(zoomWriteCount, 1, "the unchanged quantized zoom must not be rewritten")
+        XCTAssertEqual(offsetWriteCount, 2, "focal movement must update the bound offset")
+        XCTAssertEqual(scrollView.contentOffset.y, second.contentOffset.y, accuracy: 0.0001)
+        XCTAssertEqual(
+            ProgramGuideMetrics.minutes(
+                atOffsetY: scrollView.contentOffset.y + secondFocalY,
+                pointsPerMinute: zoom
+            ),
+            session.anchorMinutes,
+            accuracy: 0.001
+        )
+
+        GuideZoomPinchBindingUpdater.apply(
+            second,
+            zoom: zoomBinding,
+            contentOffset: offsetBinding
+        )
+        XCTAssertEqual(zoomWriteCount, 1)
+        XCTAssertEqual(offsetWriteCount, 2, "an identical snapshot must not feed back into the binding")
+        coordinator.completePinch(in: scrollView) {}
+    }
+
     func testPinchChangesStayInsideZoomAndContentBounds() {
         let viewportHeight: CGFloat = 800
         let session = GuideZoomPinchSession(
