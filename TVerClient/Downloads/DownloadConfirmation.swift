@@ -21,6 +21,8 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case recent
         /// 視聴履歴をすべて消す。ファイルは消さない。
         case allRecents
+        /// 編集モードで選んだ複数行をまとめて片付ける。
+        case selection
     }
 
     let target: Target
@@ -48,6 +50,8 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
             return "「\(subject)」を\(Vocabulary.Library.history)から消しますか？"
         case .allRecents:
             return "\(Vocabulary.Library.history)をすべて消しますか？"
+        case .selection:
+            return "選んだ\(subject)を削除しますか？"
         }
     }
 
@@ -69,6 +73,9 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
             return "視聴履歴から消すだけです。\(Vocabulary.Library.downloads)の動画と\(Vocabulary.Library.favorites)は残ります。"
         case .allRecents:
             return "\(subject)の視聴履歴を消します。\(Vocabulary.Library.downloads)の動画と\(Vocabulary.Library.favorites)は残ります。"
+        case .selection:
+            return "\(Vocabulary.Library.downloads)の動画は端末から削除します。"
+                + "\(Vocabulary.Library.favorites)・\(Vocabulary.Library.history)・購読は一覧から外すだけです。"
         }
     }
 
@@ -88,6 +95,8 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
             return "\(Vocabulary.Library.history)から消す"
         case .allRecents:
             return "すべて消す"
+        case .selection:
+            return "削除"
         }
     }
 }

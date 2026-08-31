@@ -152,7 +152,7 @@ struct DownloadButton: View {
             downloadCenter.delete(program.id)
         case .restartDownload:
             downloadCenter.restart(program)
-        case .favorite, .allFavorites, .recent, .allRecents:
+        case .favorite, .allFavorites, .recent, .allRecents, .selection:
             break
         }
     }
