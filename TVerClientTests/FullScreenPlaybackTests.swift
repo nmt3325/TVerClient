@@ -142,10 +142,12 @@ final class FullScreenPlaybackTests: XCTestCase {
         model.cancelAutoHide()
     }
 
-    func testHostedStageRoutesBlankTapsBehindButtonsAndScrubber() {
+    func testHostedStageRoutesBlankTapsBehindButtonsAndScrubber() async {
         let controller = PlaybackController(player: AVPlayer())
         let coordinator = PictureInPictureCoordinator(isSupported: { false })
         let model = PlayerChromeModel(autoHideDelay: 60)
+        // Keep lifecycle setup from publishing into the graph while it mounts.
+        model.isAutoHideSuspended = true
         let stage = PlayerStage(
             playbackController: controller,
             pictureInPicture: coordinator,
@@ -153,51 +155,67 @@ final class FullScreenPlaybackTests: XCTestCase {
             title: "テスト番組",
             accessibilityLabel: "テスト番組の動画プレイヤー",
             isFullScreen: true,
+            rendersVideoLayer: false,
             onToggleFullScreen: {}
         )
         .frame(width: 640, height: 360)
-        let host = UIHostingController(rootView: stage)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 360))
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        host.view.frame = window.bounds
-        window.layoutIfNeeded()
-        host.view.layoutIfNeeded()
-        defer {
-            model.cancelAutoHide()
-            window.isHidden = true
-        }
+        let harness = HostedStageHarness(rootView: AnyView(stage), size: CGSize(width: 640, height: 360))
+        await Task.yield()
+        harness.layout()
 
-        let tapSurfaces = descendants(of: host.view, matching: PlayerBackgroundTapView.self)
+        let tapSurfaces = descendants(of: harness.rootView, matching: PlayerBackgroundTapView.self)
         XCTAssertEqual(tapSurfaces.count, 2, "visible and hidden chrome each keep an isolated tap plane")
 
-        let blankHit = host.view.hitTest(CGPoint(x: 8, y: 180), with: nil)
-        guard let activeTapSurface = tapSurfaces.first(where: {
-            blankHit === $0 || blankHit?.isDescendant(of: $0) == true
-        }) else {
-            XCTFail("an unoccupied video pixel must reach the visible chrome tap plane")
-            return
+        let blankTarget = firstBackgroundHit(in: harness.rootView, surfaces: tapSurfaces)
+        XCTAssertNotNil(blankTarget, "an unoccupied video pixel must reach the visible chrome tap plane")
+        if let (activeTapSurface, _) = blankTarget {
+            XCTAssertEqual(activeTapSurface.singleTapRecognizer.numberOfTapsRequired, 1)
+            XCTAssertEqual(activeTapSurface.doubleTapRecognizer.numberOfTapsRequired, 2)
         }
 
-        XCTAssertEqual(activeTapSurface.singleTapRecognizer.numberOfTapsRequired, 1)
-        XCTAssertEqual(activeTapSurface.doubleTapRecognizer.numberOfTapsRequired, 2)
-        XCTAssertFalse(
-            hitBelongsToTapSurface(
-                host.view.hitTest(CGPoint(x: 320, y: 172), with: nil),
-                surfaces: tapSurfaces
-            ),
-            "the play/pause button must win hit testing"
-        )
-        XCTAssertFalse(
-            hitBelongsToTapSurface(
-                host.view.hitTest(CGPoint(x: 100, y: 314), with: nil),
-                surfaces: tapSurfaces
-            ),
-            "the scrubber must win hit testing"
-        )
+        let controlTargets = descendants(of: harness.rootView, matching: PlayerControlHitTargetView.self)
+        let playPauseTarget = controlTargets.first {
+            $0.accessibilityIdentifier == PlayerControlHitTargetView.playPauseIdentifier
+        }
+        let scrubberTarget = controlTargets.first {
+            $0.accessibilityIdentifier == PlayerControlHitTargetView.scrubberIdentifier
+        }
+        XCTAssertNotNil(playPauseTarget, "the hosted hierarchy must expose the play/pause hit target")
+        XCTAssertNotNil(scrubberTarget, "the hosted hierarchy must expose the scrubber hit target")
 
-        activeTapSurface.performSingleTap()
-        XCTAssertFalse(model.areControlsVisible, "a blank single tap hides visible controls")
+        if let playPauseTarget {
+            XCTAssertFalse(
+                playPauseTarget.isUserInteractionEnabled,
+                "the hierarchy marker must not intercept the play/pause button"
+            )
+            assertControlWinsHitTesting(
+                playPauseTarget,
+                in: harness.rootView,
+                over: tapSurfaces,
+                message: "the play/pause button must win hit testing"
+            )
+        }
+        if let scrubberTarget {
+            XCTAssertTrue(
+                scrubberTarget.isUserInteractionEnabled,
+                "the scrubber hit target must block the sibling background surface"
+            )
+            assertControlWinsHitTesting(
+                scrubberTarget,
+                in: harness.rootView,
+                over: tapSurfaces,
+                message: "the scrubber must win hit testing"
+            )
+        }
+
+        if let (activeTapSurface, _) = blankTarget {
+            activeTapSurface.performSingleTap()
+            XCTAssertFalse(model.areControlsVisible, "a blank single tap hides visible controls")
+            await Task.yield()
+        }
+
+        await harness.tearDown(model: model, coordinator: coordinator)
+        XCTAssertTrue(harness.isTornDown, "the hosting controller and window must be released in-test")
     }
 
     func testBackgroundDoubleTapDecisionKeepsLeftAndRightSeekDistinct() {
@@ -277,13 +295,50 @@ final class FullScreenPlaybackTests: XCTestCase {
         return matches
     }
 
-    private func hitBelongsToTapSurface(
-        _ hitView: UIView?,
+    private func firstBackgroundHit(
+        in rootView: UIView,
         surfaces: [PlayerBackgroundTapView]
-    ) -> Bool {
-        surfaces.contains { surface in
-            hitView === surface || hitView?.isDescendant(of: surface) == true
+    ) -> (PlayerBackgroundTapView, CGPoint)? {
+        for surface in surfaces {
+            let frame = surface.convert(surface.bounds, to: rootView)
+            for xStep in 1 ... 9 {
+                for yStep in 1 ... 9 {
+                    let point = CGPoint(
+                        x: frame.minX + frame.width * CGFloat(xStep) / 10,
+                        y: frame.minY + frame.height * CGFloat(yStep) / 10
+                    )
+                    let hitView = rootView.hitTest(point, with: nil)
+                    if hitView === surface || hitView?.isDescendant(of: surface) == true {
+                        return (surface, point)
+                    }
+                }
+            }
         }
+        return nil
+    }
+
+    private func assertControlWinsHitTesting(
+        _ target: PlayerControlHitTargetView,
+        in rootView: UIView,
+        over surfaces: [PlayerBackgroundTapView],
+        message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let frame = target.convert(target.bounds, to: rootView)
+        XCTAssertGreaterThan(frame.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(frame.height, 0, file: file, line: line)
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        let hitView = rootView.hitTest(point, with: nil)
+        XCTAssertNotNil(hitView, file: file, line: line)
+        XCTAssertFalse(
+            surfaces.contains { surface in
+                hitView === surface || hitView?.isDescendant(of: surface) == true
+            },
+            message,
+            file: file,
+            line: line
+        )
     }
 
     private func waitUntil(
@@ -297,6 +352,67 @@ final class FullScreenPlaybackTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(condition(), message)
+    }
+}
+
+@MainActor
+private final class HostedStageHarness {
+    private var host: UIHostingController<AnyView>?
+    private var window: UIWindow?
+
+    init(rootView: AnyView, size: CGSize) {
+        let host = UIHostingController(rootView: rootView)
+        let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+        self.host = host
+        self.window = window
+        host.view.frame = window.bounds
+        // Attach the hosted view directly. Making the hosting controller the
+        // window root would begin UIKit appearance transitions that can outlive
+        // this short test and contaminate the next case.
+        window.addSubview(host.view)
+        window.isHidden = false
+        layout()
+    }
+
+    var rootView: UIView {
+        guard let view = host?.view else {
+            preconditionFailure("HostedStageHarness has already been torn down")
+        }
+        return view
+    }
+
+    var isTornDown: Bool { host == nil && window == nil }
+
+    func layout() {
+        window?.layoutIfNeeded()
+        host?.view.layoutIfNeeded()
+    }
+
+    func tearDown(
+        model: PlayerChromeModel,
+        coordinator: PictureInPictureCoordinator
+    ) async {
+        var mountedHost = host
+        var mountedWindow = window
+
+        model.cancelAutoHide()
+        // Dismantling PlayerLayerView must not publish PiP changes while
+        // SwiftUI is invalidating its graph. Detach first, while it is stable.
+        coordinator.detach()
+        mountedHost?.view.removeFromSuperview()
+        mountedWindow?.isHidden = true
+        await Task.yield()
+
+        mountedHost?.rootView = AnyView(EmptyView())
+        mountedHost?.view.layoutIfNeeded()
+        await Task.yield()
+        mountedWindow?.rootViewController = nil
+
+        host = nil
+        window = nil
+        mountedHost = nil
+        mountedWindow = nil
+        await Task.yield()
     }
 }
 
