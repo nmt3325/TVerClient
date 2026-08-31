@@ -132,6 +132,17 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertTrue(context.controller.isPlaying)
     }
 
+    func testCancellingScrubEndsOwnershipWithoutCommittingAStaleFinalSeek() async throws {
+        let context = try await makePlayingController(seconds: 3)
+        context.controller.beginScrubbing()
+        XCTAssertTrue(context.controller.isScrubbing)
+
+        context.controller.previewScrub(to: 1.5)
+        context.controller.cancelScrubbing()
+
+        XCTAssertFalse(context.controller.isScrubbing)
+    }
+
     func testBackgroundingReleasesThePlayerSoBackgroundAudioSurvives() async {
         let center = NotificationCenter()
         let view = PlayerLayerContainerView(notificationCenter: center)
@@ -273,13 +284,10 @@ final class PlaybackControllerTests: XCTestCase {
     private func makePictureInPictureCoordinator(
         driver: FakeControllerPictureInPictureDriver
     ) -> PictureInPictureCoordinator {
-        let coordinator = PictureInPictureCoordinator(
+        PictureInPictureCoordinator(
             isSupported: { true },
             driverFactory: { _ in driver }
         )
-        driver.didStart = { [weak coordinator] in coordinator?.handleDidStart() }
-        driver.didStop = { [weak coordinator] in coordinator?.handleDidStop() }
-        return coordinator
     }
 
     private func makePlayingController(seconds: Double = 8) async throws -> Context {
@@ -403,13 +411,11 @@ private final class FakePlaybackAudioSession: PlaybackAudioSessioning {
 
 @MainActor
 private final class FakeControllerPictureInPictureDriver: PictureInPictureControllerDriving {
-    weak var delegate: AVPictureInPictureControllerDelegate?
+    var eventHandler: ((PictureInPictureDriverEvent) -> Void)?
     var isPictureInPicturePossible = false
     var isPictureInPictureActive = false
     var canStartPictureInPictureAutomaticallyFromInline = false
     var possibilityDidChange: ((Bool) -> Void)?
-    var didStart: (() -> Void)?
-    var didStop: (() -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
@@ -420,11 +426,11 @@ private final class FakeControllerPictureInPictureDriver: PictureInPictureContro
     func stopPictureInPicture() {
         stopCount += 1
         isPictureInPictureActive = false
-        didStop?()
+        eventHandler?(.didStop)
     }
 
     func simulateDidStart() {
         isPictureInPictureActive = true
-        didStart?()
+        eventHandler?(.didStart)
     }
 }

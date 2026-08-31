@@ -350,6 +350,13 @@ final class PlaybackController: ObservableObject {
         seek(to: seconds)
     }
 
+    /// Ends interaction ownership without committing the old scrub position.
+    /// This is used when the item becomes unseekable or its surface disappears.
+    func cancelScrubbing() {
+        guard isScrubbing else { return }
+        isScrubbing = false
+    }
+
     /// 告知に添えた操作を実行する。
     func recoverFromContinuityNotice() {
         guard continuityNotice != nil else { return }

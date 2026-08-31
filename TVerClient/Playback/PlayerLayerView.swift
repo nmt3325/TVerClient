@@ -231,7 +231,12 @@ struct PlayerLayerView: UIViewRepresentable {
         if isActiveSurface {
             view.setSurfaceActive(true, player: player)
             context.coordinator.attachedLayer = view.playerLayer
-            pictureInPicture.attach(to: view.playerLayer)
+            pictureInPicture.attach(
+                to: view.playerLayer,
+                retentionDidChange: { [weak view] in
+                    view?.reconcilePlayerLayerRetention()
+                }
+            )
         } else if pictureInPicture.shouldRetainPlayerLayer(view.playerLayer) {
             // PiP still renders from the outgoing surface. It is released as
             // soon as the coordinator settles to inactive or failed.

@@ -177,11 +177,12 @@ final class FullScreenPlaybackTests: XCTestCase {
         let playPauseTarget = controlTargets.first {
             $0.accessibilityIdentifier == PlayerControlHitTargetView.playPauseIdentifier
         }
-        let scrubberTarget = controlTargets.first {
-            $0.accessibilityIdentifier == PlayerControlHitTargetView.scrubberIdentifier
-        }
+        let scrubberTargets = descendants(
+            of: harness.rootView,
+            matching: PlaybackScrubberInteractionView.self
+        )
         XCTAssertNotNil(playPauseTarget, "the hosted hierarchy must expose the play/pause hit target")
-        XCTAssertNotNil(scrubberTarget, "the hosted hierarchy must expose the scrubber hit target")
+        XCTAssertEqual(scrubberTargets.count, 1, "the production scrubber owns one native touch surface")
 
         if let playPauseTarget {
             XCTAssertFalse(
@@ -195,11 +196,12 @@ final class FullScreenPlaybackTests: XCTestCase {
                 message: "the play/pause button must win hit testing"
             )
         }
-        if let scrubberTarget {
+        if let scrubberTarget = scrubberTargets.first {
             XCTAssertTrue(
                 scrubberTarget.isUserInteractionEnabled,
-                "the scrubber hit target must block the sibling background surface"
+                "the scrubber touch owner must block the sibling background surface"
             )
+            XCTAssertTrue(scrubberTarget.gestureRecognizers?.contains(scrubberTarget.scrubRecognizer) == true)
             assertControlWinsHitTesting(
                 scrubberTarget,
                 in: harness.rootView,
@@ -209,13 +211,222 @@ final class FullScreenPlaybackTests: XCTestCase {
         }
 
         if let (activeTapSurface, _) = blankTarget {
-            activeTapSurface.performSingleTap()
-            XCTAssertFalse(model.areControlsVisible, "a blank single tap hides visible controls")
+            activeTapSurface.didSingleTap(activeTapSurface.singleTapRecognizer)
+            XCTAssertFalse(model.areControlsVisible, "the recognizer callback hides visible controls")
             await Task.yield()
         }
 
-        await harness.tearDown(model: model, coordinator: coordinator)
+        await harness.tearDown(model: model)
         XCTAssertTrue(harness.isTornDown, "the hosting controller and window must be released in-test")
+    }
+
+    func testHostedScrubberRecognizerDeliversBeginChangeAndEndCallbacks() async {
+        var startedCount = 0
+        var changedTimes: [TimeInterval] = []
+        var endedTimes: [TimeInterval] = []
+        let scrubber = PlaybackScrubber(
+            elapsed: 60,
+            duration: 600,
+            bufferedFraction: 0.5,
+            onScrubStarted: { startedCount += 1 },
+            onScrubChanged: { changedTimes.append($0) },
+            onScrubEnded: { endedTimes.append($0) }
+        )
+        .frame(width: 320, height: 44)
+        let model = PlayerChromeModel(autoHideDelay: 60)
+        let harness = HostedStageHarness(
+            rootView: AnyView(scrubber),
+            size: CGSize(width: 320, height: 44)
+        )
+        await Task.yield()
+        harness.layout()
+
+        guard let interaction = descendants(
+            of: harness.rootView,
+            matching: PlaybackScrubberInteractionView.self
+        ).first else {
+            XCTFail("the production scrubber interaction view must be mounted")
+            await harness.tearDown(model: model)
+            return
+        }
+        XCTAssertGreaterThan(interaction.bounds.width, 0)
+        XCTAssertTrue(interaction.scrubRecognizer.isEnabled)
+
+        interaction.handleScrubGesture(
+            state: .began,
+            location: CGPoint(x: 80, y: 22)
+        )
+        interaction.handleScrubGesture(
+            state: .changed,
+            location: CGPoint(x: 240, y: 22)
+        )
+        interaction.handleScrubGesture(
+            state: .ended,
+            location: CGPoint(x: 280, y: 22)
+        )
+
+        XCTAssertEqual(startedCount, 1)
+        XCTAssertGreaterThanOrEqual(changedTimes.count, 3)
+        XCTAssertEqual(endedTimes.count, 1)
+        if let endedTime = endedTimes.first, let lastChangedTime = changedTimes.last {
+            XCTAssertEqual(endedTime, lastChangedTime, accuracy: 0.001)
+            XCTAssertGreaterThan(endedTime, 60, "the delivered drag must advance the playhead")
+        }
+
+        await harness.tearDown(model: model)
+    }
+
+    func testScrubberDisableDefersCancellationWithoutCommittingSeek() async {
+        var startedCount = 0
+        var endedCount = 0
+        var cancelledCount = 0
+        let interaction = PlaybackScrubberInteractionView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 44)
+        )
+        interaction.update(
+            elapsed: 30,
+            duration: 300,
+            isEnabled: true,
+            onScrubStarted: { startedCount += 1 },
+            onScrubChanged: { _ in },
+            onScrubEnded: { _ in endedCount += 1 },
+            onScrubCancelled: { cancelledCount += 1 }
+        )
+        interaction.handleScrubGesture(
+            state: .began,
+            location: CGPoint(x: 80, y: 22)
+        )
+        XCTAssertEqual(startedCount, 1)
+
+        interaction.update(
+            elapsed: 0,
+            duration: 0,
+            isEnabled: false,
+            onScrubStarted: { startedCount += 1 },
+            onScrubChanged: { _ in },
+            onScrubEnded: { _ in endedCount += 1 },
+            onScrubCancelled: { cancelledCount += 1 }
+        )
+
+        XCTAssertTrue(
+            interaction.scrubRecognizer.isEnabled,
+            "updateUIView must not toggle and synchronously cancel the live recognizer"
+        )
+        XCTAssertEqual(cancelledCount, 0, "cancellation publication must leave the update transaction")
+        XCTAssertEqual(endedCount, 0, "cancellation must not commit the stale seek")
+        await waitUntil("disabled scrubber publishes cancellation on the next actor turn") {
+            cancelledCount == 1
+        }
+        XCTAssertEqual(endedCount, 0)
+    }
+
+    func testHostedScrubberDismantleCancelsWithoutCommittingSeek() async {
+        var startedCount = 0
+        var endedCount = 0
+        var cancelledCount = 0
+        let scrubber = PlaybackScrubber(
+            elapsed: 60,
+            duration: 600,
+            onScrubStarted: { startedCount += 1 },
+            onScrubChanged: { _ in },
+            onScrubEnded: { _ in endedCount += 1 },
+            onScrubCancelled: { cancelledCount += 1 }
+        )
+        .frame(width: 320, height: 44)
+        let model = PlayerChromeModel(autoHideDelay: 60)
+        let harness = HostedStageHarness(
+            rootView: AnyView(scrubber),
+            size: CGSize(width: 320, height: 44)
+        )
+        await Task.yield()
+        harness.layout()
+
+        guard let interaction = descendants(
+            of: harness.rootView,
+            matching: PlaybackScrubberInteractionView.self
+        ).first else {
+            XCTFail("the production scrubber interaction view must be mounted")
+            await harness.tearDown(model: model)
+            return
+        }
+        interaction.handleScrubGesture(
+            state: .began,
+            location: CGPoint(x: 80, y: 22)
+        )
+        XCTAssertEqual(startedCount, 1)
+
+        harness.replaceRoot(with: AnyView(EmptyView()))
+        XCTAssertEqual(cancelledCount, 0, "dismantle must not publish inside its SwiftUI transaction")
+        XCTAssertEqual(endedCount, 0, "dismantle must not commit the stale seek")
+        await waitUntil("dismantled scrubber balances interaction ownership") {
+            cancelledCount == 1
+        }
+        XCTAssertEqual(endedCount, 0)
+
+        await harness.tearDown(model: model)
+    }
+
+    func testHostedRealPlayerLayerDefersMountAndDismantlePublication() async {
+        let driver = FakeFullScreenPictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = PictureInPictureCoordinator(
+            isSupported: { true },
+            driverFactory: { _ in driver }
+        )
+        let controller = PlaybackController(player: AVPlayer())
+        let model = PlayerChromeModel(autoHideDelay: 60)
+        model.isAutoHideSuspended = true
+        var publicationCount = 0
+        let observation = coordinator.objectWillChange.sink {
+            publicationCount += 1
+        }
+        let stage = PlayerStage(
+            playbackController: controller,
+            pictureInPicture: coordinator,
+            model: model,
+            title: "ライフサイクルテスト",
+            accessibilityLabel: "ライフサイクルテストの動画プレイヤー",
+            isFullScreen: true,
+            onToggleFullScreen: {}
+        )
+        .frame(width: 640, height: 360)
+
+        let harness = HostedStageHarness(
+            rootView: AnyView(stage),
+            size: CGSize(width: 640, height: 360)
+        )
+        harness.layout()
+        let mountedLayers = descendants(of: harness.rootView, matching: PlayerLayerContainerView.self)
+        XCTAssertEqual(mountedLayers.count, 1, "the regression must mount the real PlayerLayerView")
+        guard let mountedLayer = mountedLayers.first else {
+            await harness.tearDown(model: model)
+            return
+        }
+        XCTAssertTrue(coordinator.isAttached(to: mountedLayer.playerLayer))
+        XCTAssertEqual(
+            publicationCount,
+            0,
+            "make/update must not synchronously publish into the active SwiftUI transaction"
+        )
+        await waitUntil("mount publication is deferred until after the lifecycle transaction") {
+            publicationCount > 0
+        }
+
+        let countBeforeDismantle = publicationCount
+        harness.replaceRoot(with: AnyView(EmptyView()))
+
+        XCTAssertFalse(coordinator.isAttached(to: mountedLayer.playerLayer))
+        XCTAssertEqual(
+            publicationCount,
+            countBeforeDismantle,
+            "dismantle must synchronously clean ownership without synchronously publishing"
+        )
+        await waitUntil("dismantle publication is deferred until after graph replacement") {
+            publicationCount > countBeforeDismantle
+        }
+
+        await harness.tearDown(model: model)
+        withExtendedLifetime(observation) {}
     }
 
     func testBackgroundDoubleTapDecisionKeepsLeftAndRightSeekDistinct() {
@@ -318,7 +529,7 @@ final class FullScreenPlaybackTests: XCTestCase {
     }
 
     private func assertControlWinsHitTesting(
-        _ target: PlayerControlHitTargetView,
+        _ target: UIView,
         in rootView: UIView,
         over surfaces: [PlayerBackgroundTapView],
         message: String,
@@ -388,26 +599,24 @@ private final class HostedStageHarness {
         host?.view.layoutIfNeeded()
     }
 
-    func tearDown(
-        model: PlayerChromeModel,
-        coordinator: PictureInPictureCoordinator
-    ) async {
+    func replaceRoot(with rootView: AnyView) {
+        host?.rootView = rootView
+        layout()
+    }
+
+    func tearDown(model: PlayerChromeModel) async {
         var mountedHost = host
         var mountedWindow = window
 
         model.cancelAutoHide()
-        // Dismantling PlayerLayerView must not publish PiP changes while
-        // SwiftUI is invalidating its graph. Detach first, while it is stable.
-        coordinator.detach()
-        mountedHost?.view.removeFromSuperview()
-        mountedWindow?.isHidden = true
-        await Task.yield()
-
+        // Replace the mounted graph first. This calls PlayerLayerView's real
+        // dismantle path; no manual coordinator detach may hide lifecycle bugs.
         mountedHost?.rootView = AnyView(EmptyView())
         mountedHost?.view.layoutIfNeeded()
         await Task.yield()
-        mountedWindow?.rootViewController = nil
 
+        mountedHost?.view.removeFromSuperview()
+        mountedWindow?.isHidden = true
         host = nil
         window = nil
         mountedHost = nil
@@ -418,7 +627,7 @@ private final class HostedStageHarness {
 
 @MainActor
 private final class FakeFullScreenPictureInPictureDriver: PictureInPictureControllerDriving {
-    weak var delegate: AVPictureInPictureControllerDelegate?
+    var eventHandler: ((PictureInPictureDriverEvent) -> Void)?
     var isPictureInPicturePossible = false
     var isPictureInPictureActive = false
     var canStartPictureInPictureAutomaticallyFromInline = false

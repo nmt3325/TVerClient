@@ -159,6 +159,98 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertEqual(driver.startCount, 2)
     }
 
+    func testDelayedStartAfterExplicitStopCannotReactivateCoordinator() {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = makeCoordinator(driver: driver)
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+
+        coordinator.start()
+        coordinator.stop()
+
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertEqual(driver.stopCount, 1)
+        XCTAssertTrue(
+            coordinator.shouldRetainPlayerLayer(layer),
+            "the cancelled start keeps its AVKit source during the bounded callback guard"
+        )
+
+        driver.simulateWillStart()
+        XCTAssertEqual(coordinator.state, .stopping, "a delayed willStart must not restore .starting")
+        coordinator.start()
+        XCTAssertEqual(
+            driver.startCount,
+            1,
+            "a new start must wait until the rejected old session has finished stopping"
+        )
+        driver.simulateDidStart()
+
+        XCTAssertEqual(coordinator.state, .stopping, "a delayed didStart must not restore .active")
+        XCTAssertEqual(driver.stopCount, 3, "AVKit is stopped again before and after it becomes active")
+        XCTAssertTrue(coordinator.shouldRetainPlayerLayer(layer))
+
+        driver.simulateDidStop()
+
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(layer))
+    }
+
+    func testWillStopKeepsBoundedGuardWhenDidStopNeverArrives() async {
+        let driver = FakePictureInPictureDriver()
+        driver.isPictureInPicturePossible = true
+        let coordinator = PictureInPictureCoordinator(
+            unconfirmedStopTimeoutNanoseconds: 10_000_000,
+            isSupported: { true },
+            driverFactory: { _ in driver }
+        )
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+        coordinator.start()
+        coordinator.stop()
+
+        driver.simulateWillStop()
+        XCTAssertEqual(coordinator.state, .stopping)
+        XCTAssertTrue(coordinator.shouldRetainPlayerLayer(layer))
+
+        await waitUntil("willStop without didStop must not retain the source forever") {
+            coordinator.state == .inactive
+                && !coordinator.shouldRetainPlayerLayer(layer)
+        }
+    }
+
+    func testCapturedCallbackFromCancelledDriverCannotOverwriteFreshDriver() {
+        let oldDriver = FakePictureInPictureDriver()
+        oldDriver.isPictureInPicturePossible = true
+        let newDriver = FakePictureInPictureDriver()
+        newDriver.isPictureInPicturePossible = true
+        var drivers = [oldDriver, newDriver]
+        let coordinator = PictureInPictureCoordinator(
+            isSupported: { true },
+            driverFactory: { _ in drivers.removeFirst() }
+        )
+        let layer = AVPlayerLayer(player: AVPlayer())
+
+        coordinator.attach(to: layer)
+        let staleCallback = oldDriver.eventHandler
+        let staleAvailabilityCallback = oldDriver.possibilityDidChange
+        coordinator.start()
+        coordinator.stop()
+        coordinator.start()
+
+        XCTAssertEqual(newDriver.startCount, 1)
+        XCTAssertEqual(coordinator.state, .starting)
+        staleCallback?(.didStart)
+        staleAvailabilityCallback?(false)
+
+        XCTAssertEqual(coordinator.state, .starting)
+        XCTAssertEqual(coordinator.availability, .available)
+        XCTAssertFalse(coordinator.isActive)
+        XCTAssertTrue(coordinator.isAttached(to: layer))
+        newDriver.simulateDidStart()
+        XCTAssertEqual(coordinator.state, .active)
+    }
+
     func testStopSettlesWhenTheSessionEndedWithoutADelegateCallback() {
         let driver = FakePictureInPictureDriver()
         driver.isPictureInPicturePossible = true
@@ -306,6 +398,100 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .starting)
     }
 
+    func testExplicitStopCompletesPendingAutomaticLayerHandoff() {
+        let driver = FakePictureInPictureDriver()
+        let coordinator = makeCoordinator(driver: driver)
+        let player = AVPlayer()
+        let sourceLayer = AVPlayerLayer(player: player)
+        let nextLayer = AVPlayerLayer(player: player)
+        coordinator.attach(to: sourceLayer)
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        coordinator.attach(to: nextLayer)
+
+        XCTAssertTrue(sourceLayer.player === player)
+        XCTAssertNil(nextLayer.player)
+        XCTAssertTrue(coordinator.isAttached(to: sourceLayer))
+
+        coordinator.stop()
+
+        XCTAssertNil(sourceLayer.player)
+        XCTAssertTrue(nextLayer.player === player)
+        XCTAssertTrue(coordinator.isAttached(to: nextLayer))
+        XCTAssertEqual(driver.startCount, 0)
+    }
+
+    func testUnavailableAutomaticStartTimesOutAndReleasesSource() async {
+        let driver = FakePictureInPictureDriver()
+        let coordinator = PictureInPictureCoordinator(
+            automaticStartReadinessTimeoutNanoseconds: 10_000_000,
+            isSupported: { true },
+            driverFactory: { _ in driver }
+        )
+        let view = PlayerLayerContainerView(notificationCenter: NotificationCenter())
+        let player = AVPlayer()
+        view.setPlayer(player)
+        coordinator.attach(
+            to: view.playerLayer,
+            retentionDidChange: { [weak view] in
+                view?.reconcilePlayerLayerRetention()
+            }
+        )
+        view.prepareForBackground = {
+            coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        }
+        view.shouldRetainPlayerLayerInBackground = {
+            coordinator.shouldRetainPlayerLayer(view.playerLayer)
+        }
+
+        view.releasePlayerForBackground()
+        XCTAssertTrue(view.playerLayer.player === player)
+
+        await waitUntil("bounded PiP readiness releases the background layer") {
+            view.playerLayer.player == nil
+        }
+
+        XCTAssertEqual(driver.startCount, 0)
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(view.playerLayer))
+
+        // Availability after the expired background intent belongs to no active
+        // generation and must not restart PiP or reclaim the released layer.
+        driver.updatePossible(true)
+        XCTAssertEqual(driver.startCount, 0)
+        XCTAssertNil(view.playerLayer.player)
+    }
+
+    func testForegroundCancelsUnavailableAutomaticReadinessGeneration() async {
+        let notifications = NotificationCenter()
+        let driver = FakePictureInPictureDriver()
+        let coordinator = PictureInPictureCoordinator(
+            notificationCenter: notifications,
+            automaticStartReadinessTimeoutNanoseconds: 10_000_000,
+            isSupported: { true },
+            driverFactory: { _ in driver }
+        )
+        let layer = AVPlayerLayer(player: AVPlayer())
+        coordinator.attach(to: layer)
+        coordinator.applicationDidEnterBackground(playbackIsActive: true)
+        coordinator.detach(from: layer)
+        XCTAssertTrue(
+            coordinator.isAttached(to: layer),
+            "pending automatic readiness defers source teardown"
+        )
+
+        notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitUntil("foreground notification cancels the background intent") {
+            coordinator.applicationState == .active
+        }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        driver.updatePossible(true)
+
+        XCTAssertEqual(driver.startCount, 0)
+        XCTAssertEqual(coordinator.state, .inactive)
+        XCTAssertFalse(coordinator.isAttached(to: layer))
+        XCTAssertFalse(coordinator.shouldRetainPlayerLayer(layer))
+    }
+
     func testSynchronousPossibilityCallbackUsesFullyConfiguredDriverExactlyOnce() {
         let driver = FakePictureInPictureDriver()
         driver.isPictureInPicturePossible = true
@@ -316,7 +502,7 @@ final class PictureInPictureTests: XCTestCase {
         )
         var driverWasConfiguredBeforeStart = false
         driver.onStart = {
-            driverWasConfiguredBeforeStart = driver.delegate != nil
+            driverWasConfiguredBeforeStart = driver.eventHandler != nil
                 && driver.canStartPictureInPictureAutomaticallyFromInline
         }
 
@@ -340,9 +526,6 @@ final class PictureInPictureTests: XCTestCase {
             isSupported: { true },
             driverFactory: { _ in drivers.removeFirst() }
         )
-        oldDriver.didFail = { [weak coordinator] error in
-            coordinator?.handleFailedToStart(error)
-        }
         let player = AVPlayer()
         let oldLayer = AVPlayerLayer(player: player)
         let newLayer = AVPlayerLayer(player: player)
@@ -373,7 +556,12 @@ final class PictureInPictureTests: XCTestCase {
         let view = PlayerLayerContainerView(notificationCenter: center)
         let player = AVPlayer()
         view.setPlayer(player)
-        coordinator.attach(to: view.playerLayer)
+        coordinator.attach(
+            to: view.playerLayer,
+            retentionDidChange: { [weak view] in
+                view?.reconcilePlayerLayerRetention()
+            }
+        )
         view.prepareForBackground = {
             coordinator.applicationDidEnterBackground(playbackIsActive: true)
         }
@@ -386,9 +574,11 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertTrue(view.playerLayer.player === player)
 
         driver.simulateFailure(NSError(domain: "PictureInPictureTests", code: 99))
-        view.reconcilePlayerLayerRetention()
 
-        XCTAssertNil(view.playerLayer.player)
+        XCTAssertNil(
+            view.playerLayer.player,
+            "the coordinator must notify its container without a SwiftUI redraw or manual reconcile"
+        )
         XCTAssertFalse(coordinator.shouldRetainPlayerLayer(view.playerLayer))
     }
 
@@ -442,27 +632,36 @@ final class PictureInPictureTests: XCTestCase {
         XCTAssertNil(abandonedLayer.player)
     }
 
+    private func waitUntil(
+        _ message: String,
+        timeout: TimeInterval = 2,
+        condition: () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(condition(), message)
+    }
+
     private func makeCoordinator(
         driver: FakePictureInPictureDriver,
         startsAutomaticallyFromInline: Bool = true,
         notificationCenter: NotificationCenter = .default
     ) -> PictureInPictureCoordinator {
-        let coordinator = PictureInPictureCoordinator(
+        PictureInPictureCoordinator(
             startsAutomaticallyFromInline: startsAutomaticallyFromInline,
             notificationCenter: notificationCenter,
             isSupported: { true },
             driverFactory: { _ in driver }
         )
-        driver.didStart = { [weak coordinator] in coordinator?.handleDidStart() }
-        driver.didStop = { [weak coordinator] in coordinator?.handleDidStop() }
-        driver.didFail = { [weak coordinator] error in coordinator?.handleFailedToStart(error) }
-        return coordinator
     }
 }
 
 @MainActor
 private final class FakePictureInPictureDriver: PictureInPictureControllerDriving {
-    weak var delegate: AVPictureInPictureControllerDelegate?
+    var eventHandler: ((PictureInPictureDriverEvent) -> Void)?
     var isPictureInPicturePossible = false
     var isPictureInPictureActive = false
     var canStartPictureInPictureAutomaticallyFromInline = false
@@ -475,9 +674,6 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
         }
     }
     var onStart: (() -> Void)?
-    var didStart: (() -> Void)?
-    var didStop: (() -> Void)?
-    var didFail: ((Error) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
@@ -495,17 +691,25 @@ private final class FakePictureInPictureDriver: PictureInPictureControllerDrivin
         possibilityDidChange?(possible)
     }
 
+    func simulateWillStart() {
+        eventHandler?(.willStart)
+    }
+
     func simulateDidStart() {
         isPictureInPictureActive = true
-        didStart?()
+        eventHandler?(.didStart)
+    }
+
+    func simulateWillStop() {
+        eventHandler?(.willStop)
     }
 
     func simulateDidStop() {
         isPictureInPictureActive = false
-        didStop?()
+        eventHandler?(.didStop)
     }
 
     func simulateFailure(_ error: Error) {
-        didFail?(error)
+        eventHandler?(.failedToStart(error))
     }
 }
