@@ -36,7 +36,8 @@ struct FreshnessBanner: View {
             .padding(.horizontal, DS.Spacing.l)
             .padding(.vertical, DS.Spacing.s)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DS.Palette.warning.opacity(0.12))
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
             .accessibilityElement(children: .combine)
         }
     }

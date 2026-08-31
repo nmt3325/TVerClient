@@ -45,7 +45,7 @@ struct PlaybackPresenceBar: View {
             .accessibilityLabel(presence.isPlaying ? "一時停止" : "再生")
 
             Button(action: onStop) {
-                Image(systemName: "stop.fill")
+                Image(systemName: "xmark")
                     .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
                     .contentShape(Rectangle())
             }

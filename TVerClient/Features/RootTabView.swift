@@ -25,6 +25,7 @@ struct RootTabView: View {
     @StateObject private var seriesSubscriptions = SeriesSubscriptionStore(service: TVerAPIClient())
     @StateObject private var catchUpAvailability = CatchUpAvailabilityStore(lookup: TVerAPIClient())
     @StateObject private var areaStore = AreaStore(service: TVerAPIClient())
+    @StateObject private var tabReselection = TabReselection()
 
     /// アプリを離れて戻ったときに、見ていたタブへ戻る。
     @SceneStorage("RootTabView.selectedTab") private var storedTab: String = RootTab.catchUp.rawValue
@@ -32,7 +33,14 @@ struct RootTabView: View {
     private var selection: Binding<RootTab> {
         Binding(
             get: { RootTab(rawValue: storedTab) ?? .catchUp },
-            set: { storedTab = $0.rawValue }
+            set: { newValue in
+                // 表示中のタブをもう一度選んだときは、iOS 標準アプリと同じく
+                // 先頭へ戻る。TabView の selection だけでは検出できないのでここで見る。
+                if newValue.rawValue == storedTab {
+                    tabReselection.send(newValue)
+                }
+                storedTab = newValue.rawValue
+            }
         )
     }
 
@@ -72,25 +80,17 @@ struct RootTabView: View {
                 playbackController: playbackController
             )
             .tabItem {
-                Label("ライブラリ", systemImage: "arrow.down.circle")
+                Label("ライブラリ", systemImage: "rectangle.stack")
             }
             .tag(RootTab.library)
 
-            #if DEBUG
-            // 開発者向けの画面なので、出荷ビルドではタブバーに並べない。
-            // リリースでの入口はライブラリ画面のツールバーから提供する。
-            DiagnosticsView(logStore: diagnosticLogStore)
-                .tabItem {
-                    Label("診断", systemImage: "stethoscope")
-                }
-                .tag(RootTab.diagnostics)
-            #endif
         }
         .tint(DS.Palette.catchUp)
         .environmentObject(downloadCenter)
         .environmentObject(seriesSubscriptions)
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)
+        .environmentObject(tabReselection)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // 再生シートを閉じても、止める場所と戻る場所が必ず画面に残る。
             if let presence = playbackController.presence {
