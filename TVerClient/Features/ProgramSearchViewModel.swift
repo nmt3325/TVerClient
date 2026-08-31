@@ -292,6 +292,9 @@ struct ProgramSearchStatusView: View {
 ///
 /// 絞り込みは検索欄から離れたところで設定するので、「思ったより結果が少ない」
 /// 原因が絞り込みだと気づけない。効いているときだけ帯で出し、その場で外せるようにする。
+///
+/// 呼び出し側は `.safeAreaInset(edge: .top)` に置く。素材はシステムのバーに
+/// そろえ、効いていないときは高さ 0 のまま区切り線も残さない。
 @MainActor
 struct ProgramSearchFilterSummaryBar: View {
     @ObservedObject var viewModel: ProgramSearchViewModel
@@ -314,6 +317,8 @@ struct ProgramSearchFilterSummaryBar: View {
             .padding(.horizontal, DS.Spacing.l)
             .padding(.vertical, DS.Spacing.xs)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
             .accessibilityElement(children: .contain)
         }
     }

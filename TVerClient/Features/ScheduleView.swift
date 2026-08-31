@@ -1,5 +1,6 @@
 import AVKit
 import Foundation
+import Combine
 import SwiftUI
 
 @MainActor
@@ -251,12 +252,27 @@ struct ScheduleView: View {
     @StateObject private var searchViewModel: ProgramSearchViewModel
     @ObservedObject private var playbackController: PlaybackController
     @ObservedObject private var libraryStore: ProgramLibraryStore
-    @State private var selectedProgram: TVerProgram?
+    @EnvironmentObject private var downloadCenter: DownloadCenter
+    /// 表示中のタブをもう一度選んだ合図を受け取る共通のチャネル。
+    @EnvironmentObject private var tabReselection: TabReselection
+    /// 視聴画面は push で開く。同じタブの再選択でルートへ戻せるよう経路を持つ。
+    @State private var path: [TVerProgram] = []
+    /// スワイプと長押しから中止・削除するときに出す確認。
+    @State private var pendingDownload: PendingDownloadAction?
     @State private var now = Date()
 
     /// まもなく終わる番組をリストの先頭に出す本数。多すぎると本編の一覧が
     /// 押し出されるので、拾い読みできる範囲で止める。
     private static let expiringSoonLimit = 5
+
+    /// 行の中にダウンロードのボタンを置けない代わりに、スワイプと長押しから
+    /// 同じ操作を出す。中止と削除はボタン経由と同じ確認を必ず通す。
+    private struct PendingDownloadAction: Identifiable, Equatable {
+        let program: TVerProgram
+        let confirmation: DownloadConfirmation
+
+        var id: String { "\(program.id):\(confirmation.id)" }
+    }
 
     init(
         viewModel: ScheduleViewModel,
@@ -272,13 +288,17 @@ struct ScheduleView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             content
                 .navigationTitle("見逃し")
                 .toolbar { toolbarContent }
+                .navigationDestination(for: TVerProgram.self) { program in
+                    playbackDestination(for: program)
+                }
+                // 常時表示をやめ、引き下げで現れる標準の検索欄に戻す。
+                // 入力先は searchViewModel.query のまま変えない。
                 .searchable(
                     text: $searchViewModel.query,
-                    placement: .navigationBarDrawer(displayMode: .always),
                     prompt: Text(ProgramSearchAccessibilityText.fieldLabel)
                 )
                 .textInputAutocapitalization(.never)
@@ -295,13 +315,48 @@ struct ScheduleView: View {
         .onChange(of: libraryStore.favoriteProgramIDs) { _ in
             refreshSearchIndex()
         }
-        .sheet(item: $selectedProgram) { program in
-            PlaybackView(
-                program: program,
-                playbackController: playbackController,
-                libraryStore: libraryStore
+        .onChange(of: path) { newPath in
+            // 行のタップは NavigationLink が受けるので、記録はここで取る。
+            guard !newPath.isEmpty else { return }
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: "VOD playback selected"
             )
         }
+        .confirmationDialog(
+            Text(pendingDownload?.confirmation.title ?? ""),
+            isPresented: Binding(
+                get: { pendingDownload != nil },
+                set: { isPresented in
+                    if !isPresented { pendingDownload = nil }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDownload
+        ) { pending in
+            Button(
+                pending.confirmation.confirmLabel,
+                role: pending.confirmation.isDestructive ? ButtonRole.destructive : nil
+            ) {
+                performDownloadAction(pending)
+                pendingDownload = nil
+            }
+            Button("やめる", role: .cancel) { pendingDownload = nil }
+        } message: { pending in
+            Text(pending.confirmation.message)
+        }
+    }
+
+    /// 視聴画面は自前の NavigationStack とバーを持つ。押し出した先で外側の
+    /// バーまで出すと2段になるので、そちらは隠す。畳むのは「最小化」が行う。
+    private func playbackDestination(for program: TVerProgram) -> some View {
+        PlaybackView(
+            program: program,
+            playbackController: playbackController,
+            libraryStore: libraryStore
+        )
+        .toolbar(.hidden, for: .navigationBar)
     }
 
     @ViewBuilder
@@ -334,21 +389,15 @@ struct ScheduleView: View {
     }
 
     private var scheduleList: some View {
-        VStack(spacing: 0) {
-            // 表示中の一覧が最新でないときだけ出る。スクロールしても
-            // 隠れない位置に置いて、古い内容を最新と取り違えさせない。
-            FreshnessBanner(freshness: viewModel.freshness, retry: { reload() })
-
-            // 絞り込みはツールバーの奥で設定するので、効いていること自体に気づけない。
-            // 結果の上に固定で出して、その場で外せるようにする。
-            ProgramSearchFilterSummaryBar(viewModel: searchViewModel)
-
+        ScrollViewReader { proxy in
             List {
                 if isSearchPresentationActive {
                     searchSection
+                        .id(StandardScrollAnchor.top)
                 } else {
                     if !expiringSoonPrograms.isEmpty {
                         expiringSoonSection
+                            .id(StandardScrollAnchor.top)
                     }
                     ForEach(populatedDays, id: \.date) { day in
                         Section {
@@ -358,15 +407,47 @@ struct ScheduleView: View {
                         } header: {
                             sectionHeader(dayTitle(for: day.date), subtitle: "\(day.programs.count)本")
                         }
+                        .id(dayAnchorID(for: day))
                     }
                 }
             }
             .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(DS.Palette.background)
             .refreshable { await reloadAsync(forceRefresh: true) }
-            .overlay(alignment: .top) { refreshIndicator }
+            // 常設帯は1枚にまとめてここに固定する。どちらも出ていないときは
+            // 高さ 0 になり、区切り線も残らない。
+            .safeAreaInset(edge: .top, spacing: 0) { topBands }
+            .onReceive(tabReselection.events) { tab in
+                guard tab == .catchUp else { return }
+                // 標準アプリと同じ順序。まず視聴画面を畳み、次に先頭へ戻す。
+                if !path.isEmpty {
+                    path.removeAll()
+                    return
+                }
+                withAnimation { proxy.scrollTo(StandardScrollAnchor.top, anchor: .top) }
+            }
         }
+    }
+
+    /// 常設帯はこの1枚だけにする。以前は2枚を縦に積んで、一覧の見える高さを
+    /// そのぶん削っていた。
+    private var topBands: some View {
+        VStack(spacing: 0) {
+            // 表示中の一覧が最新でないときだけ出る。古い内容を最新と
+            // 取り違えさせない。
+            FreshnessBanner(freshness: viewModel.freshness, retry: { reload() })
+
+            // 絞り込みはツールバーの奥で設定するので、効いていること自体に
+            // 気づけない。効いているときだけ出して、その場で外せるようにする。
+            ProgramSearchFilterSummaryBar(viewModel: searchViewModel)
+        }
+    }
+
+    /// 先頭へ戻すときの目印は、いちばん上に出ているセクションに付ける。
+    private func dayAnchorID(for day: ProgramDay) -> String {
+        let isTop = expiringSoonPrograms.isEmpty && day.date == populatedDays.first?.date
+        return isTop
+            ? StandardScrollAnchor.top
+            : "schedule.day.\(day.date.timeIntervalSinceReferenceDate)"
     }
 
     /// カードの横スクロール棚をやめ、本編と同じ行で並べる。視線の動きが
@@ -402,60 +483,50 @@ struct ScheduleView: View {
     }
 
     private var searchHeader: some View {
-        SectionHeader("検索結果") {
+        HStack(alignment: .firstTextBaseline) {
+            Text("検索結果")
+            Spacer(minLength: DS.Spacing.s)
             if searchViewModel.isFiltering {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("検索中")
             } else {
                 Text("\(searchedPrograms.count)件")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(searchViewModel.accessibilitySummary)
-        .listRowInsets(headerInsets)
-        .listRowSeparator(.hidden)
-        .textCase(nil)
     }
 
     private func programRow(_ program: TVerProgram) -> some View {
         let isFavorite = libraryStore.isFavorite(program)
-        // The download control is a sibling rather than a nested button: a
-        // button inside another button's label does not get its own tap
-        // target in a List row.
-        return HStack(spacing: DS.Spacing.s) {
-            Button {
-                open(program)
-            } label: {
-                MediaRow(
-                    title: displayTitle(for: program),
-                    subtitle: program.title,
-                    detail: detailText(for: program),
-                    thumbnailURL: program.thumbnailURL,
-                    badges: badges(for: program)
-                )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(accessibilityLabel(for: program))
-            .accessibilityHint("ダブルタップして視聴画面を開きます")
-
-            DownloadButton(program: program)
+        // 行そのものをリンクにする。行の中にボタンを置くと標準のハイライトも
+        // 移動を示す山形も出せないので、ダウンロードはスワイプと長押しに回す。
+        return NavigationLink(value: program) {
+            MediaRow(
+                title: displayTitle(for: program),
+                subtitle: program.title,
+                detail: detailText(for: program),
+                thumbnailURL: program.thumbnailURL,
+                badges: badges(for: program)
+            )
         }
-        .listRowInsets(
-            EdgeInsets(top: 0, leading: DS.Spacing.l, bottom: 0, trailing: DS.Spacing.l)
-        )
+        .accessibilityLabel(accessibilityLabel(for: program))
+        .accessibilityHint("ダブルタップして視聴画面を開きます")
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button {
                 libraryStore.toggleFavorite(program)
             } label: {
                 Label(favoriteActionTitle(isFavorite), systemImage: isFavorite ? "heart.slash" : "heart")
             }
-            .tint(DS.Palette.live)
+            // 赤は消える操作のための色。追加と削除を同じ色で出さない。
+            .tint(.accentColor)
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            downloadAction(for: program)
         }
         .contextMenu {
             Button {
-                open(program)
+                path.append(program)
             } label: {
                 Label("視聴", systemImage: "play.fill")
             }
@@ -464,7 +535,86 @@ struct ScheduleView: View {
             } label: {
                 Label(favoriteActionTitle(isFavorite), systemImage: isFavorite ? "heart.slash" : "heart")
             }
+            downloadAction(for: program)
             shareLink(for: program)
+        }
+    }
+
+    /// 行から外したダウンロードのボタンの代わり。状態ごとに次の一手だけを
+    /// 出し、失うものがある操作には必ず確認を挟む。
+    @ViewBuilder
+    private func downloadAction(for program: TVerProgram) -> some View {
+        switch downloadCenter.state(for: program.id) {
+        case .notDownloaded:
+            Button {
+                downloadCenter.start(program)
+            } label: {
+                Label(Vocabulary.Download.action, systemImage: "arrow.down.circle")
+            }
+        case .queued, .downloading:
+            Button(role: .destructive) {
+                confirmDownload(.runningDownload, for: program)
+            } label: {
+                Label(Vocabulary.Download.cancel, systemImage: "xmark.circle")
+            }
+        case .paused:
+            downloadResumeAction(for: program)
+        case .failed:
+            Button {
+                downloadCenter.retry(program.id)
+            } label: {
+                Label("もう一度\(Vocabulary.Download.action)", systemImage: "arrow.clockwise.circle")
+            }
+        case .downloaded:
+            Button(role: .destructive) {
+                confirmDownload(.savedDownload, for: program)
+            } label: {
+                Label(Vocabulary.Download.remove, systemImage: "trash")
+            }
+        }
+    }
+
+    /// アプリの終了で中断した転送は続きから戻せない。やり直しになることを
+    /// 伝えてから始める。
+    private func downloadResumeAction(for program: TVerProgram) -> some View {
+        let isInterrupted = downloadCenter.isInterrupted(program.id)
+        return Button {
+            if isInterrupted {
+                confirmDownload(.restartDownload, for: program)
+            } else {
+                downloadCenter.resume(program.id)
+            }
+        } label: {
+            Label(
+                isInterrupted ? "最初からやり直す" : Vocabulary.Download.resume,
+                systemImage: isInterrupted ? "arrow.clockwise.circle" : "play.circle"
+            )
+        }
+    }
+
+    private func confirmDownload(
+        _ target: DownloadConfirmation.Target,
+        for program: TVerProgram
+    ) {
+        pendingDownload = PendingDownloadAction(
+            program: program,
+            confirmation: DownloadConfirmation(
+                target: target,
+                subject: displayTitle(for: program)
+            )
+        )
+    }
+
+    private func performDownloadAction(_ pending: PendingDownloadAction) {
+        switch pending.confirmation.target {
+        case .runningDownload:
+            downloadCenter.cancel(pending.program.id)
+        case .savedDownload:
+            downloadCenter.delete(pending.program.id)
+        case .restartDownload:
+            downloadCenter.restart(pending.program)
+        case .favorite, .allFavorites, .recent, .allRecents:
+            break
         }
     }
 
@@ -482,15 +632,27 @@ struct ScheduleView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         // iOS 16 で中身ごと消えないよう、配置は必ず ToolbarCompat を通す。
+        if viewModel.isLoading, viewModel.hasPrograms {
+            ToolbarItem(placement: ToolbarCompat.leading) {
+                // 引き下げ以外の更新中は、一覧に重ねる浮遊チップではなく
+                // ここで知らせる。行の上に何も乗らない。
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("更新中")
+            }
+        }
         ToolbarItem(placement: ToolbarCompat.trailing) {
             Menu {
                 Section("絞り込み") {
                     Toggle("\(Vocabulary.Library.favorites)のみ", isOn: favoritesOnly)
                 }
-                Picker("並び順", selection: $searchViewModel.sort) {
-                    ForEach(ProgramSearchSort.allCases, id: \.self) { sort in
-                        Text(sort.scheduleLabel).tag(sort)
+                Section("並び順") {
+                    Picker("並び順", selection: $searchViewModel.sort) {
+                        ForEach(ProgramSearchSort.allCases, id: \.self) { sort in
+                            Text(sort.scheduleLabel).tag(sort)
+                        }
                     }
+                    .pickerStyle(.inline)
                 }
                 if activeControlCount > 0 {
                     Divider()
@@ -503,13 +665,16 @@ struct ScheduleView: View {
                     }
                 }
             } label: {
-                Image(
-                    systemName: activeControlCount > 0
+                // ツールバーの項目は標準で最小タップ範囲を持つ。自前で 44pt を
+                // 足すと隣の項目と重なるので置かない。
+                Label(
+                    "絞り込みと並び順",
+                    systemImage: activeControlCount > 0
                         ? "line.3.horizontal.decrease.circle.fill"
                         : "line.3.horizontal.decrease.circle"
                 )
+                .labelStyle(.iconOnly)
                 .symbolRenderingMode(.hierarchical)
-                .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
             }
             .accessibilityLabel("絞り込みと並び順")
             .accessibilityValue(
@@ -518,31 +683,16 @@ struct ScheduleView: View {
         }
     }
 
-    @ViewBuilder
-    private var refreshIndicator: some View {
-        if viewModel.isLoading, viewModel.hasPrograms {
-            ProgressView()
-                .padding(DS.Spacing.s)
-                .background(.regularMaterial, in: Circle())
-                .padding(.top, DS.Spacing.s)
-                .accessibilityLabel("更新中")
-        }
-    }
-
+    /// 標準のセクションヘッダに戻す。自前の見出しは吸着したときに背景が付かず、
+    /// 下の行が透けて重なって見えていた。
     private func sectionHeader(_ title: String, subtitle: String?) -> some View {
-        SectionHeader(title, subtitle: subtitle)
-            .listRowInsets(headerInsets)
-            .listRowSeparator(.hidden)
-            .textCase(nil)
-    }
-
-    private var headerInsets: EdgeInsets {
-        EdgeInsets(
-            top: DS.Spacing.m,
-            leading: DS.Spacing.l,
-            bottom: DS.Spacing.xs,
-            trailing: DS.Spacing.l
-        )
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+            Spacer(minLength: DS.Spacing.s)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+            }
+        }
     }
 
     private var favoritesOnly: Binding<Bool> {
@@ -646,15 +796,6 @@ struct ScheduleView: View {
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "M月d日(E)"
         return formatter.string(from: date)
-    }
-
-    private func open(_ program: TVerProgram) {
-        DiagnosticLogStore.shared.record(
-            .info,
-            category: "playback",
-            message: "VOD playback selected"
-        )
-        selectedProgram = program
     }
 
     private func reload() {
