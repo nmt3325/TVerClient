@@ -108,7 +108,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         let episodes = try await fetchEpisodes(
             seriesID: normalizedSeriesID,
             credentials: credentials,
-            forceRefresh: forceRefresh
+            forceRefresh: forceRefresh,
+            allowStaleFallback: !forceRefresh
         )
         return makePrograms(from: episodes)
     }
@@ -251,14 +252,16 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private func fetchEpisodes(
         seriesID: String,
         credentials: Credentials,
-        forceRefresh: Bool
+        forceRefresh: Bool,
+        allowStaleFallback: Bool = true
     ) async throws -> [EpisodeContent] {
         let encodedSeriesID = seriesID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? seriesID
         let request = try serviceRequest(path: "callSeriesEpisodes/\(encodedSeriesID)", credentials: credentials)
         let outcome = try await loadDecoded(
             request,
             endpoint: .episodeDetail,
-            forceRefresh: forceRefresh
+            forceRefresh: forceRefresh,
+            allowStaleFallback: allowStaleFallback
         ) { root, context in
             try seriesEpisodes(root, context: context)
         }
@@ -315,7 +318,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     private func transport(
         _ request: URLRequest,
         forceRefresh: Bool,
-        useCache: Bool
+        useCache: Bool,
+        allowStaleFallback: Bool
     ) async throws -> TransportResult {
         let now = dateProvider()
         let cacheKey = useCache ? responseCacheKey(for: request) : nil
@@ -361,7 +365,8 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             }
 
             guard (200 ..< 300).contains(httpResponse.statusCode) else {
-                if isTransient(statusCode: httpResponse.statusCode),
+                if allowStaleFallback,
+                   isTransient(statusCode: httpResponse.statusCode),
                    let cached, canUseStale(cached, at: now)
                 {
                     return TransportResult(
@@ -393,7 +398,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             throw failure
         } catch {
             let duration = Self.elapsedMS(since: started)
-            if let cached, canUseStale(cached, at: now) {
+            if allowStaleFallback, let cached, canUseStale(cached, at: now) {
                 return TransportResult(
                     data: cached.data, httpStatus: nil, durationMS: duration,
                     servedWithoutRequest: false, usedStaleFallback: true
@@ -412,10 +417,16 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         _ request: URLRequest,
         endpoint: EndpointID?,
         forceRefresh: Bool = false,
-        useCache: Bool = true
+        useCache: Bool = true,
+        allowStaleFallback: Bool = true
     ) async throws -> TransportResult {
         do {
-            return try await transport(request, forceRefresh: forceRefresh, useCache: useCache)
+            return try await transport(
+                request,
+                forceRefresh: forceRefresh,
+                useCache: useCache,
+                allowStaleFallback: allowStaleFallback
+            )
         } catch let failure as TransportFailure {
             if let endpoint {
                 report(
@@ -434,11 +445,16 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         endpoint: EndpointID,
         forceRefresh: Bool = false,
         useCache: Bool = true,
+        allowStaleFallback: Bool = true,
         trackUnknownKeys: Bool = true,
         transform: (TVerPayloadNode, TVerPayloadDecodeContext) throws -> Value
     ) async throws -> DecodeOutcome<Value> {
         let result = try await attempt(
-            request, endpoint: endpoint, forceRefresh: forceRefresh, useCache: useCache
+            request,
+            endpoint: endpoint,
+            forceRefresh: forceRefresh,
+            useCache: useCache,
+            allowStaleFallback: allowStaleFallback
         )
         do {
             let outcome = try TVerPayloadDecoder.decode(
@@ -784,9 +800,10 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         var seenEpisodeIDs = Set<String>()
         return episodes.compactMap { episode in
             guard let episodeID = episode.id, !episodeID.isEmpty,
+                  let program = makeProgram(from: episode, episodeID: episodeID),
                   seenEpisodeIDs.insert(episodeID).inserted
             else { return nil }
-            return makeProgram(from: episode, episodeID: episodeID)
+            return program
         }
     }
 
@@ -807,9 +824,13 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
 
     private func makeProgramDays(from episodes: [EpisodeContent]) -> [ProgramDay] {
         var programsByDate: [Date: [TVerProgram]] = [:]
-        for program in makePrograms(from: episodes) {
-            guard !program.broadcastLabel.isEmpty,
-                  let date = broadcastDate(from: program.broadcastLabel)
+        var seenEpisodeIDs = Set<String>()
+        for episode in episodes {
+            guard let episodeID = episode.id, !episodeID.isEmpty,
+                  let program = makeProgram(from: episode, episodeID: episodeID),
+                  !program.broadcastLabel.isEmpty,
+                  let date = broadcastDate(from: program.broadcastLabel),
+                  seenEpisodeIDs.insert(episodeID).inserted
             else { continue }
             programsByDate[date, default: []].append(program)
         }

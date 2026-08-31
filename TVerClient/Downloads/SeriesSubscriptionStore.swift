@@ -89,6 +89,7 @@ enum SeriesSubscriptionActivity: Equatable, Sendable {
 /// Aggregate result for one startup, foreground, or manual refresh.
 struct SeriesRefreshSummary: Equatable, Sendable {
     var checkedSeriesCount = 0
+    var successfulSeriesCount = 0
     var baselinedSeriesCount = 0
     var startedEpisodeCount = 0
     var alreadyPresentEpisodeCount = 0
@@ -157,6 +158,11 @@ final class SeriesSubscriptionStore: ObservableObject {
     private let cooldown: TimeInterval
     private var lastRefreshStartedAt: Date?
     private var refreshTask: Task<SeriesRefreshSummary, Never>?
+    private var refreshTaskID: UUID?
+    private var refreshTaskStartedAt: Date?
+    private var refreshTaskIsForced = false
+    private var subscriptionGenerations: [String: UUID] = [:]
+    private var lastObservedNetworkStatus: DownloadNetworkStatus?
 
     init(
         service: TVerSeriesEpisodeServicing = TVerAPIClient(),
@@ -201,11 +207,13 @@ final class SeriesSubscriptionStore: ObservableObject {
             return
         }
 
+        let generation = UUID()
         subscriptions.append(SeriesSubscription(
             seriesID: seriesID,
             seriesTitle: Self.seriesTitle(for: program),
             subscribedAt: now()
         ))
+        subscriptionGenerations[seriesID] = generation
         sortSubscriptions()
         activities[seriesID] = .baselining
         persist()
@@ -215,11 +223,11 @@ final class SeriesSubscriptionStore: ObservableObject {
                 seriesID: seriesID,
                 forceRefresh: true
             )
-            guard index(of: seriesID) != nil else { return }
+            guard isCurrentGeneration(generation, for: seriesID) else { return }
             applyBaseline(programs, to: seriesID)
             activities[seriesID] = .subscribed
         } catch {
-            guard index(of: seriesID) != nil else { return }
+            guard isCurrentGeneration(generation, for: seriesID) else { return }
             activities[seriesID] = .failed(message: Self.errorMessage(error))
         }
     }
@@ -228,6 +236,7 @@ final class SeriesSubscriptionStore: ObservableObject {
     func unsubscribe(seriesID: String) {
         guard let normalized = Self.normalized(seriesID) else { return }
         subscriptions.removeAll { $0.seriesID == normalized }
+        subscriptionGenerations[normalized] = nil
         activities[normalized] = nil
         persist()
     }
@@ -235,6 +244,7 @@ final class SeriesSubscriptionStore: ObservableObject {
     func restore() {
         guard FileManager.default.fileExists(atPath: persistenceURL.path) else {
             subscriptions = []
+            subscriptionGenerations = [:]
             activities = [:]
             lastPersistenceFailure = nil
             return
@@ -248,56 +258,132 @@ final class SeriesSubscriptionStore: ObservableObject {
             guard payload.version == 1 else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            subscriptions = payload.subscriptions
-                .filter { Self.normalized($0.seriesID) != nil }
-                .sorted { $0.seriesID < $1.seriesID }
-            activities = Dictionary(uniqueKeysWithValues: subscriptions.map { subscription in
-                (
-                    subscription.seriesID,
-                    subscription.isBaselined
-                        ? SeriesSubscriptionActivity.subscribed
-                        : SeriesSubscriptionActivity.waitingForBaseline
-                )
-            })
+            subscriptions = Self.normalizedAndMergedSubscriptions(payload.subscriptions)
+            subscriptionGenerations = subscriptions.reduce(into: [:]) { generations, subscription in
+                generations[subscription.seriesID] = UUID()
+            }
+            activities = subscriptions.reduce(into: [:]) { restored, subscription in
+                restored[subscription.seriesID] = subscription.isBaselined
+                    ? .subscribed
+                    : .waitingForBaseline
+            }
             lastPersistenceFailure = nil
+            persist()
         } catch {
             subscriptions = []
+            subscriptionGenerations = [:]
             activities = [:]
             lastPersistenceFailure = "シリーズ購読の保存データを読み込めませんでした。\(error.localizedDescription)"
         }
     }
 
-    /// Coalesces overlapping lifecycle/manual refreshes. Manual callers pass true
-    /// to bypass the foreground cooldown and to revalidate TVer's response cache.
+    /// Coalesces equivalent refreshes. A force request that overlaps a regular
+    /// pass waits for that pass, then joins or starts one authoritative forced pass.
     @discardableResult
     func refreshAll(
         downloads: OfflineDownloadEnqueuing,
         forceRefresh: Bool
     ) async -> SeriesRefreshSummary {
-        if let refreshTask {
-            return await refreshTask.value
-        }
+        while true {
+            if let task = refreshTask, let taskID = refreshTaskID {
+                let runningTaskIsForced = refreshTaskIsForced
+                let summary = await task.value
+                finishRefresh(taskID: taskID, summary: summary)
+                if forceRefresh, !runningTaskIsForced {
+                    continue
+                }
+                return summary
+            }
 
-        let startedAt = now()
-        if !forceRefresh,
-           let previous = lastRefreshStartedAt,
-           startedAt.timeIntervalSince(previous) >= 0,
-           startedAt.timeIntervalSince(previous) < cooldown
-        {
-            let summary = SeriesRefreshSummary(skippedByCooldown: true)
-            refreshState = .completed(summary)
+            let startedAt = now()
+            if !forceRefresh,
+               let previous = lastRefreshStartedAt,
+               startedAt.timeIntervalSince(previous) >= 0,
+               startedAt.timeIntervalSince(previous) < cooldown
+            {
+                let summary = SeriesRefreshSummary(skippedByCooldown: true)
+                refreshState = .completed(summary)
+                return summary
+            }
+
+            refreshState = .refreshing
+            let taskID = UUID()
+            let task = Task { @MainActor [self] in
+                await performRefresh(downloads: downloads, forceRefresh: forceRefresh)
+            }
+            refreshTask = task
+            refreshTaskID = taskID
+            refreshTaskStartedAt = startedAt
+            refreshTaskIsForced = forceRefresh
+
+            let summary = await task.value
+            finishRefresh(taskID: taskID, summary: summary)
             return summary
         }
+    }
 
-        lastRefreshStartedAt = startedAt
-        refreshState = .refreshing
-        let task = Task { @MainActor [self] in
-            await performRefresh(downloads: downloads, forceRefresh: forceRefresh)
+    /// Connectivity is event driven: only a transition back to Wi-Fi retries
+    /// persisted work, and it does so without another series API request.
+    @discardableResult
+    func networkStatusDidChange(
+        _ status: DownloadNetworkStatus,
+        downloads: OfflineDownloadEnqueuing
+    ) -> SeriesRefreshSummary? {
+        let previous = lastObservedNetworkStatus
+        lastObservedNetworkStatus = status
+        guard let previous else { return nil }
+        let regainedConnectivity = previous == .unavailable && status != .unavailable
+        let upgradedToWiFi = previous != .wifi && status == .wifi
+        guard regainedConnectivity || upgradedToWiFi else { return nil }
+        return retryDeferred(downloads: downloads)
+    }
+
+    private func finishRefresh(
+        taskID: UUID,
+        summary: SeriesRefreshSummary
+    ) {
+        guard refreshTaskID == taskID else { return }
+        if let startedAt = refreshTaskStartedAt,
+           summary.checkedSeriesCount == 0 || summary.successfulSeriesCount > 0
+        {
+            lastRefreshStartedAt = startedAt
         }
-        refreshTask = task
-        let summary = await task.value
         refreshTask = nil
+        refreshTaskID = nil
+        refreshTaskStartedAt = nil
+        refreshTaskIsForced = false
         refreshState = .completed(summary)
+    }
+
+    private func retryDeferred(
+        downloads: OfflineDownloadEnqueuing
+    ) -> SeriesRefreshSummary {
+        var summary = SeriesRefreshSummary()
+        let intents = subscriptions.compactMap { subscription -> (String, UUID)? in
+            guard !subscription.deferredPrograms.isEmpty,
+                  let generation = subscriptionGenerations[subscription.seriesID]
+            else { return nil }
+            return (subscription.seriesID, generation)
+        }
+
+        for (seriesID, generation) in intents {
+            guard isCurrentGeneration(generation, for: seriesID) else { continue }
+            summary.checkedSeriesCount += 1
+            activities[seriesID] = .checking
+            process(
+                programs: [],
+                for: seriesID,
+                downloads: downloads,
+                summary: &summary
+            )
+            activities[seriesID] = .subscribed
+        }
+        summary.deferredEpisodeCount = subscriptions.reduce(0) { count, subscription in
+            count + subscription.deferredPrograms.count
+        }
+        if refreshTask == nil {
+            refreshState = .completed(summary)
+        }
         return summary
     }
 
@@ -306,10 +392,18 @@ final class SeriesSubscriptionStore: ObservableObject {
         forceRefresh: Bool
     ) async -> SeriesRefreshSummary {
         var summary = SeriesRefreshSummary()
-        let seriesIDs = subscriptions.map(\.seriesID)
+        for subscription in subscriptions where subscriptionGenerations[subscription.seriesID] == nil {
+            subscriptionGenerations[subscription.seriesID] = UUID()
+        }
+        let seriesIntents = subscriptions.compactMap { subscription -> (String, UUID)? in
+            guard let generation = subscriptionGenerations[subscription.seriesID] else { return nil }
+            return (subscription.seriesID, generation)
+        }
 
-        for seriesID in seriesIDs {
-            guard let initialIndex = index(of: seriesID) else { continue }
+        for (seriesID, generation) in seriesIntents {
+            guard isCurrentGeneration(generation, for: seriesID),
+                  let initialIndex = index(of: seriesID)
+            else { continue }
             summary.checkedSeriesCount += 1
             activities[seriesID] = subscriptions[initialIndex].isBaselined ? .checking : .baselining
 
@@ -320,13 +414,16 @@ final class SeriesSubscriptionStore: ObservableObject {
                     forceRefresh: forceRefresh
                 )
             } catch {
-                guard index(of: seriesID) != nil else { continue }
+                guard isCurrentGeneration(generation, for: seriesID) else { continue }
                 summary.failedSeriesCount += 1
                 activities[seriesID] = .failed(message: Self.errorMessage(error))
                 continue
             }
 
-            guard let currentIndex = index(of: seriesID) else { continue }
+            guard isCurrentGeneration(generation, for: seriesID),
+                  let currentIndex = index(of: seriesID)
+            else { continue }
+            summary.successfulSeriesCount += 1
             if !subscriptions[currentIndex].isBaselined {
                 applyBaseline(programs, to: seriesID)
                 summary.baselinedSeriesCount += 1
@@ -380,10 +477,14 @@ final class SeriesSubscriptionStore: ObservableObject {
         var candidateIDs = Set<String>()
 
         // A deferred episode that is still in the payload uses the fresh model
-        // and keeps API order. Deferred-only entries follow afterwards.
-        for program in Self.uniquePrograms(programs)
-            where !subscription.knownEpisodeIDs.contains(program.id) || deferredIDs.contains(program.id)
-        {
+        // and keeps API order. Failed legacy records are retried even if an older
+        // implementation already marked their IDs as known.
+        for program in Self.uniquePrograms(programs) {
+            let state = downloads.state(for: program.id)
+            guard !subscription.knownEpisodeIDs.contains(program.id)
+                || deferredIDs.contains(program.id)
+                || Self.isFailed(state)
+            else { continue }
             if candidateIDs.insert(program.id).inserted {
                 candidates.append(program)
             }
@@ -401,21 +502,35 @@ final class SeriesSubscriptionStore: ObservableObject {
                 continue
             }
 
-            if downloads.state(for: program.id) != .notDownloaded {
+            switch downloads.state(for: program.id) {
+            case .downloaded:
                 subscription.knownEpisodeIDs.insert(program.id)
                 deferredByID[program.id] = nil
                 summary.alreadyPresentEpisodeCount += 1
                 continue
+            case .queued, .downloading, .paused:
+                subscription.knownEpisodeIDs.insert(program.id)
+                // Keep the model until completion so a later asynchronous failure
+                // remains retryable even if the episode disappears from the API.
+                deferredByID[program.id] = program
+                summary.alreadyPresentEpisodeCount += 1
+                continue
+            case .notDownloaded, .failed:
+                break
             }
 
             let result = downloads.start(program, allowingCellular: false)
             subscription.knownEpisodeIDs.insert(program.id)
             switch result {
             case .started:
-                deferredByID[program.id] = nil
+                deferredByID[program.id] = program
                 summary.startedEpisodeCount += 1
             case .alreadyPresent:
-                deferredByID[program.id] = nil
+                if case .downloaded = downloads.state(for: program.id) {
+                    deferredByID[program.id] = nil
+                } else {
+                    deferredByID[program.id] = program
+                }
                 summary.alreadyPresentEpisodeCount += 1
             case .blockedByCellular, .rejected:
                 deferredByID[program.id] = program
@@ -459,6 +574,10 @@ final class SeriesSubscriptionStore: ObservableObject {
         subscriptions.firstIndex { $0.seriesID == seriesID }
     }
 
+    private func isCurrentGeneration(_ generation: UUID, for seriesID: String) -> Bool {
+        subscriptionGenerations[seriesID] == generation && index(of: seriesID) != nil
+    }
+
     private func sortSubscriptions() {
         subscriptions.sort { $0.seriesID < $1.seriesID }
     }
@@ -466,6 +585,62 @@ final class SeriesSubscriptionStore: ObservableObject {
     private static func uniquePrograms(_ programs: [TVerProgram]) -> [TVerProgram] {
         var seen = Set<String>()
         return programs.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }
+    }
+
+    private static func isFailed(_ state: DownloadState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    private static func normalizedAndMergedSubscriptions(
+        _ restored: [SeriesSubscription]
+    ) -> [SeriesSubscription] {
+        var bySeriesID: [String: SeriesSubscription] = [:]
+
+        for raw in restored {
+            guard let seriesID = normalized(raw.seriesID) else { continue }
+            let deferred = uniquePrograms(raw.deferredPrograms)
+            var candidate = SeriesSubscription(
+                seriesID: seriesID,
+                seriesTitle: raw.seriesTitle,
+                subscribedAt: raw.subscribedAt,
+                isBaselined: raw.isBaselined,
+                knownEpisodeIDs: Set(raw.knownEpisodeIDs.filter { !$0.isEmpty }),
+                deferredPrograms: deferred,
+                lastCheckedAt: raw.lastCheckedAt
+            )
+            candidate.knownEpisodeIDs.formUnion(deferred.map(\.id))
+
+            guard var existing = bySeriesID[seriesID] else {
+                bySeriesID[seriesID] = candidate
+                continue
+            }
+
+            if existing.seriesTitle.isEmpty, !candidate.seriesTitle.isEmpty {
+                existing.seriesTitle = candidate.seriesTitle
+            }
+            existing.subscribedAt = min(existing.subscribedAt, candidate.subscribedAt)
+            existing.isBaselined = existing.isBaselined || candidate.isBaselined
+            existing.knownEpisodeIDs.formUnion(candidate.knownEpisodeIDs)
+
+            var deferredByID = Dictionary(
+                existing.deferredPrograms.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            for program in candidate.deferredPrograms where deferredByID[program.id] == nil {
+                deferredByID[program.id] = program
+            }
+            existing.deferredPrograms = deferredByID.values.sorted { $0.id < $1.id }
+
+            switch (existing.lastCheckedAt, candidate.lastCheckedAt) {
+            case let (left?, right?): existing.lastCheckedAt = max(left, right)
+            case (nil, let right?): existing.lastCheckedAt = right
+            default: break
+            }
+            bySeriesID[seriesID] = existing
+        }
+
+        return bySeriesID.values.sorted { $0.seriesID < $1.seriesID }
     }
 
     private static func normalized(_ seriesID: String?) -> String? {

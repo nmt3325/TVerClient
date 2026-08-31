@@ -33,11 +33,16 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(first.startedEpisodeCount, 1)
         XCTAssertEqual(downloads.startedIDs, ["ep3"])
 
+        downloads.states["ep3"] = .downloaded(bytes: 42)
+        await service.enqueue(.success([program("ep1"), program("ep2"), program("ep3")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(store.subscription(for: "series-1")?.deferredCount, 0)
+
         downloads.simulateManualDeletion(of: "ep3")
         await service.enqueue(.success([program("ep1"), program("ep2"), program("ep3")]), for: "series-1")
         _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
 
-        XCTAssertEqual(downloads.startedIDs, ["ep3"], "known IDs must survive a manual deletion")
+        XCTAssertEqual(downloads.startedIDs, ["ep3"], "completed known IDs must survive a manual deletion")
         XCTAssertEqual(store.subscription(for: "series-1")?.knownEpisodeIDs, ["ep1", "ep2", "ep3"])
     }
 
@@ -100,6 +105,12 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         _ = await restored.refreshAll(downloads: retryDownloads, forceRefresh: true)
 
         XCTAssertEqual(retryDownloads.startedIDs, ["ep2", "ep3"])
+        XCTAssertEqual(restored.subscription(for: "series-1")?.deferredCount, 2)
+
+        retryDownloads.states["ep2"] = .downloaded(bytes: 20)
+        retryDownloads.states["ep3"] = .downloaded(bytes: 30)
+        await retryService.enqueue(.success([program("ep1"), program("ep2"), program("ep3")]), for: "series-1")
+        _ = await restored.refreshAll(downloads: retryDownloads, forceRefresh: true)
         XCTAssertEqual(restored.subscription(for: "series-1")?.deferredCount, 0)
 
         retryDownloads.simulateManualDeletion(of: "ep2")
@@ -237,7 +248,7 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         let store = makeStore(service: service, persistenceURL: persistenceURL)
         await store.subscribe(to: program("ep1"))
 
-        downloads.enqueue(.alreadyPresent, for: "ep2")
+        downloads.states["ep2"] = .downloaded(bytes: 42)
         await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
         let summary = await store.refreshAll(downloads: downloads, forceRefresh: true)
 
@@ -247,6 +258,249 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
 
         await store.subscribe(to: program("blank", seriesID: "   "))
         XCTAssertEqual(store.subscriptions.count, 1)
+    }
+
+    func testStartedEpisodeStaysPendingAndRetriesAfterAsynchronousFailure() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"))
+
+        downloads.states["legacy-failed"] = .failed(message: "old failure")
+        await service.enqueue(.success([
+            program("ep1"), program("ep2"), program("legacy-failed"),
+        ]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "legacy-failed"])
+        XCTAssertEqual(
+            store.subscription(for: "series-1")?.deferredPrograms.map(\.id),
+            ["ep2", "legacy-failed"],
+            "accepted starts must remain persisted until completion"
+        )
+
+        downloads.states["ep2"] = .failed(message: "resolver failed later")
+        await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "legacy-failed", "ep2"])
+
+        downloads.states["ep2"] = .downloaded(bytes: 12)
+        downloads.states["legacy-failed"] = .downloaded(bytes: 14)
+        await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(store.subscription(for: "series-1")?.deferredCount, 0)
+    }
+
+    func testRestoreNormalizesAndMergesDuplicateSeriesIDs() throws {
+        let service = FakeSeriesService()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(
+            at: persistenceURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let older = fixedNow.addingTimeInterval(-100)
+        let newer = fixedNow.addingTimeInterval(-10)
+        let payload = SeriesPersistenceFixture(version: 1, subscriptions: [
+            SeriesSubscription(
+                seriesID: " series-1 ",
+                seriesTitle: "Series",
+                subscribedAt: older,
+                knownEpisodeIDs: ["ep1"],
+                deferredPrograms: [program("ep2")],
+                lastCheckedAt: older
+            ),
+            SeriesSubscription(
+                seriesID: "series-1",
+                seriesTitle: "",
+                subscribedAt: newer,
+                isBaselined: true,
+                knownEpisodeIDs: ["ep3"],
+                deferredPrograms: [program("ep2", title: "duplicate"), program("ep4")],
+                lastCheckedAt: newer
+            ),
+            SeriesSubscription(
+                seriesID: "   ",
+                seriesTitle: "invalid",
+                subscribedAt: newer
+            ),
+        ])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(payload).write(to: persistenceURL, options: .atomic)
+
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        store.restore()
+
+        let restored = try XCTUnwrap(store.subscription(for: " series-1 "))
+        XCTAssertEqual(store.subscriptions.count, 1)
+        XCTAssertEqual(restored.seriesID, "series-1")
+        XCTAssertEqual(restored.seriesTitle, "Series")
+        XCTAssertEqual(restored.subscribedAt, older)
+        XCTAssertTrue(restored.isBaselined)
+        XCTAssertEqual(restored.knownEpisodeIDs, ["ep1", "ep2", "ep3", "ep4"])
+        XCTAssertEqual(restored.deferredPrograms.map(\.id), ["ep2", "ep4"])
+        XCTAssertEqual(restored.lastCheckedAt, newer)
+        XCTAssertNil(store.lastPersistenceFailure)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let healed = try decoder.decode(
+            SeriesPersistenceFixture.self,
+            from: Data(contentsOf: persistenceURL)
+        )
+        XCTAssertEqual(healed.subscriptions.map(\.seriesID), ["series-1"])
+    }
+
+    func testForceRefreshArrivingDuringRegularRefreshGetsItsOwnCoalescedPass() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"))
+
+        await service.setRequestsSuspended(true)
+        await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
+        await service.enqueue(.success([program("ep1"), program("ep2"), program("ep3")]), for: "series-1")
+        let regularTask = Task { @MainActor in
+            await store.refreshAll(downloads: downloads, forceRefresh: false)
+        }
+        await waitForSuspendedRequest(2, service: service)
+        let forcedTask = Task { @MainActor in
+            await store.refreshAll(downloads: downloads, forceRefresh: true)
+        }
+
+        await service.resumeRequest(2)
+        await waitForSuspendedRequest(3, service: service)
+        let requestsBeforeForcedResponse = await service.snapshotRequests()
+        XCTAssertEqual(requestsBeforeForcedResponse.map(\.forceRefresh), [true, false, true])
+        await service.resumeRequest(3)
+
+        let regular = await regularTask.value
+        let forced = await forcedTask.value
+        XCTAssertEqual(regular.startedEpisodeCount, 1)
+        XCTAssertEqual(forced.startedEpisodeCount, 1)
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "ep3"])
+    }
+
+    func testOlderSubscribeResultCannotMutateSameIDResubscription() async {
+        let service = FakeSeriesService()
+        await service.setRequestsSuspended(true)
+        await service.enqueue(.success([program("old")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+
+        let oldTask = Task { @MainActor in await store.subscribe(to: self.program("old")) }
+        await waitForSuspendedRequest(1, service: service)
+        store.unsubscribe(seriesID: "series-1")
+        await service.enqueue(.success([program("new")]), for: "series-1")
+        let newTask = Task { @MainActor in await store.subscribe(to: self.program("new")) }
+        await waitForSuspendedRequest(2, service: service)
+
+        await service.resumeRequest(2)
+        await newTask.value
+        XCTAssertEqual(store.subscription(for: "series-1")?.knownEpisodeIDs, ["new"])
+        await service.resumeRequest(1)
+        await oldTask.value
+
+        XCTAssertEqual(store.subscription(for: "series-1")?.knownEpisodeIDs, ["new"])
+        XCTAssertEqual(store.activity(for: "series-1"), .subscribed)
+        XCTAssertEqual(downloads.startedIDs, [])
+    }
+
+    func testOlderRefreshResultCannotCrossSameIDResubscriptionGeneration() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"))
+
+        await service.setRequestsSuspended(true)
+        await service.enqueue(.success([program("ep1"), program("old-new")]), for: "series-1")
+        let oldRefresh = Task { @MainActor in
+            await store.refreshAll(downloads: downloads, forceRefresh: true)
+        }
+        await waitForSuspendedRequest(2, service: service)
+        store.unsubscribe(seriesID: "series-1")
+        await service.enqueue(.success([program("replacement")]), for: "series-1")
+        let replacement = Task { @MainActor in
+            await store.subscribe(to: self.program("replacement"))
+        }
+        await waitForSuspendedRequest(3, service: service)
+
+        await service.resumeRequest(3)
+        await replacement.value
+        await service.resumeRequest(2)
+        _ = await oldRefresh.value
+
+        XCTAssertEqual(store.subscription(for: "series-1")?.knownEpisodeIDs, ["replacement"])
+        XCTAssertEqual(downloads.startedIDs, [])
+        XCTAssertEqual(store.activity(for: "series-1"), .subscribed)
+    }
+
+    func testAllFailedRefreshDoesNotStartCooldown() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"))
+
+        await service.enqueue(.failure("offline"), for: "series-1")
+        let failed = await store.refreshAll(downloads: downloads, forceRefresh: false)
+        XCTAssertEqual(failed.failedSeriesCount, 1)
+
+        await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
+        let retry = await store.refreshAll(downloads: downloads, forceRefresh: false)
+        XCTAssertFalse(retry.skippedByCooldown)
+        XCTAssertEqual(retry.startedEpisodeCount, 1)
+        XCTAssertEqual(downloads.startedIDs, ["ep2"])
+    }
+
+    func testWifiRecoveryRetriesPersistedDeferredWorkWithoutSeriesPolling() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"))
+
+        downloads.enqueue(.blockedByCellular, for: "ep2")
+        await service.enqueue(.success([program("ep1"), program("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        let requestsBeforeRecovery = await service.snapshotRequests().count
+
+        XCTAssertNil(store.networkStatusDidChange(.cellular, downloads: downloads))
+        let retry = store.networkStatusDidChange(.wifi, downloads: downloads)
+        XCTAssertEqual(retry?.startedEpisodeCount, 1)
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "ep2"])
+        let requestsAfterRecovery = await service.snapshotRequests().count
+        XCTAssertEqual(requestsAfterRecovery, requestsBeforeRecovery)
+
+        XCTAssertNil(store.networkStatusDidChange(.wifi, downloads: downloads))
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "ep2"])
+    }
+
+    private func waitForSuspendedRequest(
+        _ requestNumber: Int,
+        service: FakeSeriesService
+    ) async {
+        for _ in 0 ..< 1_000 {
+            if await service.suspendedRequestNumbers().contains(requestNumber) { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTFail("request \(requestNumber) did not suspend")
     }
 
     private func makeStore(
@@ -301,6 +555,8 @@ private actor FakeSeriesService: TVerSeriesEpisodeServicing {
     private var outcomes: [String: [Outcome]] = [:]
     private var requests: [Request] = []
     private var delayNanoseconds: UInt64 = 0
+    private var requestsAreSuspended = false
+    private var requestContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
 
     func enqueue(_ outcome: Outcome, for seriesID: String) {
         outcomes[seriesID, default: []].append(outcome)
@@ -308,6 +564,22 @@ private actor FakeSeriesService: TVerSeriesEpisodeServicing {
 
     func setDelay(nanoseconds: UInt64) {
         delayNanoseconds = nanoseconds
+    }
+
+    func setRequestsSuspended(_ suspended: Bool) {
+        requestsAreSuspended = suspended
+        guard !suspended else { return }
+        let continuations = Array(requestContinuations.values)
+        requestContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
+    func resumeRequest(_ requestNumber: Int) {
+        requestContinuations.removeValue(forKey: requestNumber)?.resume()
+    }
+
+    func suspendedRequestNumbers() -> Set<Int> {
+        Set(requestContinuations.keys)
     }
 
     func snapshotRequests() -> [Request] { requests }
@@ -320,6 +592,12 @@ private actor FakeSeriesService: TVerSeriesEpisodeServicing {
             outcomes[seriesID] = queued
         } else {
             outcome = .success([])
+        }
+        let requestNumber = requests.count
+        if requestsAreSuspended {
+            await withCheckedContinuation { continuation in
+                requestContinuations[requestNumber] = continuation
+            }
         }
         let delay = delayNanoseconds
         if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
@@ -372,4 +650,9 @@ private final class FakeDownloadEnqueuer: OfflineDownloadEnqueuing {
 private final class TestClock {
     var date: Date
     init(date: Date) { self.date = date }
+}
+
+private struct SeriesPersistenceFixture: Codable {
+    let version: Int
+    let subscriptions: [SeriesSubscription]
 }

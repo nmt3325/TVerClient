@@ -176,6 +176,62 @@ final class TVerAPIDecodingTests: XCTestCase {
         XCTAssertEqual(programs.last?.broadcastLabel, "")
     }
 
+    func testDuplicateEpisodeIDsAreClaimedOnlyAfterSurfaceValidation() {
+        let episodes = [
+            EpisodeContent(
+                id: "title-duplicate",
+                seriesID: "series",
+                title: nil,
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: "8月29日",
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+            EpisodeContent(
+                id: "title-duplicate",
+                seriesID: "series",
+                title: "有効な後続タイトル",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: "8月29日",
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+            EpisodeContent(
+                id: "date-duplicate",
+                seriesID: "series",
+                title: "シリーズ面では先頭が有効",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: nil,
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+            EpisodeContent(
+                id: "date-duplicate",
+                seriesID: "series",
+                title: "日付も有効な後続",
+                seriesTitle: "番組",
+                description: nil,
+                broadcastDateLabel: "8月29日",
+                endAt: nil,
+                thumbnailPath: nil
+            ),
+        ]
+
+        let seriesPrograms = client.seriesPrograms(fromEpisodes: episodes)
+        XCTAssertEqual(seriesPrograms.map(\.id), ["title-duplicate", "date-duplicate"])
+        XCTAssertEqual(
+            seriesPrograms.map(\.title),
+            ["有効な後続タイトル", "シリーズ面では先頭が有効"]
+        )
+
+        let scheduledPrograms = client.programDays(fromEpisodes: episodes).flatMap(\.programs)
+        XCTAssertEqual(scheduledPrograms.map(\.id), ["title-duplicate", "date-duplicate"])
+        XCTAssertEqual(scheduledPrograms.map(\.title), ["有効な後続タイトル", "日付も有効な後続"])
+    }
+
     func testRankedSeriesIDsFollowRank() throws {
         let ids = try XCTUnwrap(client.decodeRankedSeriesIDs(TVerFixture.data("platform_ranking")).value)
         XCTAssertEqual(ids, ["sr000001", "sr000002", "sr000003"])
