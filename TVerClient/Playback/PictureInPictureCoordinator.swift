@@ -879,7 +879,12 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         let callbackDriverIdentifier = currentDriverIdentifier
         deferredLifecyclePublicationTask?.cancel()
         deferredLifecyclePublicationTask = Task { @MainActor [weak self] in
-            await Task.yield()
+            // `Task.yield()` may resume while SwiftUI is still inside the same
+            // graph transaction. Crossing the main dispatch queue boundary
+            // guarantees the representable lifecycle callback has unwound.
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { continuation.resume() }
+            }
             guard let self,
                   !Task.isCancelled,
                   callbackLifecycleGeneration == self.lifecycleMutationGeneration,

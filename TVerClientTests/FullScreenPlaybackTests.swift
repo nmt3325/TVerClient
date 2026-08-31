@@ -377,8 +377,13 @@ final class FullScreenPlaybackTests: XCTestCase {
         let model = PlayerChromeModel(autoHideDelay: 60)
         model.isAutoHideSuspended = true
         var publicationCount = 0
+        var trackedLayer: AVPlayerLayer?
+        var publishedWhileTrackedLayerWasAttached = false
         let observation = coordinator.objectWillChange.sink {
             publicationCount += 1
+            if let trackedLayer, coordinator.isAttached(to: trackedLayer) {
+                publishedWhileTrackedLayerWasAttached = true
+            }
         }
         let stage = PlayerStage(
             playbackController: controller,
@@ -412,18 +417,25 @@ final class FullScreenPlaybackTests: XCTestCase {
             publicationCount > 0
         }
 
+        trackedLayer = mountedLayer.playerLayer
         let countBeforeDismantle = publicationCount
         harness.replaceRoot(with: AnyView(EmptyView()))
 
-        XCTAssertFalse(coordinator.isAttached(to: mountedLayer.playerLayer))
         XCTAssertEqual(
             publicationCount,
             countBeforeDismantle,
-            "dismantle must synchronously clean ownership without synchronously publishing"
+            "graph replacement must not synchronously publish from the representable lifecycle"
         )
+        await waitUntil("the hosted graph dismantles the real player layer") {
+            !coordinator.isAttached(to: mountedLayer.playerLayer)
+        }
         await waitUntil("dismantle publication is deferred until after graph replacement") {
             publicationCount > countBeforeDismantle
         }
+        XCTAssertFalse(
+            publishedWhileTrackedLayerWasAttached,
+            "ownership must be cleared before the deferred lifecycle publication is delivered"
+        )
 
         await harness.tearDown(model: model)
         withExtendedLifetime(observation) {}

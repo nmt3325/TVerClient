@@ -186,21 +186,34 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> PlayerLayerContainerView {
-        DiagnosticLogStore.shared.record(
-            .info,
-            category: "playback",
-            message: "Video surface creation started",
-            metadata: ["pictureInPicture": AppRuntimeEnvironment.isLiveContainer ? "disabled-livecontainer" : "enabled"]
+        let runtimeLabel = AppRuntimeEnvironment.isLiveContainer ? "disabled-livecontainer" : "enabled"
+        Self.recordAfterViewUpdate(
+            "Video surface creation started",
+            metadata: ["pictureInPicture": runtimeLabel]
         )
         let view = PlayerLayerContainerView()
         configure(view)
         applyOwnership(to: view, context: context)
-        DiagnosticLogStore.shared.record(
-            .info,
-            category: "playback",
-            message: "Video surface created"
-        )
+        Self.recordAfterViewUpdate("Video surface created")
         return view
+    }
+
+    /// `DiagnosticLogStore` publishes its entries, so recording from inside a
+    /// representable lifecycle callback publishes changes from within a SwiftUI
+    /// view update. Hop to the next main-actor turn so the log still lands but
+    /// never mutates observable state while the graph is being evaluated.
+    private static func recordAfterViewUpdate(
+        _ message: String,
+        metadata: [String: String] = [:]
+    ) {
+        Task { @MainActor in
+            DiagnosticLogStore.shared.record(
+                .info,
+                category: "playback",
+                message: message,
+                metadata: metadata
+            )
+        }
     }
 
     func updateUIView(_ view: PlayerLayerContainerView, context: Context) {

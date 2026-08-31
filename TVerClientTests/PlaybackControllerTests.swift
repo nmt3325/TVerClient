@@ -134,6 +134,7 @@ final class PlaybackControllerTests: XCTestCase {
 
     func testCancellingScrubEndsOwnershipWithoutCommittingAStaleFinalSeek() async throws {
         let context = try await makePlayingController(seconds: 3)
+        await waitUntil("the controller becomes seekable") { context.controller.canSeek }
         context.controller.beginScrubbing()
         XCTAssertTrue(context.controller.isScrubbing)
 
