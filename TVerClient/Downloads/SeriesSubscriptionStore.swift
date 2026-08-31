@@ -1,7 +1,8 @@
 import Combine
 import Foundation
 
-/// Persistent intent to download only episodes published after the user subscribed.
+/// Persistent intent to download episodes with a trusted API publication time after subscription.
+/// Episodes with a missing or invalid publication time are conservatively remembered without download.
 struct SeriesSubscription: Identifiable, Equatable, Sendable, Codable {
     let seriesID: String
     var seriesTitle: String
@@ -98,6 +99,18 @@ struct SeriesRefreshSummary: Equatable, Sendable {
     var failedSeriesCount = 0
     var skippedByCooldown = false
 
+    mutating func merge(_ other: SeriesRefreshSummary) {
+        checkedSeriesCount = max(checkedSeriesCount, other.checkedSeriesCount)
+        successfulSeriesCount += other.successfulSeriesCount
+        baselinedSeriesCount += other.baselinedSeriesCount
+        startedEpisodeCount += other.startedEpisodeCount
+        alreadyPresentEpisodeCount += other.alreadyPresentEpisodeCount
+        deferredEpisodeCount = max(deferredEpisodeCount, other.deferredEpisodeCount)
+        expiredEpisodeCount += other.expiredEpisodeCount
+        failedSeriesCount += other.failedSeriesCount
+        skippedByCooldown = skippedByCooldown || other.skippedByCooldown
+    }
+
     var message: String {
         if skippedByCooldown {
             return "前回の確認から間もないため、新着確認を省略しました。"
@@ -162,6 +175,12 @@ final class SeriesSubscriptionStore: ObservableObject {
     private var refreshTaskStartedAt: Date?
     private var refreshTaskIsForced = false
     private var subscriptionGenerations: [String: UUID] = [:]
+    /// A connectivity transition gets at most one discovery retry for a failed
+    /// subscription generation. Success clears the marker so a later failure can retry.
+    private var automaticRetryAttemptedGenerations: [String: UUID] = [:]
+    /// Registered by the app shell so the playback UI can keep its narrow
+    /// subscription call while race-safe baseline processing can still enqueue.
+    private var automaticDownloads: OfflineDownloadEnqueuing?
     private var lastObservedNetworkStatus: DownloadNetworkStatus?
 
     init(
@@ -193,10 +212,21 @@ final class SeriesSubscriptionStore: ObservableObject {
             ?? (subscription.isBaselined ? .subscribed : .waitingForBaseline)
     }
 
-    /// Saves the intent before attempting the network baseline. A failed first
-    /// fetch therefore remains subscribed and the first later success is still
-    /// baseline-only rather than a bulk download.
+    func configureAutomaticDownloads(_ downloads: OfflineDownloadEnqueuing) {
+        automaticDownloads = downloads
+    }
+
+    /// Playback's subscription action uses the app-shell enqueuer. The fallback
+    /// still persists eligible work if configuration has not completed yet.
     func subscribe(to program: TVerProgram) async {
+        let downloads = automaticDownloads ?? DeferredSeriesDownloadEnqueuer.shared
+        await subscribe(to: program, downloads: downloads)
+    }
+
+    /// Saves the intent before attempting the fresh network baseline. If that
+    /// request is delayed, only episodes whose trusted `publishedAt` is after the
+    /// saved `subscribedAt` are processed; unknown timestamps are remembered only.
+    func subscribe(to program: TVerProgram, downloads: OfflineDownloadEnqueuing) async {
         guard let seriesID = Self.normalized(program.seriesID) else { return }
         if let index = index(of: seriesID) {
             let title = Self.seriesTitle(for: program)
@@ -214,6 +244,7 @@ final class SeriesSubscriptionStore: ObservableObject {
             subscribedAt: now()
         ))
         subscriptionGenerations[seriesID] = generation
+        automaticRetryAttemptedGenerations[seriesID] = nil
         sortSubscriptions()
         activities[seriesID] = .baselining
         persist()
@@ -223,8 +254,28 @@ final class SeriesSubscriptionStore: ObservableObject {
                 seriesID: seriesID,
                 forceRefresh: true
             )
-            guard isCurrentGeneration(generation, for: seriesID) else { return }
-            applyBaseline(programs, to: seriesID)
+            guard isCurrentGeneration(generation, for: seriesID),
+                  let currentIndex = index(of: seriesID)
+            else { return }
+            automaticRetryAttemptedGenerations[seriesID] = nil
+            var summary = SeriesRefreshSummary()
+            if subscriptions[currentIndex].isBaselined {
+                // A refresh may have completed the baseline while this request was
+                // suspended. Treat this older response as an incremental snapshot.
+                process(
+                    programs: programs,
+                    for: seriesID,
+                    downloads: downloads,
+                    summary: &summary
+                )
+            } else {
+                establishBaseline(
+                    programs: programs,
+                    for: seriesID,
+                    downloads: downloads,
+                    summary: &summary
+                )
+            }
             activities[seriesID] = .subscribed
         } catch {
             guard isCurrentGeneration(generation, for: seriesID) else { return }
@@ -237,6 +288,7 @@ final class SeriesSubscriptionStore: ObservableObject {
         guard let normalized = Self.normalized(seriesID) else { return }
         subscriptions.removeAll { $0.seriesID == normalized }
         subscriptionGenerations[normalized] = nil
+        automaticRetryAttemptedGenerations[normalized] = nil
         activities[normalized] = nil
         persist()
     }
@@ -245,6 +297,7 @@ final class SeriesSubscriptionStore: ObservableObject {
         guard FileManager.default.fileExists(atPath: persistenceURL.path) else {
             subscriptions = []
             subscriptionGenerations = [:]
+            automaticRetryAttemptedGenerations = [:]
             activities = [:]
             lastPersistenceFailure = nil
             return
@@ -262,6 +315,7 @@ final class SeriesSubscriptionStore: ObservableObject {
             subscriptionGenerations = subscriptions.reduce(into: [:]) { generations, subscription in
                 generations[subscription.seriesID] = UUID()
             }
+            automaticRetryAttemptedGenerations = [:]
             activities = subscriptions.reduce(into: [:]) { restored, subscription in
                 restored[subscription.seriesID] = subscription.isBaselined
                     ? .subscribed
@@ -272,6 +326,7 @@ final class SeriesSubscriptionStore: ObservableObject {
         } catch {
             subscriptions = []
             subscriptionGenerations = [:]
+            automaticRetryAttemptedGenerations = [:]
             activities = [:]
             lastPersistenceFailure = "シリーズ購読の保存データを読み込めませんでした。\(error.localizedDescription)"
         }
@@ -322,20 +377,66 @@ final class SeriesSubscriptionStore: ObservableObject {
         }
     }
 
-    /// Connectivity is event driven: only a transition back to Wi-Fi retries
-    /// persisted work, and it does so without another series API request.
+    /// A first reachable observation, reconnection, or cellular-to-Wi-Fi upgrade
+    /// retries persisted work. Failed discovery and unbaselined generations also
+    /// get one coalesced fresh poll that bypasses the foreground cooldown.
     @discardableResult
     func networkStatusDidChange(
         _ status: DownloadNetworkStatus,
         downloads: OfflineDownloadEnqueuing
-    ) -> SeriesRefreshSummary? {
+    ) async -> SeriesRefreshSummary? {
         let previous = lastObservedNetworkStatus
         lastObservedNetworkStatus = status
-        guard let previous else { return nil }
+        let firstReachableObservation = previous == nil && status != .unavailable
         let regainedConnectivity = previous == .unavailable && status != .unavailable
-        let upgradedToWiFi = previous != .wifi && status == .wifi
-        guard regainedConnectivity || upgradedToWiFi else { return nil }
-        return retryDeferred(downloads: downloads)
+        let upgradedToWiFi = previous == .cellular && status == .wifi
+        guard firstReachableObservation || regainedConnectivity || upgradedToWiFi else { return nil }
+
+        var combined = SeriesRefreshSummary()
+        let targets = connectivityRetryTargets()
+        guard !targets.isEmpty else {
+            return retryDeferred(downloads: downloads)
+        }
+        for (seriesID, generation) in targets {
+            automaticRetryAttemptedGenerations[seriesID] = generation
+        }
+
+        // If startup/foreground polling is already running, join it first. Only
+        // issue the fresh recovery pass when the joined result left a target failed.
+        if let task = refreshTask, let taskID = refreshTaskID {
+            let runningSummary = await task.value
+            finishRefresh(taskID: taskID, summary: runningSummary)
+            combined.merge(runningSummary)
+            guard targetsStillNeedConnectivityRetry(targets) else { return combined }
+        }
+
+        let recovered = await refreshAll(downloads: downloads, forceRefresh: true)
+        combined.merge(recovered)
+        if recovered.failedSeriesCount > 0 {
+            // Discovery failure must not prevent the independent persisted retry.
+            // DownloadCenter itself applies the user's cellular policy.
+            combined.merge(retryDeferred(downloads: downloads))
+        }
+        return combined
+    }
+
+    private func connectivityRetryTargets() -> [(String, UUID)] {
+        subscriptions.compactMap { subscription in
+            guard let generation = subscriptionGenerations[subscription.seriesID],
+                  automaticRetryAttemptedGenerations[subscription.seriesID] != generation,
+                  !subscription.isBaselined || Self.isFailure(activities[subscription.seriesID])
+            else { return nil }
+            return (subscription.seriesID, generation)
+        }
+    }
+
+    private func targetsStillNeedConnectivityRetry(_ targets: [(String, UUID)]) -> Bool {
+        targets.contains { seriesID, generation in
+            guard isCurrentGeneration(generation, for: seriesID),
+                  let index = index(of: seriesID)
+            else { return false }
+            return !subscriptions[index].isBaselined || Self.isFailure(activities[seriesID])
+        }
     }
 
     private func finishRefresh(
@@ -424,8 +525,14 @@ final class SeriesSubscriptionStore: ObservableObject {
                   let currentIndex = index(of: seriesID)
             else { continue }
             summary.successfulSeriesCount += 1
+            automaticRetryAttemptedGenerations[seriesID] = nil
             if !subscriptions[currentIndex].isBaselined {
-                applyBaseline(programs, to: seriesID)
+                establishBaseline(
+                    programs: programs,
+                    for: seriesID,
+                    downloads: downloads,
+                    summary: &summary
+                )
                 summary.baselinedSeriesCount += 1
                 activities[seriesID] = .subscribed
                 continue
@@ -446,18 +553,23 @@ final class SeriesSubscriptionStore: ObservableObject {
         return summary
     }
 
-    private func applyBaseline(_ programs: [TVerProgram], to seriesID: String) {
+    private func establishBaseline(
+        programs: [TVerProgram],
+        for seriesID: String,
+        downloads: OfflineDownloadEnqueuing,
+        summary: inout SeriesRefreshSummary
+    ) {
         guard let index = index(of: seriesID) else { return }
-        let unique = Self.uniquePrograms(programs)
-        subscriptions[index].knownEpisodeIDs.formUnion(unique.map(\.id))
+        // Mark the generation baselined before processing. `process` compares each
+        // episode's trusted timestamp with the persisted subscription instant:
+        // pre-subscription and unknown timestamps become known without enqueueing.
         subscriptions[index].isBaselined = true
-        subscriptions[index].lastCheckedAt = now()
-        if subscriptions[index].seriesTitle.isEmpty,
-           let title = unique.lazy.map(\.seriesTitle).first(where: { !$0.isEmpty })
-        {
-            subscriptions[index].seriesTitle = title
-        }
-        persist()
+        process(
+            programs: programs,
+            for: seriesID,
+            downloads: downloads,
+            summary: &summary
+        )
     }
 
     private func process(
@@ -481,10 +593,19 @@ final class SeriesSubscriptionStore: ObservableObject {
         // implementation already marked their IDs as known.
         for program in Self.uniquePrograms(programs) {
             let state = downloads.state(for: program.id)
-            guard !subscription.knownEpisodeIDs.contains(program.id)
-                || deferredIDs.contains(program.id)
-                || Self.isFailed(state)
-            else { continue }
+            let isDeferred = deferredIDs.contains(program.id)
+            let isRetryableFailure = Self.isFailed(state)
+            if !isDeferred, !isRetryableFailure {
+                guard !subscription.knownEpisodeIDs.contains(program.id) else { continue }
+                guard let publishedAt = program.publishedAt,
+                      publishedAt > subscription.subscribedAt
+                else {
+                    // Missing, malformed, pre-subscription, and equal timestamps are
+                    // deliberately baseline-only. Never bulk-download uncertain backlog.
+                    subscription.knownEpisodeIDs.insert(program.id)
+                    continue
+                }
+            }
             if candidateIDs.insert(program.id).inserted {
                 candidates.append(program)
             }
@@ -548,6 +669,10 @@ final class SeriesSubscriptionStore: ObservableObject {
         persist()
     }
 
+    func acknowledgePersistenceFailure() {
+        lastPersistenceFailure = nil
+    }
+
     private func persist() {
         do {
             let parent = persistenceURL.deletingLastPathComponent()
@@ -589,6 +714,11 @@ final class SeriesSubscriptionStore: ObservableObject {
 
     private static func isFailed(_ state: DownloadState) -> Bool {
         if case .failed = state { return true }
+        return false
+    }
+
+    private static func isFailure(_ activity: SeriesSubscriptionActivity?) -> Bool {
+        if case .failed = activity { return true }
         return false
     }
 
@@ -669,5 +799,16 @@ final class SeriesSubscriptionStore: ObservableObject {
         return root
             .appendingPathComponent("SeriesSubscriptions", isDirectory: true)
             .appendingPathComponent("subscriptions-v1.json")
+    }
+}
+
+@MainActor
+private final class DeferredSeriesDownloadEnqueuer: OfflineDownloadEnqueuing {
+    static let shared = DeferredSeriesDownloadEnqueuer()
+
+    func state(for _: String) -> DownloadState { .notDownloaded }
+
+    func start(_: TVerProgram, allowingCellular _: Bool) -> DownloadStartResult {
+        .rejected(reason: "自動ダウンロードの準備待ち")
     }
 }

@@ -45,10 +45,27 @@ struct LibraryView: View {
     }
 
     private var hasNotices: Bool {
-        !downloadCenter.notices.isEmpty
-            || downloadCenter.lastRejection != nil
-            || libraryStore.didRecoverFromCorruptedStorage
-            || libraryStore.lastPersistenceFailure != nil
+        Self.shouldShowNotices(
+            hasDownloadNotices: !downloadCenter.notices.isEmpty,
+            hasDownloadRejection: downloadCenter.lastRejection != nil,
+            didRecoverFromCorruptedLibraryStorage: libraryStore.didRecoverFromCorruptedStorage,
+            libraryPersistenceFailure: libraryStore.lastPersistenceFailure,
+            seriesPersistenceFailure: seriesSubscriptions.lastPersistenceFailure
+        )
+    }
+
+    static func shouldShowNotices(
+        hasDownloadNotices: Bool,
+        hasDownloadRejection: Bool,
+        didRecoverFromCorruptedLibraryStorage: Bool,
+        libraryPersistenceFailure: String?,
+        seriesPersistenceFailure: String?
+    ) -> Bool {
+        hasDownloadNotices
+            || hasDownloadRejection
+            || didRecoverFromCorruptedLibraryStorage
+            || libraryPersistenceFailure != nil
+            || seriesPersistenceFailure != nil
     }
 
     var body: some View {
@@ -211,6 +228,20 @@ struct LibraryView: View {
             )
             .listRowSeparator(.hidden)
         }
+
+        if let failure = seriesSubscriptions.lastPersistenceFailure {
+            noticeCard(
+                systemImage: "exclamationmark.triangle.fill",
+                tint: DS.Palette.warning,
+                message: failure,
+                recovery: "次回起動時に以前の購読状態へ戻る場合があります。通信状態ではなく端末内保存の問題です。",
+                actionLabel: nil,
+                action: nil,
+                dismiss: { seriesSubscriptions.acknowledgePersistenceFailure() }
+            )
+            .accessibilityIdentifier("library.notice.series-persistence")
+            .listRowSeparator(.hidden)
+        }
     }
 
     private func noticeCard(
@@ -316,13 +347,6 @@ struct LibraryView: View {
                     EmptyView()
                 }
 
-                if let failure = seriesSubscriptions.lastPersistenceFailure {
-                    Label(failure, systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(DS.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
                 ForEach(seriesSubscriptions.subscriptions) { subscription in
                     seriesSubscriptionRow(subscription)
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -353,7 +377,11 @@ struct LibraryView: View {
                     .accessibilityHint("TVerのキャッシュを再検証して新着を確認します")
                 }
             } footer: {
-                Text("購読解除しても、保存済み・ダウンロード中の番組は残ります。")
+                Text(
+                    "公開時刻を確認できる、購読開始後の新着だけを自動保存します。"
+                        + "公開時刻が不明な話は保存しません。"
+                        + "購読解除しても、保存済み・ダウンロード中の番組は残ります。"
+                )
             }
         }
     }

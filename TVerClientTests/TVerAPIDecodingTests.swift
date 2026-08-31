@@ -125,11 +125,13 @@ final class TVerAPIDecodingTests: XCTestCase {
             client.decodeSeriesEpisodes(TVerFixture.data("platform_series_episodes")).value
         )
         XCTAssertEqual(episodes.map(\.id), ["ep000010", "ep000011"])
+        XCTAssertEqual(episodes.map(\.startAt), [1_896_048_000, 1_896_652_800])
 
         let programs = client.seriesPrograms(fromEpisodes: episodes)
         XCTAssertEqual(programs.map(\.id), ["ep000010", "ep000011"])
         XCTAssertEqual(programs.map(\.seriesID), ["sr000001", "sr000001"])
         XCTAssertEqual(programs.first?.seriesTitle, "サンプル番組A")
+        XCTAssertEqual(programs.first?.publishedAt, Date(timeIntervalSince1970: 1_896_048_000))
         XCTAssertEqual(programs.first?.availableUntilAt, Date(timeIntervalSince1970: 1_896_652_800))
         XCTAssertEqual(
             programs.first?.thumbnailURL?.absoluteString,

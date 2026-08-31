@@ -104,14 +104,25 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     func fetchSeriesEpisodes(seriesID: String, forceRefresh: Bool) async throws -> [TVerProgram] {
         let normalizedSeriesID = seriesID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSeriesID.isEmpty else { return [] }
-        let credentials = try await createBrowserCredentials()
-        let episodes = try await fetchEpisodes(
-            seriesID: normalizedSeriesID,
-            credentials: credentials,
-            forceRefresh: forceRefresh,
-            allowStaleFallback: !forceRefresh
-        )
-        return makePrograms(from: episodes)
+
+        do {
+            let credentials = try await createBrowserCredentials()
+            let episodes = try await fetchEpisodes(
+                seriesID: normalizedSeriesID,
+                credentials: credentials,
+                forceRefresh: forceRefresh,
+                allowStaleFallback: !forceRefresh
+            )
+            return makePrograms(from: episodes)
+        } catch {
+            // A forced initial baseline must never accept a stale snapshot. Ordinary
+            // polling can still reconstruct the credential-free disk response when
+            // browser credential creation failed before transport reached its cache.
+            guard !forceRefresh,
+                  let cached = await cachedSeriesPrograms(seriesID: normalizedSeriesID)
+            else { throw error }
+            return cached
+        }
     }
 
     /// 一覧と、その一覧をどれだけ信用してよいかを一緒に返す。
@@ -614,6 +625,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             seriesTitle: content.string("seriesTitle"),
             description: content.string("description"),
             broadcastDateLabel: content.string("broadcastDateLabel", "broadcastDate", tracked: true),
+            startAt: content.int("startAt"),
             endAt: content.int("endAt"),
             thumbnailPath: content.string("thumbnailPath")
         )
@@ -816,10 +828,22 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             seriesTitle: episode.seriesTitle ?? "",
             description: episode.description ?? "",
             broadcastLabel: episode.broadcastDateLabel ?? "",
+            publishedAt: episodePublishedAt(startAt: episode.startAt, endAt: episode.endAt),
             availableUntil: availableUntilLabel(epochSeconds: episode.endAt),
             availableUntilAt: availableUntilDate(epochSeconds: episode.endAt),
             thumbnailURL: thumbnailURL(path: episode.thumbnailPath, episodeID: episodeID)
         )
+    }
+
+    /// `startAt` is the availability start carried by real series payloads.
+    /// Reject sentinels and contradictory ranges rather than classifying an old
+    /// backlog item as post-subscription work.
+    private func episodePublishedAt(startAt: Int?, endAt: Int?) -> Date? {
+        guard let startAt, startAt > 0 else { return nil }
+        if let endAt, endAt > 0, endAt <= startAt { return nil }
+        let seconds = TimeInterval(startAt)
+        guard seconds.isFinite, seconds <= 253_402_300_799 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private func makeProgramDays(from episodes: [EpisodeContent]) -> [ProgramDay] {
@@ -1410,8 +1434,31 @@ struct EpisodeContent: Sendable, Equatable {
     let seriesTitle: String?
     let description: String?
     let broadcastDateLabel: String?
+    let startAt: Int?
     let endAt: Int?
     let thumbnailPath: String?
+
+    init(
+        id: String?,
+        seriesID: String?,
+        title: String?,
+        seriesTitle: String?,
+        description: String?,
+        broadcastDateLabel: String?,
+        startAt: Int? = nil,
+        endAt: Int?,
+        thumbnailPath: String?
+    ) {
+        self.id = id
+        self.seriesID = seriesID
+        self.title = title
+        self.seriesTitle = seriesTitle
+        self.description = description
+        self.broadcastDateLabel = broadcastDateLabel
+        self.startAt = startAt
+        self.endAt = endAt
+        self.thumbnailPath = thumbnailPath
+    }
 }
 
 /// One live channel plus the identifiers needed to play it. These are the
@@ -2122,6 +2169,20 @@ extension TVerAPIClient {
             transform: transform
         ) else { return nil }
         return outcome.value
+    }
+
+    /// Decodes a series response directly from the credential-free cache key.
+    /// This is only called by non-forced polling; subscription baselines stay fresh-only.
+    private func cachedSeriesPrograms(seriesID: String) async -> [TVerProgram]? {
+        let encoded = seriesID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? seriesID
+        guard let snapshot = await cachedPayload(
+            path: "callSeriesEpisodes/\(encoded)",
+            at: dateProvider()
+        ),
+        let episodes = decodeCached(snapshot, endpoint: .episodeDetail, transform: { root, context in
+            try seriesEpisodes(root, context: context)
+        }) else { return nil }
+        return makePrograms(from: episodes)
     }
 
     private func cachedFreshness(at storedAt: Date, for error: Error) -> LoadFreshness {

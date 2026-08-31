@@ -1,10 +1,20 @@
-import XCTest
+import Foundation
 @testable import TVerClient
+import XCTest
 
 final class ModelsTests: XCTestCase {
     func testWebURLUsesEpisodeID() {
         let item = TVerProgram(id: "ep-test", seriesID: nil, title: "Episode", seriesTitle: "Series", description: "", broadcastLabel: "", availableUntil: nil, thumbnailURL: nil)
         XCTAssertEqual(item.webURL.absoluteString, "https://tver.jp/episodes/ep-test")
+    }
+
+    func testLegacyProgramPayloadWithoutPublishedAtStillDecodes() throws {
+        let data = Data(#"{"id":"legacy","title":"Episode","seriesTitle":"Series","description":"","broadcastLabel":""}"#.utf8)
+
+        let program = try JSONDecoder().decode(TVerProgram.self, from: data)
+
+        XCTAssertEqual(program.id, "legacy")
+        XCTAssertNil(program.publishedAt)
     }
 
     func testLiveChannelUsesOfficialPageAndState() {
