@@ -306,11 +306,15 @@ struct LibraryView: View {
             isPresented: rejectionPresentation,
             presenting: downloadCenter.lastRejection
         ) { rejection in
-            if let retryOnCellular = cellularOverride(for: rejection) {
-                Button(
-                    "今回だけモバイル通信で\(Vocabulary.Download.action)",
-                    action: retryOnCellular
-                )
+            if let failure = cellularOverride(for: rejection) {
+                Button(failure.cellularRetryLabel) {
+                    downloadCenter.clearRejection()
+                    Task { @MainActor in
+                        await Task.yield()
+                        // このalertはLibraryの操作を所有する。再拒否もglobal側に残す。
+                        failure.request.perform(on: downloadCenter, program: failure.program, allowingCellular: true)
+                    }
+                }
             }
             Button("閉じる", role: .cancel) { downloadCenter.clearRejection() }
         } message: { rejection in
@@ -586,6 +590,7 @@ struct LibraryView: View {
         }
     }
 
+    /// ボタンが同期的に消費した拒否はここへ来ない。一覧操作などの未消費分だけを扱う。
     private var rejectionPresentation: Binding<Bool> {
         Binding(
             get: { downloadCenter.lastRejection != nil },
@@ -596,7 +601,8 @@ struct LibraryView: View {
     }
 
     private func rejectionMessage(_ rejection: DownloadCenter.Rejection) -> String {
-        [rejection.message, rejection.recovery]
+        if let failure = cellularOverride(for: rejection) { return failure.message }
+        return [rejection.message, rejection.recovery]
             .compactMap { $0 }
             .joined(separator: "\n")
     }
@@ -612,12 +618,13 @@ struct LibraryView: View {
         }
     }
 
-    private func cellularOverride(for rejection: DownloadCenter.Rejection) -> (() -> Void)? {
-        guard rejection.canRetryOnCellular, let program = rejection.program else { return nil }
-        return {
-            downloadCenter.clearRejection()
-            downloadCenter.start(program, allowingCellular: true)
-        }
+    private func cellularOverride(for rejection: DownloadCenter.Rejection) -> DownloadButton.RequestFailure? {
+        guard rejection.canRetryOnCellular, let program = rejection.program,
+              program.id == rejection.programID,
+              let request = DownloadButton.Request.recoveryRequest(
+                for: downloadCenter.state(for: program.id), isInterrupted: downloadCenter.isInterrupted(program.id)
+              ) else { return nil }
+        return DownloadButton.RequestFailure(rejection: rejection, program: program, request: request)
     }
 
     private func clearRecentsAction() -> (() -> Void)? {

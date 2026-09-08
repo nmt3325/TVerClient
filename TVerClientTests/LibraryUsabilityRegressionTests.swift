@@ -2,6 +2,239 @@ import XCTest
 @testable import TVerClient
 
 final class LibraryUsabilityRegressionTests: XCTestCase {
+
+    @MainActor
+    func testButtonConsumesOnlyItsSynchronousStartRejection() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let program = rejectionProgram("origin")
+
+        let failure = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(
+            on: bed.center, program: program
+        ))
+
+        XCTAssertEqual(failure.rejection.programID, program.id)
+        XCTAssertTrue(failure.canRetryOnCellular)
+        XCTAssertTrue(failure.message.contains("Wi-Fi"))
+        XCTAssertTrue(failure.message.contains("今回の操作だけ"))
+        XCTAssertNil(bed.center.lastRejection, "Library's fallback must not also present this button-owned rejection")
+        XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty)
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testRepeatedSameProgramRejectionGetsANewLocalPresentation() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let program = rejectionProgram("same")
+        let first = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(on: bed.center, program: program))
+        let second = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(first.rejection, second.rejection)
+        XCTAssertNil(bed.center.lastRejection)
+    }
+
+    @MainActor
+    func testUnsupportedAndOfflineRefusalsExplainRecoveryWithoutCellularOverride() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        let program = rejectionProgram("unsupported")
+        bed.driver.unavailableReason = "この端末ではダウンロードできません。"
+        let unsupported = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertTrue(unsupported.message.contains("この端末では"))
+        XCTAssertTrue(unsupported.message.contains("視聴画面"))
+        XCTAssertFalse(unsupported.canRetryOnCellular)
+        XCTAssertNil(unsupported.retryOnCellular(on: bed.center))
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty)
+
+        bed.driver.unavailableReason = nil
+        bed.network.value = .unavailable
+        let offline = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertTrue(offline.message.contains("オフライン"))
+        XCTAssertTrue(offline.message.contains("接続してから"))
+        XCTAssertFalse(offline.canRetryOnCellular)
+        XCTAssertNil(bed.center.lastRejection)
+    }
+
+    @MainActor
+    func testCellularApprovalIsOneRequestAndNeverChangesWifiOnlyPreference() async throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let program = rejectionProgram("approved")
+        let failure = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty, "No consent yet")
+
+        XCTAssertNil(failure.retryOnCellular(on: bed.center))
+        await bed.center.waitForPendingResolutions()
+        XCTAssertEqual(bed.driver.startedIDs, [program.id])
+        XCTAssertEqual(bed.driver.cellularPermissions, [true])
+        XCTAssertTrue(bed.center.wifiOnly)
+        XCTAssertNil(failure.retryOnCellular(on: bed.center), "Reusing stale approval must not duplicate a running transfer")
+        XCTAssertEqual(bed.driver.startedIDs, [program.id])
+
+        let other = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(
+            on: bed.center, program: rejectionProgram("not-approved")
+        ))
+        XCTAssertTrue(other.canRetryOnCellular)
+        XCTAssertEqual(bed.driver.startedIDs, [program.id])
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testResumeCellularApprovalUsesResumeAndKeepsExistingProgress() async throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        let program = rejectionProgram("paused")
+        await bed.startAndPause(program, progress: 0.65)
+        bed.network.value = .cellular
+
+        let failure = try XCTUnwrap(DownloadButton.Request.resume.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertEqual(failure.request, .resume)
+        XCTAssertTrue(failure.cellularRetryLabel.contains("再開"))
+        XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.65))
+        XCTAssertNil(bed.center.lastRejection)
+
+        XCTAssertNil(failure.retryOnCellular(on: bed.center))
+        XCTAssertEqual(bed.center.state(for: program.id), .downloading(progress: 0.65))
+        XCTAssertEqual(bed.driver.resumedIDs, [program.id])
+        XCTAssertEqual(bed.driver.startedIDs, [program.id], "Do not incorrectly call start() on a paused transfer")
+        XCTAssertTrue(bed.driver.cancelledIDs.isEmpty)
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testRetryRefusalKeepsFailedRecordAndIsLocallyConsumed() async throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        let program = rejectionProgram("failed")
+        bed.center.start(program)
+        await bed.center.waitForPendingResolutions()
+        bed.driver.onEvent?(.failed(programID: program.id, message: "接続が切れました"))
+        bed.network.value = .cellular
+
+        let failure = try XCTUnwrap(DownloadButton.Request.retry.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertEqual(failure.request, .retry)
+        XCTAssertTrue(failure.message.contains("最初から"))
+        XCTAssertEqual(bed.center.state(for: program.id), .failed(message: "接続が切れました"))
+        XCTAssertNil(bed.center.lastRejection)
+        XCTAssertTrue(bed.driver.cancelledIDs.isEmpty)
+
+        XCTAssertNil(failure.retryOnCellular(on: bed.center))
+        await bed.center.waitForPendingResolutions()
+        XCTAssertEqual(bed.driver.startedIDs, [program.id, program.id])
+        XCTAssertEqual(bed.driver.cellularPermissions.last, true)
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testLostTaskResumeRefusalBecomesAnExplicitRestartApproval() async throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        let program = rejectionProgram("interrupted")
+        await bed.startAndPause(program, progress: 0.4)
+        bed.driver.taskIDs.remove(program.id)
+        bed.network.value = .cellular
+
+        let lostTask = try XCTUnwrap(DownloadButton.Request.resume.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertTrue(bed.center.isInterrupted(program.id))
+        XCTAssertEqual(lostTask.request, .restart)
+        XCTAssertTrue(lostTask.message.contains("途中までのデータを削除"))
+        XCTAssertTrue(lostTask.cellularRetryLabel.contains("最初から"))
+        XCTAssertNil(bed.center.lastRejection)
+
+        let restart = try XCTUnwrap(DownloadButton.Request.restart.performConsumingRejection(on: bed.center, program: program))
+        XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.4))
+        XCTAssertNil(bed.center.lastRejection)
+        XCTAssertNil(restart.retryOnCellular(on: bed.center))
+        await bed.center.waitForPendingResolutions()
+        XCTAssertEqual(bed.driver.startedIDs.count, 2)
+        XCTAssertEqual(bed.driver.cellularPermissions.last, true)
+        XCTAssertFalse(bed.center.isInterrupted(program.id))
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testNoOpButtonRequestDoesNotStealAnUnrelatedLibraryRejection() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let unrelated = rejectionProgram("library-owned")
+        bed.center.start(unrelated)
+        let original = try XCTUnwrap(bed.center.lastRejection)
+
+        XCTAssertNil(DownloadButton.Request.resume.performConsumingRejection(
+            on: bed.center, program: rejectionProgram("other-button")
+        ))
+        XCTAssertEqual(bed.center.lastRejection, original)
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty)
+    }
+
+    @MainActor
+    func testLibraryRequestRetainsItsRejectionForTheSingleGlobalConsumer() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let program = rejectionProgram("library")
+        XCTAssertTrue(DownloadButton.Request.start.perform(on: bed.center, program: program))
+        XCTAssertEqual(bed.center.lastRejection?.programID, program.id)
+        XCTAssertTrue(bed.center.lastRejection?.canRetryOnCellular == true)
+    }
+
+    @MainActor
+    func testCellularConsentCannotTargetAnotherProgram() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let program = rejectionProgram("one")
+        bed.center.start(program)
+        let rejection = try XCTUnwrap(bed.center.lastRejection)
+        let mismatch = DownloadButton.RequestFailure(rejection: rejection, program: rejectionProgram("two"), request: .start)
+        XCTAssertFalse(mismatch.canRetryOnCellular)
+        XCTAssertNil(mismatch.retryOnCellular(on: bed.center))
+        XCTAssertEqual(bed.center.lastRejection, rejection)
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty)
+    }
+
+    @MainActor
+    func testCellularApprovalThatFailsAgainStaysLocalAndReportsNewReason() throws {
+        let bed = try LibraryRejectionTestBed()
+        defer { bed.cleanUp() }
+        bed.network.value = .cellular
+        let failure = try XCTUnwrap(DownloadButton.Request.start.performConsumingRejection(
+            on: bed.center, program: rejectionProgram("connection-changed")
+        ))
+        bed.network.value = .unavailable
+        let next = try XCTUnwrap(failure.retryOnCellular(on: bed.center))
+        XCTAssertTrue(next.message.contains("オフライン"))
+        XCTAssertFalse(next.canRetryOnCellular)
+        XCTAssertNotEqual(next.id, failure.id)
+        XCTAssertNil(bed.center.lastRejection)
+        XCTAssertTrue(bed.driver.startedIDs.isEmpty)
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testStaleRecoveryOperationsNeverReplaceQueuedRunningOrSavedDownloads() {
+        let active: [DownloadState] = [.queued, .downloading(progress: 0.8), .downloaded(bytes: 128)]
+        let operations: [DownloadButton.Request] = [.start, .resume, .retry, .restart]
+        for state in active {
+            for request in operations {
+                XCTAssertFalse(request.canPerform(state: state, isInterrupted: false))
+                XCTAssertFalse(request.canPerform(state: state, isInterrupted: true))
+            }
+        }
+    }
+
+    private func rejectionProgram(_ id: String) -> TVerProgram {
+        TVerProgram(
+            id: id, seriesID: "series", title: "第1話", seriesTitle: "テスト番組",
+            description: "", broadcastLabel: "", availableUntil: nil, thumbnailURL: nil
+        )
+    }
     @MainActor
     func testEveryLibraryCategoryRemainsDiscoverableEvenWhenEmpty() {
         XCTAssertEqual(LibraryView.Category.allCases, [.saved, .transfers, .favorites, .recents, .subscriptions])
@@ -131,5 +364,82 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
         let retry = DownloadButton.primaryAction(for: .failed(message: "offline"), isInterrupted: false)
         XCTAssertEqual(retry, .retry)
         XCTAssertTrue(retry.label.contains("最初から"))
+    }
+}
+
+@MainActor
+private final class LibraryRejectionNetwork {
+    var value: DownloadNetworkStatus = .wifi
+}
+
+@MainActor
+private final class LibraryRejectionDriver: OfflineDownloadDriving {
+    var unavailableReason: String?
+    var onEvent: ((DownloadDriverEvent) -> Void)?
+    var taskIDs: Set<String> = []
+    var startedIDs: [String] = []
+    var resumedIDs: [String] = []
+    var cancelledIDs: [String] = []
+    var cellularPermissions: [Bool] = []
+
+    func start(programID: String, assetURL: URL, title: String, allowsCellularAccess: Bool) {
+        taskIDs.insert(programID)
+        startedIDs.append(programID)
+        cellularPermissions.append(allowsCellularAccess)
+    }
+    func pause(programID: String) {}
+    func resume(programID: String) { resumedIDs.append(programID) }
+    func cancel(programID: String) {
+        taskIDs.remove(programID)
+        cancelledIDs.append(programID)
+    }
+    func hasTask(programID: String) -> Bool { taskIDs.contains(programID) }
+}
+
+private struct LibraryRejectionResolver: TVerStreamResolving {
+    func resolveStream(for program: TVerProgram) async throws -> URL {
+        URL(string: "https://example.invalid/library-rejection-test.m3u8")!
+    }
+}
+
+@MainActor
+private final class LibraryRejectionTestBed {
+    let directory: URL
+    let suiteName: String
+    let defaults: UserDefaults
+    let driver: LibraryRejectionDriver
+    let network: LibraryRejectionNetwork
+    let center: DownloadCenter
+
+    init() throws {
+        let name = "library-rejection-" + UUID().uuidString
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let driver = LibraryRejectionDriver()
+        let network = LibraryRejectionNetwork()
+        self.directory = directory
+        self.suiteName = name
+        self.defaults = defaults
+        self.driver = driver
+        self.network = network
+        self.center = DownloadCenter(
+            directory: directory, driver: driver, resolver: LibraryRejectionResolver(),
+            defaults: defaults, settingsKey: name, networkStatus: { network.value }
+        )
+    }
+
+    func startAndPause(_ program: TVerProgram, progress: Double) async {
+        XCTAssertEqual(center.start(program), .started)
+        await center.waitForPendingResolutions()
+        driver.onEvent?(.progress(programID: program.id, fraction: progress))
+        center.pause(program.id)
+        XCTAssertEqual(center.state(for: program.id), .paused(progress: progress))
+    }
+
+    func cleanUp() {
+        OfflineAssetRegistry.provider = nil
+        defaults.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: directory)
     }
 }
