@@ -143,6 +143,12 @@ final class PlaybackController: ObservableObject {
 
     /// この番組をすでに読み込み済みか。再生画面を開き直しただけで最初から
     /// 再生し直してしまうのを防ぐための判定。
+    func isLoaded(_ channel: TVerLiveChannel) -> Bool {
+        guard currentLiveChannel?.id == channel.id else { return false }
+        if case .failed = state { return false }
+        return state == .resolving || player.currentItem != nil
+    }
+
     func isLoaded(_ program: TVerProgram) -> Bool {
         guard currentProgram?.id == program.id, player.currentItem != nil else { return false }
         if case .failed = state { return false }

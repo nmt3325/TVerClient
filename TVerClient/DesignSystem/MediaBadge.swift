@@ -66,13 +66,15 @@ struct MediaBadge: View, Equatable, Hashable {
 
     var label: String { text ?? kind.defaultText }
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         HStack(spacing: DS.Spacing.xxs) {
             Image(systemName: kind.systemImage)
                 .imageScale(.small)
                 .symbolRenderingMode(.hierarchical)
             Text(label)
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
         }
         .font(DS.Typography.badge)
         .padding(.horizontal, DS.Spacing.s)

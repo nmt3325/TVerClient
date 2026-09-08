@@ -255,7 +255,7 @@ struct LiveView: View {
             ContentStatusView(
                 .failure(
                     title: presentation.title,
-                    message: "\\(presentation.message)\\n\\(presentation.recoverySuggestion)"
+                    message: LivePresentationText.failureMessage(presentation)
                 ),
                 retryTitle: "再試行",
                 retry: { Task { await viewModel.refresh() } }
@@ -296,7 +296,7 @@ struct LiveView: View {
                 } header: {
                     Text("チャンネル")
                 } footer: {
-                    Text("\\(viewModel.playableChannelCount)/\\(viewModel.channels.count) が今すぐ見られます")
+                    Text(LivePresentationText.channelSummary(playable: viewModel.playableChannelCount, total: viewModel.channels.count))
                 }
             }
             .listStyle(.plain)
@@ -304,6 +304,10 @@ struct LiveView: View {
             // 表示中のタブをもう一度押したら先頭へ戻す。標準アプリと同じ操作。
             .onReceive(tabReselection.events) { tab in
                 guard tab == .live else { return }
+                if !path.isEmpty {
+                    path.removeAll()
+                    return
+                }
                 withAnimation { proxy.scrollTo(StandardScrollAnchor.top, anchor: .top) }
             }
         }
@@ -324,10 +328,10 @@ struct LiveView: View {
                     .accessibilityHidden(true)
             }
         }
-        // 減光は `.disabled` の標準表現に任せる。自前の `.opacity` は二重に薄くなる。
-        .disabled(!channel.isPlayable)
+        // Unavailable channels still offer an explanation and the official page.
+        // Opening their metadata must not interrupt another playing programme.
         .accessibilityLabel(TVerAccessibilityText.live(channel: channel))
-        .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "現在は視聴できません")
+        .accessibilityHint(channel.isPlayable ? "ダブルタップしてライブを視聴します" : "配信状況と公式ページへの案内を開きます")
         .contextMenu { rowMenu(for: channel) }
     }
 
@@ -447,17 +451,55 @@ struct LivePlaybackView: View {
     @StateObject private var chrome = PlayerChromeModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var isFullScreenPresented = false
 
     private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
     private var isCurrent: Bool { playbackController.currentLiveChannel?.id == channel.id }
 
     var body: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                if channel.isPlayable {
+                    stage
+                        .frame(height: verticalSizeClass == .compact
+                            ? proxy.size.height
+                            : min(proxy.size.width * 9 / 16, proxy.size.height * 0.62))
+                }
+                if verticalSizeClass != .compact || !channel.isPlayable { details }
+            }
+        }
+        .background(Color(uiColor: .systemBackground))
+        .navigationTitle(channel.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { stopToolbar }
+        .onAppear {
+            guard channel.isPlayable else { return }
+            playbackController.bindPictureInPicture(pictureInPicture)
+        }
+        .onDisappear { playbackController.unbindPictureInPicture(pictureInPicture) }
+        .task(id: channel.id) {
+            // Unavailable metadata does not interrupt playback; reopening a
+            // current live surface does not resolve/restart the stream again.
+            guard channel.isPlayable, !playbackController.isLoaded(channel) else { return }
+            await playbackController.playLive(channel)
+        }
+        .fullScreenCover(isPresented: $isFullScreenPresented) {
+            FullScreenPlaybackView(
+                playbackController: playbackController,
+                pictureInPicture: pictureInPicture,
+                title: channel.name,
+                subtitle: channel.currentProgram?.seriesTitle,
+                accessibilityLabel: "\(channel.name)の全画面ライブ動画プレイヤー",
+                supportsSeeking: false,
+                onExit: { isFullScreenPresented = false }
+            )
+        }
+    }
+
+    private var details: some View {
         List {
             Section {
-                stage
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.black)
                 playbackStatus
             } footer: {
                 dismissalNotice
@@ -503,50 +545,20 @@ struct LivePlaybackView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle(channel.name)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // iOS 16 では `.topBarTrailing` が無いので、契約の ToolbarCompat に寄せる。
-            // 「再生したまま閉じる」は標準の戻るボタンが担うので置かない。
-            ToolbarItem(placement: ToolbarCompat.trailing) {
-                Button(role: .destructive) {
-                    playbackController.stop()
-                    dismiss()
-                } label: {
-                    Text("停止")
-                }
-                .disabled(!isCurrent)
-                .accessibilityLabel("再生を停止して閉じる")
-                .accessibilityHint("映像も音声も止まります")
+    }
+
+    @ToolbarContentBuilder
+    private var stopToolbar: some ToolbarContent {
+        ToolbarItem(placement: ToolbarCompat.trailing) {
+            Button {
+                playbackController.stop()
+                dismiss()
+            } label: {
+                Label("停止", systemImage: "stop.fill")
             }
-        }
-        .onAppear {
-            // 停止したときに小窓だけが生き残らないよう、この画面が持っている
-            // Picture in Picture の調整役を再生側へ預ける。見逃し側と同じ扱いにする。
-            playbackController.bindPictureInPicture(pictureInPicture)
-        }
-        .onDisappear {
-            // 画面を離れたら預けたものを返す。別の画面が預け直したあとなら何もしない。
-            playbackController.unbindPictureInPicture(pictureInPicture)
-        }
-        .task(id: channel.id) {
-            DiagnosticLogStore.shared.record(
-                .info,
-                category: "playback",
-                message: "Live playback selected"
-            )
-            await playbackController.playLive(channel)
-        }
-        .fullScreenCover(isPresented: $isFullScreenPresented) {
-            FullScreenPlaybackView(
-                playbackController: playbackController,
-                pictureInPicture: pictureInPicture,
-                title: channel.name,
-                subtitle: channel.currentProgram?.seriesTitle,
-                accessibilityLabel: "\\(channel.name)の全画面ライブ動画プレイヤー",
-                supportsSeeking: false,
-                onExit: { isFullScreenPresented = false }
-            )
+            .disabled(!isCurrent)
+            .accessibilityLabel("再生を停止して閉じる")
+            .accessibilityHint("映像も音声も止まります")
         }
     }
 
@@ -559,14 +571,14 @@ struct LivePlaybackView: View {
             model: chrome,
             title: channel.name,
             subtitle: channel.currentProgram?.seriesTitle,
-            accessibilityLabel: "\\(channel.name)のライブ動画プレイヤー",
+            accessibilityLabel: "\(channel.name)のライブ動画プレイヤー",
             supportsSeeking: false,
             isFullScreen: false,
             isActiveSurface: !isFullScreenPresented,
             onToggleFullScreen: { isFullScreenPresented = true }
         )
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 
     private var stateLabel: String {
@@ -587,7 +599,16 @@ struct LivePlaybackView: View {
 
     @ViewBuilder
     private var playbackStatus: some View {
-        if isCurrent, let presentation = playbackController.errorPresentation {
+        if !channel.isPlayable {
+            VStack(alignment: .leading, spacing: DS.Spacing.s) {
+                Label(stateLabel, systemImage: "info.circle").font(.headline)
+                Text(TVerAreaAvailability.rowCaution(for: channel)
+                    ?? "現在、このチャンネルのアプリ内配信はありません。公式ページでも配信状況を確認できます。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, DS.Spacing.s)
+        } else if isCurrent, let presentation = playbackController.errorPresentation {
             PlaybackFailureView(presentation: presentation, officialURL: channel.webURL) {
                 Task { await playbackController.playLive(channel) }
             }
@@ -595,14 +616,17 @@ struct LivePlaybackView: View {
             ProgressView("公式配信URLを確認中")
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel("ライブ配信を準備中")
+        } else if isCurrent, playbackController.hasActivePlayback {
+            Label(
+                playbackController.isPlaying ? "ライブ再生中" : "一時停止中",
+                systemImage: playbackController.isPlaying ? "dot.radiowaves.left.and.right" : "pause.circle"
+            )
+            .foregroundStyle(.secondary)
         } else {
             Button {
-                playbackController.togglePlayback()
+                Task { await playbackController.playLive(channel) }
             } label: {
-                Label(
-                    playbackController.isPlaying ? "一時停止" : "再生",
-                    systemImage: playbackController.isPlaying ? "pause.fill" : "play.fill"
-                )
+                Label("ライブを再生", systemImage: "play.fill")
             }
         }
     }

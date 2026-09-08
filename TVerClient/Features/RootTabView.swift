@@ -9,6 +9,11 @@ enum RootTab: String, Hashable {
     case live
     case library
     case diagnostics
+
+    static func restored(from value: String) -> RootTab {
+        guard let tab = RootTab(rawValue: value) else { return .catchUp }
+        return tab == .diagnostics ? .library : tab
+    }
 }
 
 /// アプリの土台。
@@ -20,23 +25,28 @@ struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var playbackController = PlaybackController()
     @StateObject private var libraryStore = ProgramLibraryStore()
-    @StateObject private var diagnosticLogStore = DiagnosticLogStore.shared
     @StateObject private var downloadCenter = DownloadCenter()
     @StateObject private var seriesSubscriptions = SeriesSubscriptionStore(service: TVerAPIClient())
     @StateObject private var catchUpAvailability = CatchUpAvailabilityStore(lookup: TVerAPIClient())
     @StateObject private var areaStore = AreaStore(service: TVerAPIClient())
     @StateObject private var tabReselection = TabReselection()
+    @StateObject private var playerPresentationGate = PlayerPresentationGate()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var playerTab: RootTab {
+        playbackController.currentLiveChannel == nil ? .catchUp : .live
+    }
 
     /// アプリを離れて戻ったときに、見ていたタブへ戻る。
     @SceneStorage("RootTabView.selectedTab") private var storedTab: String = RootTab.catchUp.rawValue
 
     private var selection: Binding<RootTab> {
         Binding(
-            get: { RootTab(rawValue: storedTab) ?? .catchUp },
+            get: { RootTab.restored(from: storedTab) },
             set: { newValue in
                 // 表示中のタブをもう一度選んだときは、iOS 標準アプリと同じく
                 // 先頭へ戻る。TabView の selection だけでは検出できないのでここで見る。
-                if newValue.rawValue == storedTab {
+                if newValue == RootTab.restored(from: storedTab) {
                     tabReselection.send(newValue)
                 }
                 storedTab = newValue.rawValue
@@ -46,8 +56,10 @@ struct RootTabView: View {
 
     /// 再生中バーはタブバーの上へ載せる。TabView 自体に付けると、バーが下部
     /// タブと同じ場所に重なってタブを覆ってしまうため、各タブの中身へ付ける。
-    private func withPresenceBar<Content: View>(_ content: Content) -> some View {
+    private func withPresenceBar<Content: View>(_ content: Content, tab: RootTab) -> some View {
         content
+            // One recipient prevents offscreen stacks from opening competing players.
+            .environment(\.acceptsPlayerPresentation, tab == playerTab)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 // 再生シートを閉じても、止める場所と戻る場所が必ず画面に残る。
                 if let presence = playbackController.presence {
@@ -57,14 +69,17 @@ struct RootTabView: View {
                         onStop: { playbackController.stop() },
                         onOpen: {
                             // タブを合わせたうえで、そのタブに再生画面を出し直させる。
-                            selection.wrappedValue = presence.isLive ? .live : .catchUp
+                            storedTab = (presence.isLive ? RootTab.live : .catchUp).rawValue
                             playbackController.requestPlayerPresentation()
                         }
                     )
-                    .transition(.move(edge: .bottom))
+                    .transition(reduceMotion ? .identity : .move(edge: .bottom))
                 }
             }
-            .animation(.easeOut(duration: DS.Motion.fadeInDuration), value: playbackController.presence)
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: DS.Motion.fadeInDuration),
+                value: playbackController.presence != nil
+            )
     }
 
     var body: some View {
@@ -73,7 +88,7 @@ struct RootTabView: View {
                 viewModel: ScheduleViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
                 libraryStore: libraryStore
-            ))
+            ), tab: .catchUp)
             .tabItem {
                 Label("見逃し", systemImage: "play.rectangle.on.rectangle")
             }
@@ -83,7 +98,7 @@ struct RootTabView: View {
                 viewModel: ProgramGuideViewModel(service: TVerAPIClient()),
                 playbackController: playbackController,
                 libraryStore: libraryStore
-            ))
+            ), tab: .guide)
             .tabItem {
                 Label("番組表", systemImage: "calendar.day.timeline.left")
             }
@@ -92,7 +107,7 @@ struct RootTabView: View {
             withPresenceBar(LiveView(
                 viewModel: LiveViewModel(service: TVerAPIClient()),
                 playbackController: playbackController
-            ))
+            ), tab: .live)
             .tabItem {
                 Label("ライブ", systemImage: "dot.radiowaves.left.and.right")
             }
@@ -101,7 +116,7 @@ struct RootTabView: View {
             withPresenceBar(LibraryView(
                 libraryStore: libraryStore,
                 playbackController: playbackController
-            ))
+            ), tab: .library)
             .tabItem {
                 Label("ライブラリ", systemImage: "rectangle.stack")
             }
@@ -114,6 +129,14 @@ struct RootTabView: View {
         .environmentObject(catchUpAvailability)
         .environmentObject(areaStore)
         .environmentObject(tabReselection)
+        .environment(\.playerPresentationGate, playerPresentationGate)
+        .onChange(of: playbackController.presentationRequestToken) { token in
+            guard token > 0,
+                  playbackController.currentProgram != nil || playbackController.currentLiveChannel != nil
+            else { return }
+            // PiP restoration also needs to select the player tab. Do not emit a retap.
+            storedTab = playerTab.rawValue
+        }
         .task {
             seriesSubscriptions.configureAutomaticDownloads(downloadCenter)
             DownloadNetworkMonitor.shared.start()

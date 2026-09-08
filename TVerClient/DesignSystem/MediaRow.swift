@@ -113,6 +113,7 @@ struct MediaRow<Accessory: View>: View {
     @ViewBuilder var accessory: () -> Accessory
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     init(
         title: String,
@@ -152,7 +153,14 @@ struct MediaRow<Accessory: View>: View {
             }
         } else {
             HStack(alignment: .top, spacing: DS.Spacing.m) {
-                MediaThumbnail(url: thumbnailURL, progress: progress)
+                MediaThumbnail(
+                    url: thumbnailURL,
+                    width: horizontalSizeClass == .compact
+                        ? DS.Size.compactRowThumbnailWidth : DS.Size.rowThumbnailWidth,
+                    height: horizontalSizeClass == .compact
+                        ? DS.Size.compactRowThumbnailHeight : DS.Size.rowThumbnailHeight,
+                    progress: progress
+                )
                 details
                 accessory()
             }
@@ -164,7 +172,7 @@ struct MediaRow<Accessory: View>: View {
             Text(title)
                 .font(DS.Typography.rowTitle)
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -172,7 +180,8 @@ struct MediaRow<Accessory: View>: View {
                 Text(subtitle)
                     .font(DS.Typography.rowSubtitle)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if hasMetadata {
@@ -190,25 +199,24 @@ struct MediaRow<Accessory: View>: View {
     /// バッジと補足を1行に収められないときは、切り捨てずに段を分ける。
     /// 「まもなく終了」のような期限情報を truncate で消さないため。
     private var metadata: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: DS.Spacing.xs) {
-                badgeStrip
-                detailLabel
-            }
-            VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
-                badgeStrip
-                detailLabel
-            }
+        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+            badgeStrip
+            detailLabel
         }
-        .padding(.top, DS.Spacing.xxs)
+        .padding(.top, DS.Spacing.xs)
     }
 
     @ViewBuilder
     private var badgeStrip: some View {
         if !badges.isEmpty {
-            HStack(spacing: DS.Spacing.xs) {
-                ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in
-                    badge
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: DS.Spacing.xs) {
+                    ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in badge }
+                }
+                // Measure full labels, not labels already truncated to fit.
+                .fixedSize(horizontal: true, vertical: true)
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in badge }
                 }
             }
         }
@@ -220,7 +228,8 @@ struct MediaRow<Accessory: View>: View {
             Text(detail)
                 .font(DS.Typography.rowDetail)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

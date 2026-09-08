@@ -26,6 +26,8 @@ enum DS {
         static let minimumTapTarget: CGFloat = 44
         static let rowThumbnailWidth: CGFloat = 128
         static let rowThumbnailHeight: CGFloat = 72
+        static let compactRowThumbnailWidth: CGFloat = 104
+        static let compactRowThumbnailHeight: CGFloat = 58.5
         static let compactIcon: CGFloat = 28
 
         /// A 16:9 thumbnail plus 8pt above and below, i.e. the 88pt list row.
@@ -56,9 +58,9 @@ enum DS {
     }
 
     enum Typography {
-        static let rowTitle = Font.system(.subheadline, design: .default).weight(.semibold)
-        static let rowSubtitle = Font.footnote
-        static let rowDetail = Font.caption
+        static let rowTitle = Font.headline
+        static let rowSubtitle = Font.subheadline
+        static let rowDetail = Font.footnote
         static let sectionHeader = Font.system(.footnote, design: .default).weight(.semibold)
         static let badge = Font.caption2.weight(.semibold)
         static let carouselTitle = Font.system(.footnote, design: .default).weight(.semibold)
