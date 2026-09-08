@@ -202,6 +202,16 @@ enum ScheduleExpiry {
         return "残り\(remainingDays)日"
     }
 
+    /// 日付だけでは、同じ日の締切を過ぎても「本日まで」と表示してしまう。
+    /// 配信終了は絶対時刻で先に判定し、未来の期限だけ日数で案内する。
+    static func badgeText(for program: TVerProgram, now: Date) -> String? {
+        guard let deadline = deadline(for: program, now: now) else { return nil }
+        if deadline <= now { return "配信終了" }
+        let remaining = remainingDays(until: deadline, now: now)
+        guard isExpiringSoon(remaining) else { return nil }
+        return countdownText(for: remaining)
+    }
+
     private static func broadcastDateLabel(for date: Date) -> String {
         let calendar = BroadcastDay.calendar
         let formatter = DateFormatter()
@@ -259,11 +269,11 @@ struct ScheduleView: View {
     @State private var path: [TVerProgram] = []
     /// スワイプと長押しから中止・削除するときに出す確認。
     @State private var pendingDownload: PendingDownloadAction?
+    /// この画面から要求した転送の拒否だけを表示する。他タブの要求は拾わない。
+    @State private var downloadFeedback: DownloadCenter.Rejection?
     @State private var now = Date()
-
-    /// まもなく終わる番組をリストの先頭に出す本数。多すぎると本編の一覧が
-    /// 押し出されるので、拾い読みできる範囲で止める。
-    private static let expiringSoonLimit = 5
+    @Environment(\.scenePhase) private var scenePhase
+    private let clock = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     /// 行の中にダウンロードのボタンを置けない代わりに、スワイプと長押しから
     /// 同じ操作を出す。中止と削除はボタン経由と同じ確認を必ず通す。
@@ -295,14 +305,15 @@ struct ScheduleView: View {
                 .navigationDestination(for: TVerProgram.self) { program in
                     playbackDestination(for: program)
                 }
-                // 常時表示をやめ、引き下げで現れる標準の検索欄に戻す。
-                // 入力先は searchViewModel.query のまま変えない。
+                // 探す入口は最初から見せる。独自の入力欄や別の画面は作らない。
                 .searchable(
                     text: $searchViewModel.query,
+                    placement: .navigationBarDrawer(displayMode: .always),
                     prompt: Text(ProgramSearchAccessibilityText.fieldLabel)
                 )
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .onSubmit(of: .search) { searchViewModel.searchNow() }
         }
         .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
             // ミニプレイヤーからの戻り。再生中の番組を push し直す。
@@ -312,8 +323,17 @@ struct ScheduleView: View {
             }
         }
         .task {
+            now = Date()
             await viewModel.loadIfNeeded()
             refreshSearchIndex()
+        }
+        .onAppear { now = Date() }
+        .onReceive(clock) { instant in
+            guard scenePhase == .active else { return }
+            now = instant
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { now = Date() }
         }
         .onChange(of: viewModel.days) { _ in
             now = Date()
@@ -352,6 +372,23 @@ struct ScheduleView: View {
             Button("やめる", role: .cancel) { pendingDownload = nil }
         } message: { pending in
             Text(pending.confirmation.message)
+        }
+        .alert(
+            "\(Vocabulary.Download.action)を始められませんでした",
+            isPresented: Binding(
+                get: { downloadFeedback != nil },
+                set: { if !$0 { downloadFeedback = nil } }
+            ),
+            presenting: downloadFeedback
+        ) { rejection in
+            if rejection.canRetryOnCellular, let program = rejection.program {
+                Button("今回だけモバイル通信で\(Vocabulary.Download.action)") {
+                    retryDownloadOnCellular(program)
+                }
+            }
+            Button("閉じる", role: .cancel) { downloadFeedback = nil }
+        } message: { rejection in
+            Text(ScheduleDownloadFeedback.message(for: rejection))
         }
     }
 
@@ -402,10 +439,6 @@ struct ScheduleView: View {
                     searchSection
                         .id(StandardScrollAnchor.top)
                 } else {
-                    if !expiringSoonPrograms.isEmpty {
-                        expiringSoonSection
-                            .id(StandardScrollAnchor.top)
-                    }
                     ForEach(populatedDays, id: \.date) { day in
                         Section {
                             ForEach(day.programs, id: \.id) { program in
@@ -451,22 +484,10 @@ struct ScheduleView: View {
 
     /// 先頭へ戻すときの目印は、いちばん上に出ているセクションに付ける。
     private func dayAnchorID(for day: ProgramDay) -> String {
-        let isTop = expiringSoonPrograms.isEmpty && day.date == populatedDays.first?.date
+        let isTop = day.date == populatedDays.first?.date
         return isTop
             ? StandardScrollAnchor.top
             : "schedule.day.\(day.date.timeIntervalSinceReferenceDate)"
-    }
-
-    /// カードの横スクロール棚をやめ、本編と同じ行で並べる。視線の動きが
-    /// 一方向になり、同じ情報量をより狭い面積で読める。
-    private var expiringSoonSection: some View {
-        Section {
-            ForEach(expiringSoonPrograms, id: \.id) { program in
-                programRow(program)
-            }
-        } header: {
-            sectionHeader("まもなく配信終了", subtitle: "\(expiringSoonPrograms.count)本")
-        }
     }
 
     @ViewBuilder
@@ -490,18 +511,24 @@ struct ScheduleView: View {
     }
 
     private var searchHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("検索結果")
-            Spacer(minLength: DS.Spacing.s)
-            if searchViewModel.isFiltering {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Text("\(searchedPrograms.count)件")
+        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(searchViewModel.resultTitle)
+                Spacer(minLength: DS.Spacing.s)
+                if searchViewModel.isFiltering {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("\(searchedPrograms.count)件")
+                }
+            }
+            if searchViewModel.appliedSortOrder != .sourceOrder {
+                Text(searchViewModel.appliedSortOrder.scheduleLabel)
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(searchViewModel.accessibilitySummary)
+        .accessibilityValue(searchViewModel.isFiltering ? "検索中" : searchViewModel.appliedSortOrder.scheduleLabel)
     }
 
     private func programRow(_ program: TVerProgram) -> some View {
@@ -555,6 +582,7 @@ struct ScheduleView: View {
         case .notDownloaded:
             Button {
                 downloadCenter.start(program)
+                captureDownloadRejection(for: program)
             } label: {
                 Label(Vocabulary.Download.action, systemImage: "arrow.down.circle")
             }
@@ -569,6 +597,7 @@ struct ScheduleView: View {
         case .failed:
             Button {
                 downloadCenter.retry(program.id)
+                captureDownloadRejection(for: program)
             } label: {
                 Label("もう一度\(Vocabulary.Download.action)", systemImage: "arrow.clockwise.circle")
             }
@@ -590,6 +619,7 @@ struct ScheduleView: View {
                 confirmDownload(.restartDownload, for: program)
             } else {
                 downloadCenter.resume(program.id)
+                captureDownloadRejection(for: program)
             }
         } label: {
             Label(
@@ -620,10 +650,34 @@ struct ScheduleView: View {
             downloadCenter.delete(pending.program.id)
         case .restartDownload:
             downloadCenter.restart(pending.program)
+            captureDownloadRejection(for: pending.program)
         case .favorite, .allFavorites, .recent, .allRecents, .selection:
             // 見逃しタブはマイリスト・履歴・一括選択の確認を出さない。
             break
         }
+    }
+
+    private func captureDownloadRejection(for program: TVerProgram) {
+        guard let rejection = downloadCenter.lastRejection,
+              rejection.programID == program.id
+        else { return }
+        downloadFeedback = rejection
+        // 自分の要求の拒否をここで引き取り、別タブで同じ警告を再表示しない。
+        downloadCenter.clearRejection()
+    }
+
+    private func retryDownloadOnCellular(_ program: TVerProgram) {
+        switch downloadCenter.state(for: program.id) {
+        case .notDownloaded:
+            downloadCenter.start(program, allowingCellular: true)
+        case .paused:
+            downloadCenter.resume(program.id, allowingCellular: true)
+        case .failed:
+            downloadCenter.restart(program, allowingCellular: true)
+        case .queued, .downloading, .downloaded:
+            return
+        }
+        captureDownloadRejection(for: program)
     }
 
     private func shareLink(for program: TVerProgram) -> some View {
@@ -711,7 +765,7 @@ struct ScheduleView: View {
     }
 
     private var populatedDays: [ProgramDay] {
-        viewModel.days.filter { !$0.programs.isEmpty }
+        ProgramSearchResultMapping.uniqueVideoOnDemandDays(viewModel.days)
     }
 
     private var searchedPrograms: [TVerProgram] {
@@ -735,26 +789,14 @@ struct ScheduleView: View {
         return count
     }
 
-    private var expiringSoonPrograms: [TVerProgram] {
-        var seen = Set<String>()
-        var result: [TVerProgram] = []
-        for program in viewModel.days.flatMap(\.programs) {
-            guard !badges(for: program).isEmpty, seen.insert(program.id).inserted else { continue }
-            result.append(program)
-            if result.count == Self.expiringSoonLimit { break }
-        }
-        return result
-    }
-
     private func badges(for program: TVerProgram) -> [MediaBadge] {
-        guard let remaining = ScheduleExpiry.remainingDays(for: program, now: now),
-              ScheduleExpiry.isExpiringSoon(remaining)
-        else { return [] }
-        return [MediaBadge(.expiringSoon, text: ScheduleExpiry.countdownText(for: remaining))]
+        guard let text = ScheduleExpiry.badgeText(for: program, now: now) else { return [] }
+        return [MediaBadge(.expiringSoon, text: text)]
     }
 
     private func displayTitle(for program: TVerProgram) -> String {
-        program.seriesTitle.isEmpty ? program.title : program.seriesTitle
+        program.seriesTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? program.title : program.seriesTitle
     }
 
     private func detailText(for program: TVerProgram) -> String? {
@@ -762,11 +804,12 @@ struct ScheduleView: View {
         if !program.broadcastLabel.isEmpty {
             parts.append(program.broadcastLabel)
         }
-        // The badge already spells out an imminent deadline, so the label
-        // would just repeat it in a quieter colour.
-        if badges(for: program).isEmpty,
-           let deadline = ScheduleExpiry.deadlineLabel(for: program, now: now) {
+        // 「本日まで」だけでは締切の時刻が分からないため、正確な期限も残す。
+        if let deadline = ScheduleExpiry.deadlineLabel(for: program, now: now) {
             parts.append(deadline)
+        }
+        if let download = ScheduleDownloadFeedback.stateText(downloadCenter.state(for: program.id)) {
+            parts.append(download)
         }
         if libraryStore.isFavorite(program) {
             parts.append(Vocabulary.Library.favorites)
@@ -785,6 +828,12 @@ struct ScheduleView: View {
         var label = TVerAccessibilityText.program(program)
         if libraryStore.isFavorite(program) {
             label += "、\(Vocabulary.Library.favorites)に登録済み"
+        }
+        if let expiry = ScheduleExpiry.badgeText(for: program, now: now) {
+            label += "、\(expiry)"
+        }
+        if let download = ScheduleDownloadFeedback.stateText(downloadCenter.state(for: program.id)) {
+            label += "、\(download)"
         }
         return label
     }
@@ -817,10 +866,7 @@ struct ScheduleView: View {
     }
 
     private func resetSearch() {
-        searchViewModel.query = ""
-        searchViewModel.filters = .none
-        searchViewModel.sort = .sourceOrder
-        searchViewModel.searchNow()
+        searchViewModel.resetSearch()
     }
 
     private func refreshSearchIndex() {
@@ -830,11 +876,36 @@ struct ScheduleView: View {
     }
 }
 
+/// 画面とVoiceOverが、同じ転送状態・拒否理由を説明する。
+@MainActor
+enum ScheduleDownloadFeedback {
+    static func message(for rejection: DownloadCenter.Rejection) -> String {
+        let title = rejection.program.map { $0.seriesTitle.isEmpty ? $0.title : $0.seriesTitle }
+        return [title, rejection.message, rejection.recovery]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    static func stateText(_ state: DownloadState) -> String? {
+        switch state {
+        case .notDownloaded: return nil
+        case .queued: return Vocabulary.Download.queued
+        case let .downloading(progress):
+            let percent = Int((DownloadCenter.clamp(progress) * 100).rounded())
+            return "\(Vocabulary.Download.running) \(percent)%"
+        case .paused: return Vocabulary.Download.paused
+        case let .failed(message): return "\(Vocabulary.Download.failed)。\(message)"
+        case .downloaded: return Vocabulary.Download.completed
+        }
+    }
+}
+
 extension ProgramSearchSort {
     var scheduleLabel: String {
         switch self {
-        case .sourceOrder: return "配信順"
-        case .startTime: return "配信日が早い順"
+        case .sourceOrder: return "標準の並び順"
+        case .startTime: return "放送日が古い順"
         case .title: return "タイトル順"
         }
     }

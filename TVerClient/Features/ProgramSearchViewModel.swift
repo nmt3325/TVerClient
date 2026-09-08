@@ -5,15 +5,25 @@ import SwiftUI
 @MainActor
 final class ProgramSearchViewModel: ObservableObject {
     @Published var query: String {
-        didSet { scheduleSearch() }
+        didSet {
+            // IMEや検索欄が同じ入力を繰り返しても、進行中の待ち時間を延ばさない。
+            guard query != oldValue else { return }
+            scheduleSearch()
+        }
     }
 
     @Published var filters: ProgramSearchFilters {
-        didSet { scheduleSearch() }
+        didSet {
+            guard filters != oldValue else { return }
+            scheduleSearch()
+        }
     }
 
     @Published var sort: ProgramSearchSort {
-        didSet { scheduleSearch() }
+        didSet {
+            guard sort != oldValue else { return }
+            scheduleSearch()
+        }
     }
 
     @Published private(set) var results: [ProgramSearchEntry]
@@ -88,10 +98,18 @@ final class ProgramSearchViewModel: ObservableObject {
         return hasActiveCriteria ? .empty : .idle
     }
 
-    /// 検索語か絞り込みが効いているか。どちらも無いときは検索結果欄を出さない。
+    /// 並び順だけを変えた一覧も、0件なら空の理由を表示する。
     var hasActiveCriteria: Bool {
-        !appliedTerms.isEmpty || appliedFilters != .none
+        !appliedTerms.isEmpty || appliedFilters != .none || appliedSort != .sourceOrder
     }
+
+    /// 入力待ちの間も、見出しは表示中の結果に対応させる。
+    var resultTitle: String {
+        if !appliedSearchTerm.isEmpty { return "検索結果" }
+        return appliedFilters == .none ? "番組一覧" : "絞り込み結果"
+    }
+
+    var appliedSortOrder: ProgramSearchSort { appliedSort }
 
     /// いまの結果に効いている検索語。デバウンス中は打ちかけではなく適用済みの語。
     var appliedSearchTerm: String {
@@ -102,7 +120,7 @@ final class ProgramSearchViewModel: ObservableObject {
     var activeFilterSummary: String? {
         var parts: [String] = []
         if appliedFilters.onlyOnAir { parts.append("放送中のみ") }
-        if appliedFilters.onlyFavorites { parts.append("お気に入りのみ") }
+        if appliedFilters.onlyFavorites { parts.append("\(Vocabulary.Library.favorites)のみ") }
         if appliedFilters.timeSlot != .all { parts.append(appliedFilters.timeSlot.displayName) }
         return parts.isEmpty ? nil : parts.joined(separator: "・")
     }
@@ -113,26 +131,29 @@ final class ProgramSearchViewModel: ObservableObject {
         return term.isEmpty ? "条件に合う番組がありません" : "「\(term)」に一致する番組がありません"
     }
 
-    /// 0 件表示の本文。効いている絞り込みと、次に何をすればよいかを書く。
+    /// 画面を限定せず、検索処理で同一視する表記ゆれは復旧手段として勧めない。
     var emptyResultMessage: String {
         var lines: [String] = []
         if let activeFilterSummary {
             lines.append("絞り込み中: \(activeFilterSummary)")
             lines.append(
                 appliedSearchTerm.isEmpty
-                    ? "絞り込みを外すと、番組表の全件が表示されます。"
-                    : "絞り込みを外すか、番組名を短くしてお試しください。"
+                    ? "絞り込みを外して、一覧の番組をご確認ください。"
+                    : "絞り込みを外すか、検索語を短くしてお試しください。"
             )
+        } else if appliedSearchTerm.isEmpty {
+            lines.append("表示できる番組がありません。時間をおいて一覧を更新してください。")
         } else {
-            lines.append("番組名を短くするか、ひらがな・カタカナを変えてお試しください。")
+            lines.append("検索語を短くするか、別のキーワードでお試しください。")
         }
         return lines.joined(separator: "\n")
     }
 
-    /// 検索語と絞り込みをまとめて解除する。表示中の結果もその場で作り直す。
+    /// 検索語・絞り込み・並び順をまとめて初期状態に戻す。
     func resetSearch() {
         query = ""
         filters = .none
+        sort = .sourceOrder
         searchNow()
     }
 
@@ -298,21 +319,29 @@ struct ProgramSearchStatusView: View {
 @MainActor
 struct ProgramSearchFilterSummaryBar: View {
     @ObservedObject var viewModel: ProgramSearchViewModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var summaryLayout: AnyLayout {
+        dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: DS.Spacing.xs))
+            : AnyLayout(HStackLayout(spacing: DS.Spacing.s))
+    }
 
     var body: some View {
         if let summary = viewModel.activeFilterSummary {
-            HStack(spacing: DS.Spacing.s) {
+            summaryLayout {
                 Label("絞り込み中: \(summary)", systemImage: "line.3.horizontal.decrease.circle.fill")
-                    .font(.footnote)
+                    .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                Button("すべて解除") {
+                if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
+                Button("解除") {
                     viewModel.filters = .none
+                    viewModel.searchNow()
                 }
-                .font(.footnote.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
                 .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
                 .accessibilityLabel("絞り込みをすべて解除")
-                .accessibilityHint("放送中のみやお気に入りのみなどの絞り込みを外します")
+                .accessibilityHint("放送中のみや\(Vocabulary.Library.favorites)のみなどの絞り込みを外します")
             }
             .padding(.horizontal, DS.Spacing.l)
             .padding(.vertical, DS.Spacing.xs)
