@@ -20,6 +20,38 @@ struct DownloadButton: View {
 
     private var state: DownloadState { downloadCenter.state(for: program.id) }
 
+    enum PrimaryAction: Equatable {
+        case start, cancel, pause, resume, restart, retry, savedOptions
+
+        var label: String {
+            switch self {
+            case .start: return Vocabulary.Download.action
+            case .cancel: return Vocabulary.Download.cancel
+            case .pause: return "ダウンロードを一時停止"
+            case .resume: return Vocabulary.Download.resume
+            case .restart: return "最初からやり直す"
+            case .retry: return "最初から再試行"
+            case .savedOptions: return "ダウンロード済みの操作"
+            }
+        }
+    }
+
+    /// 進行中の主操作は取り消せる一時停止。データを捨てる中止は確認付きメニューへ。
+    static func primaryAction(for state: DownloadState, isInterrupted: Bool) -> PrimaryAction {
+        switch state {
+        case .notDownloaded: return .start
+        case .queued: return .cancel
+        case .downloading: return .pause
+        case .paused: return isInterrupted ? .restart : .resume
+        case .failed: return .retry
+        case .downloaded: return .savedOptions
+        }
+    }
+
+    private var primaryAction: PrimaryAction {
+        Self.primaryAction(for: state, isInterrupted: isInterrupted)
+    }
+
     /// 続きから戻せない一時停止。同じ見た目で押しても進まない状態を作らない。
     private var isInterrupted: Bool { downloadCenter.isInterrupted(program.id) }
 
@@ -33,41 +65,51 @@ struct DownloadButton: View {
     }
 
     var body: some View {
-        Button(action: activate) {
-            symbol
-                .frame(
-                    width: DS.Size.minimumTapTarget,
-                    height: DS.Size.minimumTapTarget
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityValue(accessibilityValue)
-        .accessibilityAddTraits(.isButton)
-        .contextMenu { contextActions }
-        .confirmationDialog(
-            Text(pendingConfirmation?.title ?? ""),
-            isPresented: Binding(
-                get: { pendingConfirmation != nil },
-                set: { isPresented in
-                    if !isPresented { pendingConfirmation = nil }
+        primaryControl
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(title)の\(primaryAction.label)")
+            .accessibilityValue(accessibilityValue)
+            .accessibilityHint(state.isFinished ? "メニューから削除を選ぶと確認が表示されます" : primaryAction.label)
+            .accessibilityAddTraits(.isButton)
+            .contextMenu { contextActions }
+            .confirmationDialog(
+                Text(pendingConfirmation?.title ?? ""),
+                isPresented: Binding(
+                    get: { pendingConfirmation != nil },
+                    set: { isPresented in
+                        if !isPresented { pendingConfirmation = nil }
+                    }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingConfirmation
+            ) { confirmation in
+                Button(
+                    confirmation.confirmLabel,
+                    role: confirmation.isDestructive ? ButtonRole.destructive : nil
+                ) {
+                    perform(confirmation.target)
+                    pendingConfirmation = nil
                 }
-            ),
-            titleVisibility: .visible,
-            presenting: pendingConfirmation
-        ) { confirmation in
-            Button(
-                confirmation.confirmLabel,
-                role: confirmation.isDestructive ? ButtonRole.destructive : nil
-            ) {
-                perform(confirmation.target)
-                pendingConfirmation = nil
+                Button("やめる", role: .cancel) { pendingConfirmation = nil }
+            } message: { confirmation in
+                Text(confirmation.message)
             }
-            Button("やめる", role: .cancel) { pendingConfirmation = nil }
-        } message: { confirmation in
-            Text(confirmation.message)
+    }
+
+    @ViewBuilder
+    private var primaryControl: some View {
+        if state.isFinished {
+            // 完了のチェックマークを押すだけで、削除へ直行させない。
+            Menu { contextActions } label: { symbolBox }
+        } else {
+            Button(action: activate) { symbolBox }
         }
+    }
+
+    private var symbolBox: some View {
+        symbol
+            .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
+            .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -94,7 +136,7 @@ struct DownloadButton: View {
                 downloadCenter.retry(program.id)
             } label: {
                 Label(
-                    "もう一度\(Vocabulary.Download.action)",
+                    "最初から再試行",
                     systemImage: "arrow.clockwise.circle"
                 )
             }
@@ -117,18 +159,19 @@ struct DownloadButton: View {
     }
 
     private func activate() {
-        switch state {
-        case .notDownloaded:
+        switch primaryAction {
+        case .start:
             downloadCenter.start(program)
-        case .queued, .downloading:
-            // 押し間違いで途中までの受け取りを捨てないよう、必ず確認を挑む。
+        case .cancel:
             confirm(.runningDownload)
-        case .paused:
+        case .pause:
+            downloadCenter.pause(program.id)
+        case .resume, .restart:
             resumeOrRestart()
-        case .failed:
+        case .retry:
             downloadCenter.retry(program.id)
-        case .downloaded:
-            confirm(.savedDownload)
+        case .savedOptions:
+            break // 保存済みの主操作はMenuで受ける。
         }
     }
 
@@ -147,10 +190,13 @@ struct DownloadButton: View {
     private func perform(_ target: DownloadConfirmation.Target) {
         switch target {
         case .runningDownload:
+            guard isCancellable else { return }
             downloadCenter.cancel(program.id)
         case .savedDownload:
+            guard state.isFinished else { return }
             downloadCenter.delete(program.id)
         case .restartDownload:
+            guard case .paused = state, isInterrupted else { return }
             downloadCenter.restart(program)
         case .favorite, .allFavorites, .recent, .allRecents, .selection:
             break
@@ -166,8 +212,10 @@ struct DownloadButton: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(DS.Palette.catchUp)
         case .queued:
-            ProgressView()
-                .progressViewStyle(.circular)
+            Image(systemName: "xmark.circle")
+                .font(.title2)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(DS.Palette.catchUp)
         case let .downloading(progress):
             ZStack {
                 Circle()
@@ -179,7 +227,7 @@ struct DownloadButton: View {
                         style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
-                Image(systemName: "stop.fill")
+                Image(systemName: "pause.fill")
                     .font(.caption2)
                     .foregroundStyle(DS.Palette.catchUp)
             }
@@ -206,22 +254,7 @@ struct DownloadButton: View {
         program.seriesTitle.isEmpty ? program.title : program.seriesTitle
     }
 
-    /// ラベルは「押すと何が起きるか」、値は「今どうなっているか」を言う。
-    private var accessibilityLabel: String {
-        switch state {
-        case .notDownloaded:
-            return Vocabulary.Download.action
-        case .queued, .downloading:
-            return Vocabulary.Download.cancel
-        case .paused:
-            return isInterrupted ? "最初からやり直す" : Vocabulary.Download.resume
-        case .failed:
-            return "もう一度\(Vocabulary.Download.action)"
-        case .downloaded:
-            return Vocabulary.Download.remove
-        }
-    }
-
+    /// ラベルは操作、値は現在の状態を伝える。
     private var accessibilityValue: String {
         switch state {
         case .notDownloaded:
