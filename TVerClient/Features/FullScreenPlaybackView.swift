@@ -51,21 +51,26 @@ struct FullScreenPlaybackView: View {
     }
 
     var body: some View {
-        PlayerStage(
-            playbackController: playbackController,
-            pictureInPicture: pictureInPicture,
-            model: model,
-            title: title,
-            subtitle: subtitle,
-            accessibilityLabel: accessibilityLabel,
-            supportsSeeking: supportsSeeking,
-            isFullScreen: true,
-            isActiveSurface: true,
-            onToggleFullScreen: exitFullScreen
-        )
-        .ignoresSafeArea()
+        GeometryReader { surface in
+            // Capture this surface's safe area before the video opts out of it.
+            // The inner stage fills the screen without losing chrome insets.
+            PlayerStage(
+                playbackController: playbackController,
+                pictureInPicture: pictureInPicture,
+                model: model,
+                title: title,
+                subtitle: subtitle,
+                accessibilityLabel: accessibilityLabel,
+                supportsSeeking: supportsSeeking,
+                isFullScreen: true,
+                isActiveSurface: true,
+                chromeSafeAreaInsets: surface.safeAreaInsets,
+                onToggleFullScreen: exitFullScreen
+            )
+            .ignoresSafeArea()
+            .gesture(dismissGesture)
+        }
         .background(Color.black.ignoresSafeArea())
-        .gesture(dismissGesture)
         .statusBarHidden(!model.areControlsVisible)
         .preferredColorScheme(.dark)
         .accessibilityElement(children: .contain)
