@@ -65,6 +65,13 @@ final class GuideUsabilityRegressionTests: XCTestCase {
         XCTAssertNil(ProgramGuideListNavigation.nowRowID(in: [], now: date(hour: 10)))
     }
 
+    func testNowCanStillNavigateWhenEveryChannelIsPaused() {
+        let pause = program("pause", start: 10, end: 12, isPause: true)
+        let sections = [section("a", [program("ended", start: 8, end: 9), pause])]
+        XCTAssertEqual(ProgramGuideListNavigation.nowRowID(in: sections, now: date(hour: 11)), "guide.row.a.pause")
+        XCTAssertFalse(GuideProgramTimeStatus.isOnAir(pause, now: date(hour: 11)))
+    }
+
     func testInitialCurrentPositionDoesNotResetWhenDetailCloses() {
         let sections = [section("a", [program("now", start: 10, end: 12)])]
         let today = date(hour: 5)

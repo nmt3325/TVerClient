@@ -75,8 +75,16 @@ enum ProgramGuideListNavigation {
                 .min(by: { $0.startAt < $1.startAt }) else { return nil }
             return (section.channel.id, program)
         }.min { $0.1.startAt < $1.1.startAt }
-        guard let (channelID, program) = upcoming else { return nil }
-        return ProgramGuideListRowID.make(channelID: channelID, programID: program.id)
+        if let (channelID, program) = upcoming {
+            return ProgramGuideListRowID.make(channelID: channelID, programID: program.id)
+        }
+        // If every station is paused, still move to the current slot without labeling it playable.
+        for section in sections {
+            if let program = section.programs.first(where: { $0.startAt <= now && now < $0.endAt }) {
+                return ProgramGuideListRowID.make(channelID: section.channel.id, programID: program.id)
+            }
+        }
+        return nil
     }
 }
 
