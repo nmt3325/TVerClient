@@ -40,6 +40,18 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         }
     }
 
+    func testFullScreenNativeInsetUpdatesPreserveLayoutAndPlaybackIdentity() async throws {
+        for dynamicType in [DynamicTypeSize.large, .accessibility5] {
+            for failing in [false, true] {
+                try await checkLayout(
+                    fullScreen: true, dynamicType: dynamicType, failing: failing,
+                    additionalInsets: landscapeInsets,
+                    insetUpdates: [UIEdgeInsets(top: 12, left: 12, bottom: 27, right: 44), .zero]
+                )
+            }
+        }
+    }
+
     private var landscapeInsets: UIEdgeInsets {
         UIEdgeInsets(top: 12, left: 44, bottom: 21, right: 12)
     }
@@ -47,6 +59,7 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
     private func checkLayout(
         fullScreen: Bool, dynamicType: DynamicTypeSize, failing: Bool,
         additionalInsets: UIEdgeInsets = .zero,
+        insetUpdates: [UIEdgeInsets] = [],
         file: StaticString = #filePath, line: UInt = #line
     ) async throws {
         let fixture = try FooterLayoutFixture(failing: failing)
@@ -114,6 +127,77 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                 XCTAssertEqual(layers.count, 1, "Must mount the actual full-screen player layer", file: file, line: line)
                 XCTAssertTrue(layers.first?.playerLayer.player === fixture.controller.player, file: file, line: line)
             }
+            if !insetUpdates.isEmpty {
+                XCTAssertTrue(fullScreen, file: file, line: line)
+                let root = try XCTUnwrap(host.rootView)
+                let window = try XCTUnwrap(root.window)
+                let layer = try XCTUnwrap(descendants(of: root, matching: PlayerLayerContainerView.self).first)
+                let playerLayer = layer.playerLayer
+                let player = fixture.controller.player
+                let item = player.currentItem
+                let state = fixture.controller.state
+                let isPlaying = fixture.controller.isPlaying
+                let elapsedTime = fixture.controller.currentTime
+                let playerTime = player.currentTime()
+                let nativeInsets = root.safeAreaInsets
+                let baseInsets = UIEdgeInsets(
+                    top: nativeInsets.top - additionalInsets.top,
+                    left: nativeInsets.left - additionalInsets.left,
+                    bottom: nativeInsets.bottom - additionalInsets.bottom,
+                    right: nativeInsets.right - additionalInsets.right
+                )
+                let elapsedProbe = try XCTUnwrap(descendants(of: root, matching: PlayerFooterLayoutProbeView.self)
+                    .first { $0.element == .elapsedTime })
+                var previousElapsedBottom = elapsedProbe.convert(elapsedProbe.bounds, to: root).maxY
+                if !failing {
+                    XCTAssertGreaterThan(elapsedTime, 0, file: file, line: line)
+                    XCTAssertGreaterThan(playerTime.seconds, 0, file: file, line: line)
+                }
+                for insets in insetUpdates {
+                    // Mutate only this mounted native controller. Do not reset
+                    // rootView, rebuild the fixture, or simulate device motion.
+                    host.updateAdditionalSafeAreaInsets(insets)
+                    let expectedNativeInsets = UIEdgeInsets(
+                        top: baseInsets.top + insets.top, left: baseInsets.left + insets.left,
+                        bottom: baseInsets.bottom + insets.bottom, right: baseInsets.right + insets.right
+                    )
+                    try await waitUntil("owned host applies the requested native inset update") {
+                        host.layout()
+                        return root.safeAreaInsets == expectedNativeInsets
+                    }
+                    for _ in 0..<3 {
+                        try await Task.sleep(nanoseconds: 10_000_000)
+                        host.layout()
+                    }
+                    print("PLAYER_FOOTER_NATIVE_INSET_UPDATE type=\(dynamicType) failed=\(failing) requested=\(insets) native=\(root.safeAreaInsets)")
+                    try assertLayout(host, size: size, fullScreen: true, dynamicType: dynamicType,
+                                     failing: failing, additionalInsets: insets, checksNativeSafeArea: true,
+                                     file: file, line: line)
+                    XCTAssertTrue(fixture.host === host, file: file, line: line)
+                    XCTAssertTrue(host.rootView === root, file: file, line: line)
+                    XCTAssertTrue(root.window === window, file: file, line: line)
+                    let updatedLayers = descendants(of: root, matching: PlayerLayerContainerView.self)
+                    XCTAssertEqual(updatedLayers.count, 1, file: file, line: line)
+                    XCTAssertTrue(updatedLayers.first === layer, "Native inset updates must not remount the player container", file: file, line: line)
+                    XCTAssertTrue(updatedLayers.first?.playerLayer === playerLayer, file: file, line: line)
+                    XCTAssertTrue(updatedLayers.first?.playerLayer.player === player, file: file, line: line)
+                    XCTAssertTrue(fixture.controller.player === player, file: file, line: line)
+                    XCTAssertTrue(player.currentItem === item, file: file, line: line)
+                    XCTAssertEqual(fixture.controller.state, state, file: file, line: line)
+                    XCTAssertEqual(fixture.controller.isPlaying, isPlaying, file: file, line: line)
+                    if !failing {
+                        XCTAssertGreaterThan(fixture.controller.currentTime, 0, file: file, line: line)
+                        XCTAssertEqual(fixture.controller.currentTime, elapsedTime, file: file, line: line)
+                        XCTAssertEqual(CMTimeCompare(player.currentTime(), playerTime), 0, file: file, line: line)
+                    }
+                    let updatedElapsedProbe = try XCTUnwrap(descendants(of: root, matching: PlayerFooterLayoutProbeView.self)
+                        .first { $0.element == .elapsedTime })
+                    let elapsedBottom = updatedElapsedProbe.convert(updatedElapsedProbe.bounds, to: root).maxY
+                    XCTAssertNotEqual(elapsedBottom, previousElapsedBottom,
+                                      "Changed bottom insets must relayout the footer, including reset to zero", file: file, line: line)
+                    previousElapsedBottom = elapsedBottom
+                }
+            }
             await fixture.tearDown()
         } catch {
             await fixture.tearDown()
@@ -123,7 +207,8 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
 
     private func assertLayout(
         _ host: FooterLayoutHost, size: CGSize, fullScreen: Bool, dynamicType: DynamicTypeSize,
-        failing: Bool, additionalInsets: UIEdgeInsets, file: StaticString, line: UInt
+        failing: Bool, additionalInsets: UIEdgeInsets, checksNativeSafeArea: Bool = false,
+        file: StaticString, line: UInt
     ) throws {
         let root = try XCTUnwrap(host.rootView, file: file, line: line)
         let window = try XCTUnwrap(root.window, file: file, line: line)
@@ -191,7 +276,7 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                               "Footer/control overlap: \(rect), \(other)", file: file, line: line)
             }
         }
-        if additionalInsets != .zero {
+        if additionalInsets != .zero || checksNativeSafeArea {
             // These are native controller safe-area insets, not an EdgeInsets
             // argument supplied directly to a replacement overlay.
             let actual = root.safeAreaInsets
@@ -259,6 +344,13 @@ private final class FooterLayoutHost {
     }
 
     func owns(window candidate: UIWindow) -> Bool { window === candidate }
+
+    func updateAdditionalSafeAreaInsets(_ insets: UIEdgeInsets) {
+        host?.additionalSafeAreaInsets = insets
+        container?.view.setNeedsLayout()
+        host?.view.setNeedsLayout()
+        layout()
+    }
 
     func layout() {
         window?.frame = CGRect(origin: .zero, size: size)
