@@ -142,8 +142,17 @@ final class FullScreenPlaybackTests: XCTestCase {
         model.cancelAutoHide()
     }
 
-    func testHostedStageRoutesBlankTapsBehindButtonsAndScrubber() async {
-        let controller = PlaybackController(player: AVPlayer())
+    func testHostedStageRoutesBlankTapsBehindButtonsAndScrubber() async throws {
+        // An empty AVPlayer deliberately disables the primary action now. Use
+        // a real local item so this asserts routing to an enabled play button.
+        let url = try makeHostedStageAudioFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
+        let controller = PlaybackController(player: player)
+        defer { controller.stop() }
+        await waitUntil("the local hit-testing fixture is playable") { item.status == .readyToPlay }
+        XCTAssertTrue(PlayerPrimaryAction.resolve(using: controller).isEnabled)
         let coordinator = PictureInPictureCoordinator(isSupported: { false })
         let model = PlayerChromeModel(autoHideDelay: 60)
         // Keep lifecycle setup from publishing into the graph while it mounts.
@@ -165,6 +174,7 @@ final class FullScreenPlaybackTests: XCTestCase {
 
         let tapSurfaces = descendants(of: harness.rootView, matching: PlayerBackgroundTapView.self)
         XCTAssertEqual(tapSurfaces.count, 2, "visible and hidden chrome each keep an isolated tap plane")
+        XCTAssertEqual(tapSurfaces.filter(\.isUserInteractionEnabled).count, 1, "only the currently visible chrome mode may receive native touches")
 
         let blankTarget = firstBackgroundHit(in: harness.rootView, surfaces: tapSurfaces)
         XCTAssertNotNil(blankTarget, "an unoccupied video pixel must reach the visible chrome tap plane")
@@ -510,6 +520,29 @@ final class FullScreenPlaybackTests: XCTestCase {
         XCTAssertTrue(coordinator.isAttached(to: inlineLayer))
     }
 
+    private func makeHostedStageAudioFile() throws -> URL {
+        // One second of local, silent 16-bit PCM. No network or audio-session
+        // playback is needed just to make the primary button a valid control.
+        let dataSize = 8_000 * 2
+        var data = Data()
+        func ascii(_ text: String) { data.append(contentsOf: text.utf8) }
+        func integer<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        ascii("RIFF"); integer(UInt32(36 + dataSize)); ascii("WAVE")
+        ascii("fmt "); integer(UInt32(16))
+        integer(UInt16(1)); integer(UInt16(1))
+        integer(UInt32(8_000)); integer(UInt32(16_000))
+        integer(UInt16(2)); integer(UInt16(16))
+        ascii("data"); integer(UInt32(dataSize))
+        data.append(Data(count: dataSize))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("player-hit-testing-\(UUID().uuidString).wav")
+        try data.write(to: url)
+        return url
+    }
+
     private func descendants<T: UIView>(of view: UIView, matching type: T.Type) -> [T] {
         var matches = view.subviews.compactMap { $0 as? T }
         for subview in view.subviews {
@@ -549,19 +582,36 @@ final class FullScreenPlaybackTests: XCTestCase {
         line: UInt = #line
     ) {
         let frame = target.convert(target.bounds, to: rootView)
-        XCTAssertGreaterThan(frame.width, 0, file: file, line: line)
-        XCTAssertGreaterThan(frame.height, 0, file: file, line: line)
-        let point = CGPoint(x: frame.midX, y: frame.midY)
-        let hitView = rootView.hitTest(point, with: nil)
-        XCTAssertNotNil(hitView, file: file, line: line)
-        XCTAssertFalse(
-            surfaces.contains { surface in
-                hitView === surface || hitView?.isDescendant(of: surface) == true
-            },
-            message,
-            file: file,
-            line: line
-        )
+        XCTAssertGreaterThanOrEqual(frame.width, 44, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.height, 44, file: file, line: line)
+        XCTAssertTrue(rootView.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame), "Control frame must be in the stage: \(frame)", file: file, line: line)
+        // Use the identified control's real frame, never a guessed screen point.
+        // All five samples are inside even the circular play button's shape.
+        let points = [
+            CGPoint(x: frame.midX, y: frame.midY),
+            CGPoint(x: frame.midX - frame.width * 0.2, y: frame.midY),
+            CGPoint(x: frame.midX + frame.width * 0.2, y: frame.midY),
+            CGPoint(x: frame.midX, y: frame.midY - frame.height * 0.2),
+            CGPoint(x: frame.midX, y: frame.midY + frame.height * 0.2),
+        ]
+        for point in points {
+            let hitView = rootView.hitTest(point, with: nil)
+            let hitType = hitView.map { String(describing: type(of: $0)) } ?? "nil"
+            let diagnostic = "\(message); target=\(target.accessibilityIdentifier ?? "unknown"); frame=\(frame); point=\(point); hit=\(hitType)"
+            XCTAssertNotNil(hitView, diagnostic, file: file, line: line)
+            XCTAssertFalse(
+                surfaces.contains { surface in
+                    hitView === surface || hitView?.isDescendant(of: surface) == true
+                },
+                diagnostic,
+                file: file,
+                line: line
+            )
+            for surface in surfaces where surface.isUserInteractionEnabled {
+                let localPoint = surface.convert(point, from: rootView)
+                XCTAssertFalse(surface.point(inside: localPoint, with: nil), "Background must reject the measured control: \(diagnostic)", file: file, line: line)
+            }
+        }
     }
 
     private func waitUntil(

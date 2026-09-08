@@ -41,6 +41,7 @@ struct PlayerIconButton: View {
         .opacity(isEnabled ? 1 : 0.4)
         .accessibilityLabel(label)
         .modifier(OptionalAccessibilityIdentifier(identifier: identifier))
+        .playerControlHitRegion()
     }
 }
 

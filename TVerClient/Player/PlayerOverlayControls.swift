@@ -8,6 +8,8 @@ import UIKit
 @MainActor
 final class PlayerControlHitTargetView: UIView {
     static let playPauseIdentifier = "playback.hit-target.play-pause"
+    static let failureRetryIdentifier = "playback.hit-target.failure-retry"
+    static let failureDetailsIdentifier = "playback.hit-target.failure-details"
 
     init(identifier: String) {
         super.init(frame: .zero)
@@ -57,6 +59,36 @@ struct PlayerOverlayControls: View {
     var onToggleFullScreen: (() -> Void)?
     var onBackgroundSingleTap: () -> Void = {}
     var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
+    @State private var showsFailureDetails = false
+
+    // Keep the existing call surface independent from private presentation state.
+    init(
+        playbackController: PlaybackController,
+        pictureInPicture: PictureInPictureCoordinator,
+        model: PlayerChromeModel,
+        title: String,
+        subtitle: String? = nil,
+        supportsSeeking: Bool = true,
+        isFullScreen: Bool = false,
+        showsContinuityNotice: Bool = true,
+        safeAreaInsets: EdgeInsets = EdgeInsets(),
+        onToggleFullScreen: (() -> Void)? = nil,
+        onBackgroundSingleTap: @escaping () -> Void = {},
+        onBackgroundDoubleTap: @escaping (CGPoint) -> Void = { _ in }
+    ) {
+        self.playbackController = playbackController
+        self.pictureInPicture = pictureInPicture
+        self.model = model
+        self.title = title
+        self.subtitle = subtitle
+        self.supportsSeeking = supportsSeeking
+        self.isFullScreen = isFullScreen
+        self.showsContinuityNotice = showsContinuityNotice
+        self.safeAreaInsets = safeAreaInsets
+        self.onToggleFullScreen = onToggleFullScreen
+        self.onBackgroundSingleTap = onBackgroundSingleTap
+        self.onBackgroundDoubleTap = onBackgroundDoubleTap
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -67,16 +99,34 @@ struct PlayerOverlayControls: View {
             )
             ZStack {
                 PlayerScrim()
-                PlayerBackgroundTapSurface(
-                    onSingleTap: onBackgroundSingleTap,
-                    onDoubleTap: onBackgroundDoubleTap
-                )
-                .accessibilityHidden(true)
                 controlStack(layout: layout)
+                    .backgroundPreferenceValue(PlayerControlHitRegionsKey.self) { anchors in
+                        GeometryReader { hitProxy in
+                            PlayerBackgroundTapSurface(
+                                onSingleTap: onBackgroundSingleTap,
+                                onDoubleTap: onBackgroundDoubleTap,
+                                excludedRects: anchors.map { hitProxy[$0] },
+                                isEnabled: model.areControlsVisible
+                            )
+                            .accessibilityHidden(true)
+                        }
+                    }
             }
         }
         .tint(.white)
         .foregroundStyle(.white)
+        .sheet(isPresented: $showsFailureDetails) {
+            if let presentation = playbackController.errorPresentation {
+                PlayerFailureDetailsSheet(
+                    presentation: presentation,
+                    action: primaryAction,
+                    officialURL: playbackController.currentProgram?.webURL ?? playbackController.currentLiveChannel?.webURL
+                ) {
+                    showsFailureDetails = false
+                    activatePrimaryAction()
+                }
+            }
+        }
         // スクラブが onScrubEnded を伴わずに終わる経路がある（別のジェスチャに奪われた、
         // 途中で画面が閉じた）。掴んだ印をそこだけで落としていると、自動非表示が
         // 止まったまま操作パネルが出っぱなしになる。
@@ -149,6 +199,7 @@ struct PlayerOverlayControls: View {
                 AirPlayRouteButton()
                     .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
                     .accessibilityLabel("AirPlay")
+                    .playerControlHitRegion()
                 pictureInPictureButton
                 settingsMenu
             }
@@ -230,6 +281,7 @@ struct PlayerOverlayControls: View {
         .accessibilityLabel("再生設定：速度・字幕・音声")
         .accessibilityHint("再生速度や利用可能な字幕・音声を選べます")
         .simultaneousGesture(TapGesture().onEnded { model.registerInteraction() })
+        .playerControlHitRegion()
     }
 
     // MARK: - Continuity
@@ -263,6 +315,7 @@ struct PlayerOverlayControls: View {
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .playerControlHitRegion()
                 PlayerIconButton(
                     systemImage: "xmark",
                     label: "この案内を閉じる",
@@ -300,14 +353,27 @@ struct PlayerOverlayControls: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            PlayerIconButton(systemImage: "info.circle", label: "再生エラーの詳細") {
+                model.registerInteraction()
+                showsFailureDetails = true
+            }
+            .background(PlayerControlHitTarget(identifier: PlayerControlHitTargetView.failureDetailsIdentifier))
             Button(action: activatePrimaryAction) {
                 Label(primaryAction.title, systemImage: primaryAction.systemImage)
+                    .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, DS.Spacing.s)
                     .frame(minHeight: DS.Size.minimumTapTarget)
+                    .background(Color.white.opacity(0.22), in: Capsule())
+                    .contentShape(Capsule())
             }
-            .buttonStyle(.bordered)
+            // A bordered style adds padding outside the 44pt label and can
+            // overflow the 180pt stage; own that background inside the target.
+            .buttonStyle(.plain)
             .disabled(!primaryAction.isEnabled)
             .accessibilityHint("現在の番組の再生をもう一度試します")
+            .playerControlHitRegion()
+            .background(PlayerControlHitTarget(identifier: PlayerControlHitTargetView.failureRetryIdentifier))
         }
         .padding(.horizontal, DS.Spacing.s)
         .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: DS.Radius.medium))
@@ -382,6 +448,7 @@ struct PlayerOverlayControls: View {
                         },
                         onAdjust: { playbackController.seek(by: $0) }
                     )
+                    .playerControlHitRegion()
                     timeLabels
                 } else {
                     liveLabel

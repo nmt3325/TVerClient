@@ -155,6 +155,111 @@ final class PlayerUsabilityRegressionTests: XCTestCase {
         await Task.yield()
     }
 
+    func testBackgroundPlaneRejectsControlsButStillReceivesBlankPixels() {
+        let plane = PlayerBackgroundTapView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        let controlFrame = CGRect(x: 136, y: 60, width: 48, height: 48)
+        var singleTaps = 0
+        var doubleTaps: [CGPoint] = []
+        plane.updateActions(
+            onSingleTap: { singleTaps += 1 },
+            onDoubleTap: { doubleTaps.append($0) },
+            excludedRects: [controlFrame]
+        )
+        XCTAssertNil(plane.hitTest(CGPoint(x: controlFrame.midX, y: controlFrame.midY), with: nil))
+        let blankPoint = CGPoint(x: 20, y: 80)
+        XCTAssertTrue(plane.hitTest(blankPoint, with: nil) === plane)
+        plane.didSingleTap(plane.singleTapRecognizer)
+        plane.performDoubleTap(at: blankPoint)
+        XCTAssertEqual(singleTaps, 1)
+        XCTAssertEqual(doubleTaps, [blankPoint])
+    }
+
+    func testBackgroundPlaneUpdatesExclusionsAndDisablesItsNativeHitTesting() {
+        let plane = PlayerBackgroundTapView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        let oldPoint = CGPoint(x: 40, y: 40)
+        let newPoint = CGPoint(x: 200, y: 100)
+        plane.updateActions(onSingleTap: {}, onDoubleTap: { _ in }, excludedRects: [CGRect(x: 20, y: 20, width: 44, height: 44)])
+        XCTAssertNil(plane.hitTest(oldPoint, with: nil))
+        plane.updateActions(onSingleTap: {}, onDoubleTap: { _ in }, excludedRects: [CGRect(x: 180, y: 80, width: 44, height: 44)])
+        XCTAssertTrue(plane.hitTest(oldPoint, with: nil) === plane)
+        XCTAssertNil(plane.hitTest(newPoint, with: nil))
+        plane.updateActions(onSingleTap: {}, onDoubleTap: { _ in }, isEnabled: false)
+        XCTAssertFalse(plane.isUserInteractionEnabled)
+        XCTAssertNil(plane.hitTest(oldPoint, with: nil))
+        plane.updateActions(onSingleTap: {}, onDoubleTap: { _ in })
+        XCTAssertTrue(plane.hitTest(oldPoint, with: nil) === plane)
+    }
+
+    func testLiveFailureRetryResolvesTheSameChannelAgain() async {
+        let resolver = PlayerUsabilityFailingResolver()
+        let controller = PlaybackController(liveResolver: resolver, player: AVPlayer())
+        defer { controller.stop() }
+        let channel = TVerLiveChannel(
+            id: "player-usability-live", name: "テスト放送局", iconURL: nil,
+            projectID: "fixture", mediaID: "fixture", apiKey: "fixture",
+            currentProgram: nil, state: .onAir
+        )
+        await controller.playLive(channel)
+        let action = PlayerPrimaryAction.resolve(using: controller)
+        XCTAssertEqual(action, .retry)
+        await action.perform(using: controller)
+        let count = await resolver.liveCallCount
+        XCTAssertEqual(count, 2)
+        XCTAssertEqual(controller.currentLiveChannel?.id, channel.id)
+        XCTAssertNil(controller.player.currentItem)
+    }
+
+    func testFailedCompactAndFullScreenStagesKeepRecoveryTouchable() async {
+        let resolver = PlayerUsabilityFailingResolver()
+        let controller = PlaybackController(resolver: resolver, player: AVPlayer())
+        defer { controller.stop() }
+        await controller.play(makeProgram())
+        let sizes = [CGSize(width: 320, height: 180), CGSize(width: 640, height: 240)]
+        for (index, size) in sizes.enumerated() {
+            let model = PlayerChromeModel(autoHideDelay: 60)
+            model.isAutoHideSuspended = true
+            let stage = PlayerStage(
+                playbackController: controller,
+                pictureInPicture: PictureInPictureCoordinator(isSupported: { false }),
+                model: model, title: "再生失敗のテスト",
+                accessibilityLabel: "再生失敗の動画プレイヤー",
+                isFullScreen: index == 1, rendersVideoLayer: false,
+                showsContinuityNotice: true, onToggleFullScreen: {}
+            )
+            .frame(width: size.width, height: size.height)
+            let host = UIHostingController(rootView: AnyView(stage))
+            let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+            host.view.frame = window.bounds
+            window.addSubview(host.view)
+            window.isHidden = false
+            await Task.yield()
+            host.view.layoutIfNeeded()
+            let markers = descendants(of: host.view, matching: PlayerControlHitTargetView.self)
+            let retry = markers.first { $0.accessibilityIdentifier == PlayerControlHitTargetView.failureRetryIdentifier }
+            let details = markers.first { $0.accessibilityIdentifier == PlayerControlHitTargetView.failureDetailsIdentifier }
+            XCTAssertNotNil(retry, "Failure must expose retry at \(size)")
+            XCTAssertNotNil(details, "Full error text must remain reachable at \(size)")
+            XCTAssertFalse(markers.contains { $0.accessibilityIdentifier == PlayerControlHitTargetView.playPauseIdentifier }, "Recovery replaces the nonfunctional transport")
+            for target in [retry, details].compactMap({ $0 }) {
+                let frame = target.convert(target.bounds, to: host.view)
+                XCTAssertGreaterThanOrEqual(frame.width, 44)
+                XCTAssertGreaterThanOrEqual(frame.height, 44)
+                XCTAssertTrue(host.view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame))
+                let hit = host.view.hitTest(CGPoint(x: frame.midX, y: frame.midY), with: nil)
+                XCTAssertNotNil(hit)
+                let planes = descendants(of: host.view, matching: PlayerBackgroundTapView.self)
+                XCTAssertFalse(planes.contains { hit === $0 || hit?.isDescendant(of: $0) == true })
+            }
+            host.rootView = AnyView(EmptyView())
+            host.view.layoutIfNeeded()
+            await Task.yield()
+            host.view.removeFromSuperview()
+            window.isHidden = true
+            model.cancelAutoHide()
+            await Task.yield()
+        }
+    }
+
     private func descendants<T: UIView>(of view: UIView, matching type: T.Type) -> [T] {
         view.subviews.flatMap { subview in
             let match = (subview as? T).map { [$0] } ?? []
@@ -190,11 +295,17 @@ final class PlayerUsabilityRegressionTests: XCTestCase {
     }
 }
 
-private actor PlayerUsabilityFailingResolver: TVerStreamResolving {
+private actor PlayerUsabilityFailingResolver: TVerStreamResolving, TVerLiveStreamResolving {
     private(set) var callCount = 0
+    private(set) var liveCallCount = 0
 
     func resolveStream(for program: TVerProgram) async throws -> URL {
         callCount += 1
+        throw TVerClientError.noPlayableStream
+    }
+
+    func resolveLiveStream(for channel: TVerLiveChannel) async throws -> URL {
+        liveCallCount += 1
         throw TVerClientError.noPlayableStream
     }
 }

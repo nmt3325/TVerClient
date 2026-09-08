@@ -60,12 +60,25 @@ final class PlayerBackgroundTapView: UIView {
         preconditionFailure("PlayerBackgroundTapView is created in code only")
     }
 
+    private var excludedRects: [CGRect] = []
+
     func updateActions(
         onSingleTap: @escaping () -> Void,
-        onDoubleTap: @escaping (CGPoint) -> Void
+        onDoubleTap: @escaping (CGPoint) -> Void,
+        excludedRects: [CGRect] = [],
+        isEnabled: Bool = true
     ) {
         self.onSingleTap = onSingleTap
         self.onDoubleTap = onDoubleTap
+        self.excludedRects = excludedRects
+        isUserInteractionEnabled = isEnabled
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard isUserInteractionEnabled, super.point(inside: point, with: event) else { return false }
+        // SwiftUI buttons are not necessarily UIKit subviews above this plane.
+        // Reject their measured pixels instead of relying on drawing order.
+        return !excludedRects.contains { $0.contains(point) }
     }
 
     /// Shared by recognizer callbacks and hosted interaction tests.
@@ -91,15 +104,26 @@ final class PlayerBackgroundTapView: UIView {
 struct PlayerBackgroundTapSurface: UIViewRepresentable {
     let onSingleTap: () -> Void
     let onDoubleTap: (CGPoint) -> Void
+    var excludedRects: [CGRect] = []
+    var isEnabled: Bool = true
 
     func makeUIView(context: Context) -> PlayerBackgroundTapView {
         let view = PlayerBackgroundTapView()
-        view.updateActions(onSingleTap: onSingleTap, onDoubleTap: onDoubleTap)
+        configure(view)
         return view
     }
 
     func updateUIView(_ view: PlayerBackgroundTapView, context: Context) {
-        view.updateActions(onSingleTap: onSingleTap, onDoubleTap: onDoubleTap)
+        configure(view)
+    }
+
+    private func configure(_ view: PlayerBackgroundTapView) {
+        view.updateActions(
+            onSingleTap: onSingleTap,
+            onDoubleTap: onDoubleTap,
+            excludedRects: excludedRects,
+            isEnabled: isEnabled
+        )
     }
 }
 
@@ -161,7 +185,8 @@ struct PlayerStage: View {
                     onSingleTap: { handleBackgroundSingleTap() },
                     onDoubleTap: { location in
                         handleBackgroundDoubleTap(at: location, width: proxy.size.width)
-                    }
+                    },
+                    isEnabled: !model.areControlsVisible
                 )
                 .allowsHitTesting(!model.areControlsVisible)
                 .accessibilityHidden(true)
