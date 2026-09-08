@@ -23,6 +23,80 @@ struct LibraryView: View {
     @State private var activeSheet: LibrarySheet?
     @State private var path: [TVerProgram] = []
     @State private var selection: Set<LibraryRowID> = []
+    @State private var category: Category = .saved
+    @State private var editMode: EditMode = .inactive
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// 分類は空でも選べる。保存済みが0件でも、履歴や停止した転送を見失わない。
+    enum Category: String, CaseIterable, Identifiable {
+        case saved, transfers, favorites, recents, subscriptions
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .saved: return Vocabulary.Library.downloads
+            case .transfers: return "進行中・停止・失敗"
+            case .favorites: return Vocabulary.Library.favorites
+            case .recents: return Vocabulary.Library.history
+            case .subscriptions: return "新着の自動ダウンロード"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .saved: return "arrow.down.circle.fill"
+            case .transfers: return "arrow.triangle.2.circlepath"
+            case .favorites: return "heart"
+            case .recents: return "clock"
+            case .subscriptions: return "bell"
+            }
+        }
+
+        var emptyTitle: String {
+            switch self {
+            case .saved: return "ダウンロード済みの番組はありません"
+            case .transfers: return "進行中・停止中のダウンロードはありません"
+            case .favorites: return "マイリストは空です"
+            case .recents: return "視聴履歴はありません"
+            case .subscriptions: return "自動ダウンロードは登録されていません"
+            }
+        }
+
+        var emptyMessage: String {
+            switch self {
+            case .saved:
+                return "「見逃し」から番組を開き、ダウンロードを選ぶと、完了した番組がここに表示されます。進行状況は上の分類で確認できます。"
+            case .transfers:
+                return "ダウンロードの順番待ち・進行状況・一時停止・失敗をここで確認できます。完了した番組は「ダウンロード済み」に移ります。"
+            case .favorites:
+                return "番組を開き、ハートのボタンで追加できます。マイリストへの追加だけでは動画はダウンロードされません。"
+            case .recents:
+                return "見た番組がここに表示されます。履歴を消しても、ダウンロード済みの動画やマイリストは残ります。"
+            case .subscriptions:
+                return "シリーズのある番組を開き、「新着を自動ダウンロード」を選ぶと登録できます。今後の新着だけが対象です。"
+            }
+        }
+
+        func includesDownload(_ state: DownloadState) -> Bool {
+            switch (self, state) {
+            case (.saved, .downloaded): return true
+            case (.transfers, .queued), (.transfers, .downloading),
+                 (.transfers, .paused), (.transfers, .failed): return true
+            default: return false
+            }
+        }
+
+        var selectionKind: DownloadConfirmation.SelectionKind {
+            switch self {
+            case .saved: return .savedDownloads
+            case .transfers: return .transfers
+            case .favorites: return .favorites
+            case .recents: return .recents
+            case .subscriptions: return .subscriptions
+            }
+        }
+    }
 
     /// 取り返しのつかない操作は、経路にかかわらずこの入れ物を通して確認する。
     private struct PendingDestructiveAction: Identifiable {
@@ -33,12 +107,43 @@ struct LibraryView: View {
 
     /// 編集モードの選択キー。同じ番組が保存済みとマイリストの両方に並ぶので、
     /// 番組IDだけを鍵にすると片方を選んだだけで両方が選ばれてしまう。
-    private enum LibraryRowID: Hashable {
+    enum LibraryRowID: Hashable {
         case subscription(String)
         case transfer(String)
         case saved(String)
         case favorite(String)
         case recent(String)
+    }
+
+    private func rowIDs(in category: Category) -> Set<LibraryRowID> {
+        switch category {
+        case .saved: return Set(saved.map { .saved($0.id) })
+        case .transfers: return Set(inFlight.map { .transfer($0.id) })
+        case .favorites: return Set(libraryStore.favoritePrograms.map { .favorite($0.id) })
+        case .recents: return Set(libraryStore.recentPrograms.map { .recent($0.id) })
+        case .subscriptions:
+            return Set(seriesSubscriptions.subscriptions.map { .subscription($0.seriesID) })
+        }
+    }
+
+    private var visibleRowIDs: Set<LibraryRowID> { rowIDs(in: category) }
+
+    /// 非表示・削除済み・完了して別分類へ移った行を破壊的操作の対象にしない。
+    static func removableSelection(
+        _ selection: Set<LibraryRowID>,
+        visibleRows: Set<LibraryRowID>,
+        isEditing: Bool
+    ) -> Set<LibraryRowID> {
+        isEditing ? selection.intersection(visibleRows) : []
+    }
+
+    private var selectedRows: Set<LibraryRowID> {
+        Self.removableSelection(selection, visibleRows: visibleRowIDs, isEditing: editMode.isEditing)
+    }
+
+    private func finishSelection() {
+        selection.removeAll()
+        editMode = .inactive
     }
 
     /// ツールバーから開くモーダルは1つの状態にまとめる。同じ画面に `.sheet` を
@@ -56,18 +161,11 @@ struct LibraryView: View {
     }
 
     private var inFlight: [DownloadRecord] {
-        downloadCenter.records.filter { record in !record.state.isFinished }
+        downloadCenter.records.filter { Category.transfers.includesDownload($0.state) }
     }
 
     private var saved: [DownloadRecord] {
-        downloadCenter.records.filter { record in record.state.isFinished }
-    }
-
-    private var isEmpty: Bool {
-        downloadCenter.records.isEmpty
-            && seriesSubscriptions.subscriptions.isEmpty
-            && libraryStore.favoritePrograms.isEmpty
-            && libraryStore.recentPrograms.isEmpty
+        downloadCenter.records.filter { Category.saved.includesDownload($0.state) }
     }
 
     private var hasNotices: Bool {
@@ -111,9 +209,12 @@ struct LibraryView: View {
                     .onReceive(tabReselection.events) { tab in
                         // 表示中のタブをもう一度選んだら先頭へ戻る。iOS 標準の動き。
                         guard tab == .library else { return }
-                        withAnimation {
+                        withAnimation(reduceMotion ? nil : .default) {
                             proxy.scrollTo(StandardScrollAnchor.top, anchor: .top)
                         }
+                    }
+                    .onChange(of: category) { _ in
+                        proxy.scrollTo(StandardScrollAnchor.top, anchor: .top)
                     }
             }
             .navigationTitle("ライブラリ")
@@ -162,6 +263,12 @@ struct LibraryView: View {
                 Text("「\(subscription.seriesTitle)」の今後の新着を停止します。保存済み・ダウンロード中の番組は残ります。")
             }
         }
+        .environment(\.editMode, $editMode)
+        .onChange(of: category) { _ in finishSelection() }
+        .onChange(of: path) { _ in finishSelection() }
+        .onChange(of: visibleRowIDs) { rows in
+            selection = Self.removableSelection(selection, visibleRows: rows, isEditing: editMode.isEditing)
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .settings:
@@ -181,7 +288,7 @@ struct LibraryView: View {
     }
 
     private var libraryList: some View {
-        List(selection: $selection) {
+        List(selection: editMode.isEditing ? $selection : nil) {
             scrollAnchor
             noticeSection
             sections
@@ -209,7 +316,44 @@ struct LibraryView: View {
         } message: { rejection in
             Text(rejectionMessage(rejection))
         }
-        .safeAreaInset(edge: .top, spacing: 0) { freshnessBanner }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                freshnessBanner
+                categoryPicker
+            }
+        }
+    }
+
+    /// 常設の分類切り替え。狭い画面でも5つのラベルを押し込んで縮小しない。
+    private var categoryPicker: some View {
+        Menu {
+            Picker("表示する分類", selection: $category) {
+                ForEach(Category.allCases) { item in
+                    Label("\(item.title)（\(rowIDs(in: item).count)）", systemImage: item.systemImage)
+                        .tag(item)
+                }
+            }
+        } label: {
+            HStack(spacing: DS.Spacing.s) {
+                Text(category.title)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(visibleRowIDs.count)件")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.footnote.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .padding(.horizontal, DS.Spacing.m)
+        .background(.bar)
+        .accessibilityLabel("分類: \(category.title)、\(visibleRowIDs.count)件")
+        .accessibilityHint("ダウンロード済み、進行状況、マイリスト、履歴、自動ダウンロードを切り替えます")
+        .accessibilityIdentifier("library.category")
     }
 
     /// 鮮度の帯は一覧の行ではなく画面上端に固定する。行にすると標準のインセットと
@@ -238,20 +382,23 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var sections: some View {
-        if isEmpty {
+        if visibleRowIDs.isEmpty {
             Section {
                 ContentStatusView(.empty(
-                    title: "\(Vocabulary.Library.downloads)の番組はありません",
-                    message: "番組の右にある\(Vocabulary.Download.action)ボタンを押すと、通信のない場所でも見られます。",
-                    systemImage: "arrow.down.circle"
+                    title: category.emptyTitle,
+                    message: category.emptyMessage,
+                    systemImage: category.systemImage
                 ))
+                .accessibilityIdentifier("library.empty.\(category.rawValue)")
             }
         } else {
-            seriesSubscriptionsSection
-            downloadingSection
-            savedSection
-            favoritesSection
-            recentsSection
+            switch category {
+            case .saved: savedSection
+            case .transfers: downloadingSection
+            case .favorites: favoritesSection
+            case .recents: recentsSection
+            case .subscriptions: seriesSubscriptionsSection
+            }
         }
     }
 
@@ -277,10 +424,26 @@ struct LibraryView: View {
     @ToolbarContentBuilder
     private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: ToolbarCompat.trailing) {
-            if !isEmpty { EditButton() }
+            if !visibleRowIDs.isEmpty || editMode.isEditing {
+                Button(editMode.isEditing ? "完了" : "選択") {
+                    if editMode.isEditing {
+                        finishSelection()
+                    } else {
+                        selection.removeAll()
+                        editMode = .active
+                    }
+                }
+                .accessibilityIdentifier("library.selection-mode")
+            }
         }
         ToolbarItem(placement: ToolbarCompat.trailing) {
             Menu {
+                if editMode.isEditing {
+                    Button(selectedRows == visibleRowIDs ? "選択を解除" : "この分類をすべて選択") {
+                        selection = selectedRows == visibleRowIDs ? [] : visibleRowIDs
+                    }
+                    Divider()
+                }
                 // 永続する設定は `Form` の画面に集める。メニューにはその場で
                 // 終わる操作だけを残す。
                 Button {
@@ -306,11 +469,14 @@ struct LibraryView: View {
             .accessibilityLabel("その他の操作")
         }
         ToolbarItemGroup(placement: .bottomBar) {
-            if !selection.isEmpty {
+            if editMode.isEditing {
+                Text("\(selectedRows.count)件選択")
+                    .monospacedDigit()
                 Spacer()
-                Button("選択した\(selection.count)件を削除", role: .destructive) {
+                Button(category.selectionKind.confirmLabel, role: .destructive) {
                     requestSelectionRemoval()
                 }
+                .disabled(selectedRows.isEmpty)
             }
         }
     }
@@ -559,9 +725,9 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text(Vocabulary.Download.running)
+                Text(Category.transfers.title)
             } footer: {
-                Text("\(inFlight.count)件")
+                Text("\(inFlight.count)件。完了すると「\(Vocabulary.Library.downloads)」に移ります。")
             }
         }
     }
@@ -605,10 +771,6 @@ struct LibraryView: View {
                             removeFavoriteButton(program)
                         }
                 }
-
-                Button(role: .destructive, action: requestClearFavorites) {
-                    Label("すべて外す", systemImage: "heart.slash")
-                }
             } header: {
                 Text(Vocabulary.Library.favorites)
             } footer: {
@@ -634,10 +796,6 @@ struct LibraryView: View {
                             removeRecentButton(program)
                         }
                 }
-
-                Button(role: .destructive, action: requestClearRecents) {
-                    Label("すべて消す", systemImage: "clear")
-                }
             } header: {
                 Text(Vocabulary.Library.history)
             } footer: {
@@ -648,25 +806,37 @@ struct LibraryView: View {
 
     // MARK: - Rows
 
+    @ViewBuilder
     private func row(for program: TVerProgram, state: DownloadState) -> some View {
-        NavigationLink(value: program) {
-            MediaRow(
-                title: title(for: program),
-                subtitle: program.title,
-                detail: detail(for: program, state: state),
-                thumbnailURL: program.thumbnailURL,
-                badges: badges(for: program, state: state),
-                progress: state.progress
-            ) {
+        if editMode.isEditing {
+            // 選択中は再生やダウンロードを起動しない。
+            mediaRow(for: program, state: state)
+        } else {
+            HStack(spacing: DS.Spacing.xs) {
+                NavigationLink(value: program) {
+                    mediaRow(for: program, state: state)
+                }
+                .accessibilityHint("視聴画面を開きます。戻るとこの分類の一覧に戻ります")
+                // NavigationLinkのラベル内に操作ボタンを入れない。
                 DownloadButton(program: program)
             }
         }
     }
 
+    private func mediaRow(for program: TVerProgram, state: DownloadState) -> some View {
+        MediaRow(
+            title: title(for: program),
+            subtitle: program.title == title(for: program) ? nil : program.title,
+            detail: detail(for: program, state: state),
+            thumbnailURL: program.thumbnailURL,
+            badges: badges(for: program, state: state),
+            progress: state.progress
+        )
+    }
+
     // MARK: - Row actions
 
-    /// 行の中の `DownloadButton` は `NavigationLink` の入れ子ボタンになるので、
-    /// 同じ操作を必ずスワイプと長押しからも届くようにしておく。
+    /// 行の独立した操作ボタンに加え、スワイプと長押しからも同じ安全な操作へ届く。
     @ViewBuilder
     private func downloadActions(for program: TVerProgram, state: DownloadState) -> some View {
         switch state {
@@ -692,7 +862,7 @@ struct LibraryView: View {
             Button {
                 downloadCenter.retry(program.id)
             } label: {
-                Label("もう一度\(Vocabulary.Download.action)", systemImage: "arrow.clockwise.circle")
+                Label("最初から再試行", systemImage: "arrow.clockwise.circle")
             }
             cancelButton(program)
         case .downloaded:
@@ -712,6 +882,13 @@ struct LibraryView: View {
         }
         if case .paused = state {
             resumeButton(program)
+        }
+        if case .failed = state {
+            Button {
+                downloadCenter.retry(program.id)
+            } label: {
+                Label("最初から再試行", systemImage: "arrow.clockwise")
+            }
         }
     }
 
@@ -778,7 +955,10 @@ struct LibraryView: View {
                 target: .savedDownload,
                 subject: title(for: program)
             ),
-            perform: { downloadCenter.delete(program.id) }
+            perform: {
+                guard downloadCenter.state(for: program.id).isFinished else { return }
+                downloadCenter.delete(program.id)
+            }
         )
     }
 
@@ -793,7 +973,12 @@ struct LibraryView: View {
                 target: .restartDownload,
                 subject: title(for: program)
             ),
-            perform: { downloadCenter.restart(program) }
+            perform: {
+                // 確認中に別の経路で再開・完了した転送を捨てない。
+                guard case .paused = downloadCenter.state(for: program.id),
+                      downloadCenter.isInterrupted(program.id) else { return }
+                downloadCenter.restart(program)
+            }
         )
     }
 
@@ -811,16 +996,6 @@ struct LibraryView: View {
         )
     }
 
-    private func requestClearFavorites() {
-        pendingAction = PendingDestructiveAction(
-            confirmation: DownloadConfirmation(
-                target: .allFavorites,
-                subject: "\(libraryStore.favoritePrograms.count)件"
-            ),
-            perform: { libraryStore.clearFavorites() }
-        )
-    }
-
     private func requestClearRecents() {
         pendingAction = PendingDestructiveAction(
             confirmation: DownloadConfirmation(
@@ -832,16 +1007,23 @@ struct LibraryView: View {
     }
 
     private func requestSelectionRemoval() {
-        let rows = selection
+        let rows = selectedRows
         guard !rows.isEmpty else { return }
         pendingAction = PendingDestructiveAction(
-            confirmation: DownloadConfirmation(target: .selection, subject: "\(rows.count)件"),
+            confirmation: DownloadConfirmation(
+                target: .selection,
+                subject: "\(rows.count)件",
+                selectionKind: category.selectionKind
+            ),
             perform: { remove(rows) }
         )
     }
 
     private func remove(_ rows: Set<LibraryRowID>) {
-        for row in rows {
+        let currentRows = Self.removableSelection(
+            rows, visibleRows: visibleRowIDs, isEditing: editMode.isEditing
+        )
+        for row in currentRows {
             switch row {
             case let .subscription(seriesID):
                 seriesSubscriptions.unsubscribe(seriesID: seriesID)
@@ -859,7 +1041,7 @@ struct LibraryView: View {
                 }
             }
         }
-        selection.removeAll()
+        finishSelection()
     }
 
     // MARK: - Text
@@ -913,11 +1095,11 @@ struct LibraryView: View {
             return "\(Vocabulary.Download.running) \(percent(progress))"
         case let .paused(progress):
             guard downloadCenter.isInterrupted(program.id) else {
-                return "\(Vocabulary.Download.paused) \(percent(progress))"
+                return "\(Vocabulary.Download.paused) \(percent(progress))・再開できます"
             }
-            return "\(Vocabulary.Download.paused) \(percent(progress))・続きからは再開できません"
+            return "中断 \(percent(progress))・最初からやり直してください"
         case let .failed(message):
-            return message
+            return "失敗: \(message)・再試行は最初からになります"
         case let .downloaded(bytes):
             return "\(Vocabulary.Library.downloads) \(DownloadStorageBar.formatted(bytes))"
         }
@@ -984,7 +1166,7 @@ private struct LibraryDownloadSettingsView: View {
                 } header: {
                     Text("端末の容量")
                 } footer: {
-                    Text("「その他」はこのアプリ以外が使っている分です。")
+                    Text("「その他」にはOSや他のアプリ、このアプリの動画以外のデータが含まれます。")
                 }
             }
             .navigationTitle("\(Vocabulary.Download.action)の設定")

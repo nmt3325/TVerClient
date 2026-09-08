@@ -25,11 +25,48 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case selection
     }
 
+    /// 一括操作も分類ごとに、消えるもの・残るものを区別する。
+    enum SelectionKind: String, Equatable, Sendable {
+        case savedDownloads, transfers, favorites, recents, subscriptions
+
+        var confirmLabel: String {
+            switch self {
+            case .savedDownloads: return "動画を削除"
+            case .transfers: return "ダウンロードを中止"
+            case .favorites: return "マイリストから外す"
+            case .recents: return "履歴から消す"
+            case .subscriptions: return "自動ダウンロードを解除"
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .savedDownloads:
+                return "選んだ動画ファイルを端末から削除します。通信のない場所では見られなくなります。マイリスト・視聴履歴・自動ダウンロードの登録は残ります。"
+            case .transfers:
+                return "選んだダウンロードを中止し、途中まで受け取ったデータを削除します。やり直す場合は最初からになります。完了した動画・マイリスト・視聴履歴は残ります。"
+            case .favorites:
+                return "選んだ番組をマイリストから外すだけです。ダウンロード済みの動画と視聴履歴は残ります。"
+            case .recents:
+                return "選んだ視聴履歴を消すだけです。ダウンロード済みの動画とマイリストは残ります。"
+            case .subscriptions:
+                return "選んだシリーズの今後の新着ダウンロードを停止します。保存済み・ダウンロード中の番組とマイリスト・視聴履歴は残ります。"
+            }
+        }
+    }
+
     let target: Target
     /// 何に対する操作か。番組名、または「12件」のような数量。
     let subject: String
+    let selectionKind: SelectionKind?
 
-    var id: String { "\(target.rawValue):\(subject)" }
+    init(target: Target, subject: String, selectionKind: SelectionKind? = nil) {
+        self.target = target
+        self.subject = subject
+        self.selectionKind = selectionKind
+    }
+
+    var id: String { "\(target.rawValue):\(selectionKind?.rawValue ?? ""):\(subject)" }
 
     /// やり直しは失うものが進捗だけなので、赤い破壊的ボタンにはしない。
     var isDestructive: Bool { target != .restartDownload }
@@ -51,7 +88,14 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .allRecents:
             return "\(Vocabulary.Library.history)をすべて消しますか？"
         case .selection:
-            return "選んだ\(subject)を削除しますか？"
+            switch selectionKind {
+            case .savedDownloads: return "選んだ\(subject)の動画を削除しますか？"
+            case .transfers: return "選んだ\(subject)のダウンロードを中止しますか？"
+            case .favorites: return "選んだ\(subject)をマイリストから外しますか？"
+            case .recents: return "選んだ\(subject)を履歴から消しますか？"
+            case .subscriptions: return "選んだ\(subject)の自動ダウンロードを解除しますか？"
+            case nil: return "選んだ\(subject)を削除しますか？"
+            }
         }
     }
 
@@ -64,7 +108,7 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .runningDownload:
             return "途中まで受け取ったデータを削除します。もう一度\(Vocabulary.Download.action)すると最初からやり直しになります。"
         case .restartDownload:
-            return "アプリの終了で中断したため、続きからは再開できません。最初から\(Vocabulary.Download.action)し直します。"
+            return "続きから再開できる転送が残っていません。途中まで受け取ったデータを削除し、最初から\(Vocabulary.Download.action)し直します。"
         case .favorite:
             return "\(Vocabulary.Library.favorites)から外すだけです。\(Vocabulary.Library.downloads)の動画と\(Vocabulary.Library.history)は残ります。"
         case .allFavorites:
@@ -74,8 +118,9 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .allRecents:
             return "\(subject)の視聴履歴を消します。\(Vocabulary.Library.downloads)の動画と\(Vocabulary.Library.favorites)は残ります。"
         case .selection:
-            return "\(Vocabulary.Library.downloads)の動画は端末から削除します。"
-                + "\(Vocabulary.Library.favorites)・\(Vocabulary.Library.history)・購読は一覧から外すだけです。"
+            if let selectionKind { return selectionKind.message }
+            return "選んだ保存済み動画を端末から削除し、未完了のダウンロードは中止して途中のデータを削除します。"
+                + "マイリスト・視聴履歴は選んだ記録だけを消します。選んだ購読は今後の新着ダウンロードを停止します。"
         }
     }
 
@@ -96,7 +141,7 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .allRecents:
             return "すべて消す"
         case .selection:
-            return "削除"
+            return selectionKind?.confirmLabel ?? "削除"
         }
     }
 }
