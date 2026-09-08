@@ -25,11 +25,12 @@ enum PlayerStageBackgroundTapAction: Equatable {
 /// Buttons and the scrubber therefore win hit testing without competing with
 /// an ancestor gesture, while unoccupied video pixels still receive taps.
 @MainActor
-final class PlayerBackgroundTapView: UIView {
+final class PlayerBackgroundTapView: UIView, UIGestureRecognizerDelegate {
     static let accessibilityIdentifier = "playback.background-tap-surface"
 
     private var onSingleTap: () -> Void = {}
     private var onDoubleTap: (CGPoint) -> Void = { _ in }
+    private var onTouchBegan: () -> Void = {}
 
     private(set) lazy var singleTapRecognizer: UITapGestureRecognizer = {
         let recognizer = UITapGestureRecognizer(target: self, action: #selector(didSingleTap(_:)))
@@ -40,6 +41,9 @@ final class PlayerBackgroundTapView: UIView {
     private(set) lazy var doubleTapRecognizer: UITapGestureRecognizer = {
         let recognizer = UITapGestureRecognizer(target: self, action: #selector(didDoubleTap(_:)))
         recognizer.numberOfTapsRequired = 2
+        // Only this recognizer reports touch receipt, once per actual touch,
+        // rather than restarting the countdown twice via both recognizers.
+        recognizer.delegate = self
         return recognizer
     }()
 
@@ -67,10 +71,12 @@ final class PlayerBackgroundTapView: UIView {
         onSingleTap: @escaping () -> Void,
         onDoubleTap: @escaping (CGPoint) -> Void,
         excludedRects: [CGRect] = [],
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        onTouchBegan: @escaping () -> Void = {}
     ) {
         self.onSingleTap = onSingleTap
         self.onDoubleTap = onDoubleTap
+        self.onTouchBegan = onTouchBegan
         self.excludedRects = excludedRects
         isUserInteractionEnabled = isEnabled
     }
@@ -80,6 +86,20 @@ final class PlayerBackgroundTapView: UIView {
         // SwiftUI buttons are not necessarily UIKit subviews above this plane.
         // Reject their measured pixels instead of relying on drawing order.
         return !excludedRects.contains { $0.contains(point) }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive _: UITouch) -> Bool {
+        // UIKit calls this before recognition, not after the single/double
+        // decision. Refresh synchronously so an old hide task cannot win later.
+        if gestureRecognizer === doubleTapRecognizer { performTouchBegan() }
+        return true
+    }
+
+    /// Callback bridge for touch receipt; tests invoking it do not synthesize
+    /// physical UITouches or exercise UIKit's recognition timing.
+    func performTouchBegan() {
+        guard isUserInteractionEnabled else { return }
+        onTouchBegan()
     }
 
     /// Shared by recognizer callbacks and hosted interaction tests.
@@ -101,12 +121,38 @@ final class PlayerBackgroundTapView: UIView {
     }
 }
 
+/// Both native planes inherit their own stage's chrome without adding a
+/// competing ancestor gesture or changing the overlay control API.
+private struct PlayerBackgroundChromeKey: EnvironmentKey {
+    static let defaultValue: PlayerChromeModel? = nil
+}
+
+private extension EnvironmentValues {
+    var playerBackgroundChrome: PlayerChromeModel? {
+        get { self[PlayerBackgroundChromeKey.self] }
+        set { self[PlayerBackgroundChromeKey.self] = newValue }
+    }
+}
+
 @MainActor
 struct PlayerBackgroundTapSurface: UIViewRepresentable {
     let onSingleTap: () -> Void
     let onDoubleTap: (CGPoint) -> Void
     var excludedRects: [CGRect] = []
     var isEnabled: Bool = true
+    @Environment(\.playerBackgroundChrome) private var chromeModel
+
+    init(
+        onSingleTap: @escaping () -> Void,
+        onDoubleTap: @escaping (CGPoint) -> Void,
+        excludedRects: [CGRect] = [],
+        isEnabled: Bool = true
+    ) {
+        self.onSingleTap = onSingleTap
+        self.onDoubleTap = onDoubleTap
+        self.excludedRects = excludedRects
+        self.isEnabled = isEnabled
+    }
 
     func makeUIView(context: Context) -> PlayerBackgroundTapView {
         let view = PlayerBackgroundTapView()
@@ -119,11 +165,13 @@ struct PlayerBackgroundTapSurface: UIViewRepresentable {
     }
 
     private func configure(_ view: PlayerBackgroundTapView) {
+        let chrome = chromeModel
         view.updateActions(
             onSingleTap: onSingleTap,
             onDoubleTap: onDoubleTap,
             excludedRects: excludedRects,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            onTouchBegan: { chrome?.registerBackgroundTouchBegan() }
         )
     }
 }
@@ -222,6 +270,7 @@ struct PlayerStage: View {
                 )
             }
         }
+        .environment(\.playerBackgroundChrome, model)
         .background(Color.black)
         .task(id: playbackController.isLoading) { await updateSpinner() }
         .task(id: shouldSuspendAutoHide) {
