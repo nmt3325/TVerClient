@@ -619,7 +619,8 @@ struct ProgramGuideDetailSheet: View {
                             subtitle: selection.channel.name,
                             accessibilityLabel: "\(selection.program.seriesTitle)のライブ動画プレイヤー",
                             supportsSeeking: false,
-                            rendersVideoLayer: rendersVideoLayer
+                            rendersVideoLayer: rendersVideoLayer,
+                            recoveryAction: PlayerRecoveryAction { playback.requestRecovery() }
                         )
                         .frame(maxWidth: .infinity)
                         .aspectRatio(16 / 9, contentMode: .fit)
@@ -1010,6 +1011,9 @@ final class GuideDetailsPlaybackModel: ObservableObject {
     @Published var catchUpPlayback: TVerProgram?
     private var actionTask: Task<Void, Never>?
     private var actionGeneration = 0
+    private enum ActionIntent: Equatable {
+        case primary, failureRecovery, embeddedRecovery
+    }
 
     init(
         selection: ProgramGuideSelection, controller: PlaybackController,
@@ -1057,8 +1061,11 @@ final class GuideDetailsPlaybackModel: ObservableObject {
         ).reflectingAvailability(availability, route: route, catchUpState: catchUpState)
     }
 
-    func requestPrimaryAction() { enqueueAction(isRetry: false) }
-    func requestRetry() { enqueueAction(isRetry: true) }
+    func requestPrimaryAction() { enqueueAction(.primary) }
+    func requestRetry() { enqueueAction(.failureRecovery) }
+    /// Every embedded recovery entrance uses this owner, including interruption
+    /// notices whose paused controller correctly has no error presentation.
+    func requestRecovery() { enqueueAction(.embeddedRecovery) }
 
     func waitForPendingAction() async { await actionTask?.value }
 
@@ -1072,7 +1079,7 @@ final class GuideDetailsPlaybackModel: ObservableObject {
         return pending
     }
 
-    private func enqueueAction(isRetry: Bool) {
+    private func enqueueAction(_ intent: ActionIntent) {
         guard actionTask == nil else { return }
         actionGeneration += 1
         let generation = actionGeneration
@@ -1081,19 +1088,28 @@ final class GuideDetailsPlaybackModel: ObservableObject {
             defer {
                 if self.actionGeneration == generation { self.actionTask = nil }
             }
-            await self.performAction(isRetry: isRetry)
+            await self.performAction(intent)
         }
     }
 
-    private func performAction(isRetry: Bool) async {
+    private func performAction(_ intent: ActionIntent) async {
         guard !Task.isCancelled else { return }
         // This runs inside the task: a tap queued just before endAt must not
         // resolve the next live show, nor recover a different current target.
         refreshClock()
-        if isRetry && !isCurrent { return }
+        if intent != .primary {
+            guard isCurrent else { return }
+            // A known replacement slot on the same station is a different target.
+            if let currentSlot = controller.currentLiveChannel?.currentProgram,
+               currentSlot.id != selection.program.id { return }
+        }
         switch route {
         case .live:
-            if isRetry {
+            if intent != .primary {
+                if intent == .embeddedRecovery, controller.continuityNotice != nil {
+                    controller.recoverFromContinuityNotice()
+                    return
+                }
                 guard controller.errorPresentation != nil else { return }
                 await PlayerPrimaryAction.resolve(using: controller).perform(using: controller)
                 return

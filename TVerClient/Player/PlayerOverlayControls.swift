@@ -10,6 +10,36 @@ final class PlayerControlHitTargetView: UIView {
     static let playPauseIdentifier = "playback.hit-target.play-pause"
     static let failureRetryIdentifier = "playback.hit-target.failure-retry"
     static let failureDetailsIdentifier = "playback.hit-target.failure-details"
+    static let failureSheetRetryIdentifier = "playback.hit-target.failure-sheet-retry"
+    static let continuityRecoveryIdentifier = "playback.hit-target.continuity-recovery"
+    private var action: (() -> Void)?
+    private var actionIsEnabled = false
+    var hasAction: Bool { action != nil }
+
+    func updateAction(isEnabled: Bool, action: (() -> Void)?) {
+        actionIsEnabled = isEnabled
+        self.action = action
+        isUserInteractionEnabled = false
+    }
+
+    func clearAction() {
+        action = nil
+        actionIsEnabled = false
+    }
+
+    /// Invokes the exact SwiftUI Button closure, not a synthetic touch. Keeping
+    /// this bridge passive preserves all native control/gesture hit ownership.
+    @discardableResult
+    func performAction() -> Bool {
+        guard window != nil, actionIsEnabled, !bounds.isEmpty, let action else { return false }
+        var ancestor: UIView? = self
+        while let view = ancestor {
+            guard !view.isHidden, view.alpha > 0.01 else { return false }
+            ancestor = view.superview
+        }
+        action()
+        return true
+    }
 
     init(identifier: String) {
         super.init(frame: .zero)
@@ -26,17 +56,46 @@ final class PlayerControlHitTargetView: UIView {
 }
 
 @MainActor
-private struct PlayerControlHitTarget: UIViewRepresentable {
+struct PlayerControlHitTarget: UIViewRepresentable {
     let identifier: String
+    var isEnabled: Bool = true
+    var action: (() -> Void)? = nil
+    @Environment(\.isEnabled) private var environmentIsEnabled
+
+    init(identifier: String, isEnabled: Bool = true, action: (() -> Void)? = nil) {
+        self.identifier = identifier
+        self.isEnabled = isEnabled
+        self.action = action
+    }
 
     func makeUIView(context: Context) -> PlayerControlHitTargetView {
-        PlayerControlHitTargetView(identifier: identifier)
+        let view = PlayerControlHitTargetView(identifier: identifier)
+        configure(view)
+        return view
     }
 
     func updateUIView(_ view: PlayerControlHitTargetView, context: Context) {
-        view.accessibilityIdentifier = identifier
-        view.isUserInteractionEnabled = false
+        configure(view)
     }
+
+    private func configure(_ view: PlayerControlHitTargetView) {
+        view.accessibilityIdentifier = identifier
+        view.updateAction(isEnabled: isEnabled && environmentIsEnabled, action: action)
+    }
+
+    static func dismantleUIView(_ view: PlayerControlHitTargetView, coordinator: Void) {
+        view.clearAction()
+    }
+}
+
+/// An optional recovery delegate, not a new trailing-closure parameter. Hosts
+/// with a selected broadcast slot can enforce their own clock/target guards;
+/// ordinary VOD/live surfaces keep the existing controller actions by default.
+@MainActor
+struct PlayerRecoveryAction {
+    let perform: () -> Void
+
+    init(_ perform: @escaping () -> Void) { self.perform = perform }
 }
 
 /// Everything drawn on top of the video: title row, transport, scrubber and
@@ -56,6 +115,7 @@ struct PlayerOverlayControls: View {
     /// 画面の安全領域。ノッチやホームインジケータの上に操作系を
     /// 寄せないよう、固定の余白ではなくこれを見て詰める。
     var safeAreaInsets = EdgeInsets()
+    var recoveryAction: PlayerRecoveryAction? = nil
     var onToggleFullScreen: (() -> Void)?
     var onBackgroundSingleTap: () -> Void = {}
     var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
@@ -72,6 +132,7 @@ struct PlayerOverlayControls: View {
         isFullScreen: Bool = false,
         showsContinuityNotice: Bool = true,
         safeAreaInsets: EdgeInsets = EdgeInsets(),
+        recoveryAction: PlayerRecoveryAction? = nil,
         onToggleFullScreen: (() -> Void)? = nil,
         onBackgroundSingleTap: @escaping () -> Void = {},
         onBackgroundDoubleTap: @escaping (CGPoint) -> Void = { _ in }
@@ -85,6 +146,7 @@ struct PlayerOverlayControls: View {
         self.isFullScreen = isFullScreen
         self.showsContinuityNotice = showsContinuityNotice
         self.safeAreaInsets = safeAreaInsets
+        self.recoveryAction = recoveryAction
         self.onToggleFullScreen = onToggleFullScreen
         self.onBackgroundSingleTap = onBackgroundSingleTap
         self.onBackgroundDoubleTap = onBackgroundDoubleTap
@@ -123,7 +185,7 @@ struct PlayerOverlayControls: View {
                     officialURL: playbackController.currentProgram?.webURL ?? playbackController.currentLiveChannel?.webURL
                 ) {
                     showsFailureDetails = false
-                    activatePrimaryAction()
+                    activateFailureRecovery()
                 }
             }
         }
@@ -303,10 +365,7 @@ struct PlayerOverlayControls: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                Button {
-                    model.registerInteraction()
-                    playbackController.recoverFromContinuityNotice()
-                } label: {
+                Button(action: activateContinuityRecovery) {
                     Label(notice.actionTitle, systemImage: notice.actionSystemImage)
                         .font(.footnote.weight(.semibold))
                         .padding(.horizontal, DS.Spacing.m)
@@ -316,6 +375,10 @@ struct PlayerOverlayControls: View {
                 }
                 .buttonStyle(.plain)
                 .playerControlHitRegion()
+                .background(PlayerControlHitTarget(
+                    identifier: PlayerControlHitTargetView.continuityRecoveryIdentifier,
+                    isEnabled: model.areControlsVisible, action: activateContinuityRecovery
+                ))
                 PlayerIconButton(
                     systemImage: "xmark",
                     label: "この案内を閉じる",
@@ -347,18 +410,41 @@ struct PlayerOverlayControls: View {
         Task { await action.perform(using: playbackController) }
     }
 
+    private func activateFailureRecovery() {
+        if let recoveryAction {
+            model.registerInteraction()
+            recoveryAction.perform()
+        } else {
+            activatePrimaryAction()
+        }
+    }
+
+    private func activateContinuityRecovery() {
+        model.registerInteraction()
+        if let recoveryAction {
+            recoveryAction.perform()
+        } else {
+            playbackController.recoverFromContinuityNotice()
+        }
+    }
+
+    private func openFailureDetails() {
+        model.registerInteraction()
+        showsFailureDetails = true
+    }
+
     private var failureRecoveryRow: some View {
         HStack(spacing: DS.Spacing.s) {
             Text(playbackController.errorPresentation?.title ?? "再生できませんでした")
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            PlayerIconButton(systemImage: "info.circle", label: "再生エラーの詳細") {
-                model.registerInteraction()
-                showsFailureDetails = true
-            }
-            .background(PlayerControlHitTarget(identifier: PlayerControlHitTargetView.failureDetailsIdentifier))
-            Button(action: activatePrimaryAction) {
+            PlayerIconButton(systemImage: "info.circle", label: "再生エラーの詳細", action: openFailureDetails)
+            .background(PlayerControlHitTarget(
+                identifier: PlayerControlHitTargetView.failureDetailsIdentifier,
+                isEnabled: model.areControlsVisible, action: openFailureDetails
+            ))
+            Button(action: activateFailureRecovery) {
                 Label(primaryAction.title, systemImage: primaryAction.systemImage)
                     .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
@@ -373,7 +459,11 @@ struct PlayerOverlayControls: View {
             .disabled(!primaryAction.isEnabled)
             .accessibilityHint("現在の番組の再生をもう一度試します")
             .playerControlHitRegion()
-            .background(PlayerControlHitTarget(identifier: PlayerControlHitTargetView.failureRetryIdentifier))
+            .background(PlayerControlHitTarget(
+                identifier: PlayerControlHitTargetView.failureRetryIdentifier,
+                isEnabled: model.areControlsVisible && primaryAction.isEnabled,
+                action: activateFailureRecovery
+            ))
         }
         .padding(.horizontal, DS.Spacing.s)
         .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: DS.Radius.medium))
@@ -403,7 +493,11 @@ struct PlayerOverlayControls: View {
                 isEnabled: primaryAction.isEnabled
             ) { activatePrimaryAction() }
             .background(
-                PlayerControlHitTarget(identifier: PlayerControlHitTargetView.playPauseIdentifier)
+                PlayerControlHitTarget(
+                    identifier: PlayerControlHitTargetView.playPauseIdentifier,
+                    isEnabled: model.areControlsVisible && primaryAction.isEnabled,
+                    action: activatePrimaryAction
+                )
             )
             if supportsSeeking {
                 PlayerIconButton(
