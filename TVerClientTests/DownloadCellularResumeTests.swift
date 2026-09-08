@@ -4,6 +4,49 @@ import XCTest
 
 final class DownloadCellularResumeTests: XCTestCase {
     @MainActor
+    func testScheduleUsesTheDisplayedExplicitRestartReceipt() async throws {
+        let bed = try CellularResumeTestBed()
+        defer { bed.cleanUp() }
+        let program = cellularProgram("schedule-consent")
+        let partial = try await bed.preparePaused(program)
+        bed.network.value = .cellular
+        bed.center.resume(program.id)
+        let rejection = try XCTUnwrap(bed.center.lastRejection)
+        let failure = try XCTUnwrap(ScheduleDownloadFeedback.recoveryFailure(for: rejection, on: bed.center))
+        XCTAssertTrue(failure.cellularRetryLabel.contains("最初から"))
+        XCTAssertTrue(failure.message.contains("途中までのデータを削除"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
+        bed.center.clearRejection()
+        XCTAssertTrue(failure.performCellularRetry(on: bed.center))
+        XCTAssertEqual(bed.center.state(for: program.id), .queued)
+        XCTAssertFalse(failure.performCellularRetry(on: bed.center), "The same old approval must not replace the new transfer")
+        await bed.center.waitForPendingResolutions()
+        XCTAssertEqual(bed.driver.permissions, [false, true])
+        XCTAssertEqual(bed.driver.cancelledIDs, [program.id])
+        XCTAssertTrue(bed.center.wifiOnly)
+    }
+
+    @MainActor
+    func testMixedBulkResumePreservesRefusalRegardlessOfOrder() async throws {
+        for blockedFirst in [true, false] {
+            let bed = try CellularResumeTestBed()
+            defer { bed.cleanUp() }
+            let blocked = cellularProgram("bulk-blocked")
+            let allowed = cellularProgram("bulk-allowed")
+            let partial = try await bed.preparePaused(blocked)
+            _ = try await bed.preparePaused(allowed, allowingCellular: true)
+            bed.network.value = .cellular
+            bed.center.resumeAllAllowingCellular(blockedFirst ? [blocked.id, allowed.id] : [allowed.id, blocked.id])
+            XCTAssertEqual(bed.center.lastRejection?.programID, blocked.id)
+            XCTAssertEqual(bed.center.state(for: blocked.id), .paused(progress: 0.6))
+            XCTAssertEqual(bed.center.state(for: allowed.id), .downloading(progress: 0.6))
+            XCTAssertEqual(bed.driver.resumedIDs, [allowed.id])
+            XCTAssertTrue(bed.driver.cancelledIDs.isEmpty)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
+        }
+    }
+
+    @MainActor
     func testWifiOnlyTaskResumeOverrideKeepsPartialDataAndRequestsExplicitRestart() async throws {
         let bed = try CellularResumeTestBed()
         defer { bed.cleanUp() }
@@ -350,6 +393,7 @@ private final class CellularResumeTestBed {
     let driver: CellularResumeStubDriver
     let network: CellularResumeNetwork
     let center: DownloadCenter
+    private let previousOfflineProvider: ((String) -> URL?)?
 
     init() throws {
         let name = "cellular-resume-" + UUID().uuidString
@@ -363,6 +407,7 @@ private final class CellularResumeTestBed {
         self.defaults = defaults
         self.driver = driver
         self.network = network
+        previousOfflineProvider = OfflineAssetRegistry.provider
         center = DownloadCenter(directory: directory, driver: driver, resolver: CellularResumeResolver(), defaults: defaults, settingsKey: name, networkStatus: { network.value })
     }
 
@@ -380,7 +425,7 @@ private final class CellularResumeTestBed {
     }
 
     func cleanUp() {
-        OfflineAssetRegistry.provider = nil
+        OfflineAssetRegistry.provider = previousOfflineProvider
         defaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: directory)
     }

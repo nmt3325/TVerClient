@@ -366,29 +366,37 @@ struct ScheduleView: View {
                 pending.confirmation.confirmLabel,
                 role: pending.confirmation.isDestructive ? ButtonRole.destructive : nil
             ) {
-                performDownloadAction(pending)
                 pendingDownload = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    performDownloadAction(pending)
+                }
             }
             Button("やめる", role: .cancel) { pendingDownload = nil }
         } message: { pending in
             Text(pending.confirmation.message)
         }
         .alert(
-            "\(Vocabulary.Download.action)を始められませんでした",
+            "\(Vocabulary.Download.action)できませんでした",
             isPresented: Binding(
                 get: { downloadFeedback != nil },
                 set: { if !$0 { downloadFeedback = nil } }
             ),
             presenting: downloadFeedback
         ) { rejection in
-            if rejection.canRetryOnCellular, let program = rejection.program {
-                Button("今回だけモバイル通信で\(Vocabulary.Download.action)") {
-                    retryDownloadOnCellular(program)
+            if let failure = ScheduleDownloadFeedback.recoveryFailure(for: rejection, on: downloadCenter),
+               failure.canRetryOnCellular {
+                Button(failure.cellularRetryLabel) {
+                    Task { @MainActor in
+                        await Task.yield()
+                        retryDownloadOnCellular(failure)
+                    }
                 }
             }
             Button("閉じる", role: .cancel) { downloadFeedback = nil }
         } message: { rejection in
-            Text(ScheduleDownloadFeedback.message(for: rejection))
+            Text(ScheduleDownloadFeedback.recoveryFailure(for: rejection, on: downloadCenter)?.message
+                 ?? ScheduleDownloadFeedback.message(for: rejection))
         }
     }
 
@@ -645,11 +653,17 @@ struct ScheduleView: View {
     private func performDownloadAction(_ pending: PendingDownloadAction) {
         switch pending.confirmation.target {
         case .runningDownload:
+            guard downloadCenter.state(for: pending.program.id).isInFlight else { return }
             downloadCenter.cancel(pending.program.id)
         case .savedDownload:
+            guard downloadCenter.state(for: pending.program.id).isFinished else { return }
             downloadCenter.delete(pending.program.id)
         case .restartDownload:
-            downloadCenter.restart(pending.program)
+            guard let request = DownloadButton.Request.recoveryRequest(
+                for: downloadCenter.state(for: pending.program.id),
+                isInterrupted: downloadCenter.isInterrupted(pending.program.id)
+            ), request == .restart || request == .retry else { return }
+            _ = request.perform(on: downloadCenter, program: pending.program)
             captureDownloadRejection(for: pending.program)
         case .favorite, .allFavorites, .recent, .allRecents, .selection:
             // 見逃しタブはマイリスト・履歴・一括選択の確認を出さない。
@@ -666,18 +680,11 @@ struct ScheduleView: View {
         downloadCenter.clearRejection()
     }
 
-    private func retryDownloadOnCellular(_ program: TVerProgram) {
-        switch downloadCenter.state(for: program.id) {
-        case .notDownloaded:
-            downloadCenter.start(program, allowingCellular: true)
-        case .paused:
-            downloadCenter.resume(program.id, allowingCellular: true)
-        case .failed:
-            downloadCenter.restart(program, allowingCellular: true)
-        case .queued, .downloading, .downloaded:
-            return
-        }
-        captureDownloadRejection(for: program)
+    private func retryDownloadOnCellular(_ failure: DownloadButton.RequestFailure) {
+        // The exact displayed receipt determines resume versus explicit restart.
+        // Shared guards make stale approvals for queued/running/saved rows inert.
+        guard failure.performCellularRetry(on: downloadCenter) else { return }
+        captureDownloadRejection(for: failure.program)
     }
 
     private func shareLink(for program: TVerProgram) -> some View {
@@ -879,6 +886,17 @@ struct ScheduleView: View {
 /// 画面とVoiceOverが、同じ転送状態・拒否理由を説明する。
 @MainActor
 enum ScheduleDownloadFeedback {
+    @MainActor
+    static func recoveryFailure(
+        for rejection: DownloadCenter.Rejection, on center: DownloadCenter
+    ) -> DownloadButton.RequestFailure? {
+        guard let program = rejection.program,
+              let request = DownloadButton.Request.recoveryRequest(
+                for: center.state(for: program.id), isInterrupted: center.isInterrupted(program.id)
+              ) else { return nil }
+        return DownloadButton.RequestFailure(rejection: rejection, program: program, request: request)
+    }
+
     static func message(for rejection: DownloadCenter.Rejection) -> String {
         let title = rejection.program.map { $0.seriesTitle.isEmpty ? $0.title : $0.seriesTitle }
         return [title, rejection.message, rejection.recovery]

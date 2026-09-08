@@ -706,6 +706,7 @@ final class DownloadCenter: ObservableObject {
     /// 続きから戻せない行はデータを保持したまま理由を返す。
     /// 破壊的なやり直しには、別の明示的な同意が必要。
     func resumeAllAllowingCellular(_ programIDs: [String]) {
+        var firstRefusal: Rejection?
         for programID in programIDs {
             guard let record = records.first(where: { entry in entry.id == programID }) else {
                 continue
@@ -719,7 +720,13 @@ final class DownloadCenter: ObservableObject {
             case .notDownloaded, .queued, .downloading, .downloaded:
                 continue
             }
+            if let rejection = lastRejection, rejection.programID == programID {
+                if firstRefusal == nil { firstRefusal = rejection }
+                post(DownloadNotice(id: "download.resume.waiting." + programID, kind: .info,
+                                    message: rejection.message, recovery: rejection.recovery))
+            }
         }
+        if let firstRefusal { lastRejection = firstRefusal }
     }
 
     /// Drops a saved copy once it has been watched, when the preference asks
