@@ -212,7 +212,7 @@ struct PlayerOverlayControls: View {
             Spacer(minLength: layout.prioritizesFooter ? 0 : DS.Spacing.s)
             if !mergesPrimary { primaryControls(layout: layout) }
             Spacer(minLength: layout.prioritizesFooter ? 0 : DS.Spacing.s)
-            bottomBar
+            bottomBar(layout: layout)
                 .fixedSize(horizontal: false, vertical: true)
                 .layoutPriority(1)
                 .accessibilitySortPriority(1)
@@ -548,9 +548,16 @@ struct PlayerOverlayControls: View {
 
     // MARK: - Bottom
 
-    private var bottomBar: some View {
-        HStack(alignment: .center, spacing: DS.Spacing.m) {
-            VStack(spacing: 2) {
+    private func bottomBar(layout: PlayerControlLayout) -> some View {
+        // On a wide, short surface the intrinsic time text and the 44pt
+        // scrubber must share a row rather than compete for vertical space.
+        // AnyLayout retains the same scrubber when native insets change.
+        let placesTimeBesideScrubber = layout.mergesPrimaryIntoHeader
+        let timelineLayout = placesTimeBesideScrubber
+            ? AnyLayout(HStackLayout(spacing: DS.Spacing.s))
+            : AnyLayout(VStackLayout(spacing: 2))
+        return HStack(alignment: .center, spacing: DS.Spacing.m) {
+            timelineLayout {
                 if supportsSeeking {
                     PlaybackScrubber(
                         elapsed: playbackController.currentTime,
@@ -574,8 +581,10 @@ struct PlayerOverlayControls: View {
                         },
                         onAdjust: { playbackController.seek(by: $0) }
                     )
+                    .frame(minWidth: DS.Size.minimumTapTarget)
                     .playerControlHitRegion()
                     timeLabels
+                        .fixedSize(horizontal: placesTimeBesideScrubber, vertical: true)
                 } else {
                     liveLabel
                 }
