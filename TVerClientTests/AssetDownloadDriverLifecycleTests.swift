@@ -728,6 +728,225 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(extra.cancelCount, 1)
     }
 
+    // A-D2 remains unresolved. These strict expected failures describe desired behavior, not
+    // acceptance of dropped callbacks. Setup, byte-preservation and safety guards stay unmasked.
+    @MainActor
+    func testEarlyTerminalSuccessDuringEnumerationRequiresIdentityScopedReconciliation() async throws {
+        for knownLocation in [false, true] {
+            for returnTerminalTask in [false, true] {
+                let bed = try LifecycleCenterBed()
+                defer { bed.cleanUp() }
+                var events: [DownloadDriverEvent] = []
+                let forward = bed.driver.onEvent
+                bed.driver.onEvent = { events.append($0); forward?($0) }
+                let early = try await lifecycleHeldRestore(bed, knownLocation: knownLocation)
+                if !knownLocation {
+                    early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+                    early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+                }
+                early.task.reportedState = .completed
+                early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+                early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+                await lifecycleCallbacks() // Drain callbacks while allTasks is still suspended.
+                XCTAssertNotNil(bed.backend.pendingEnumeration)
+                bed.backend.releaseEnumeration(returnTerminalTask ? [early.task.handle] : [])
+                await bed.center.waitForPendingRestoration()
+                XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+                XCTAssertEqual(early.task.resumeCount + early.task.suspendCount + early.task.cancelCount, 0)
+                let observed = lifecycleEarlyOutcome(bed, events: events)
+                let expected = LifecycleEarlyOutcome(state: .downloaded(bytes: Int64(early.bytes.count)), location: early.url,
+                                                     locations: knownLocation ? 0 : 1, finishes: 1, failures: 0)
+                XCTExpectFailure("A-D2 unresolved: early success is dropped before owner creation; known=\(knownLocation), terminal-list=\(returnTerminalTask)") {
+                    XCTAssertEqual(observed, expected)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testEarlyFailureDuringEnumerationRequiresItsOriginalReasonExactlyOnce() async throws {
+        for returnTerminalTask in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            var events: [DownloadDriverEvent] = []
+            let forward = bed.driver.onEvent
+            bed.driver.onEvent = { events.append($0); forward?($0) }
+            let early = try await lifecycleHeldRestore(bed, knownLocation: true)
+            let error = URLError(.timedOut)
+            early.task.reportedState = .completed
+            for _ in 0..<2 { early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: error) }
+            await lifecycleCallbacks()
+            XCTAssertNotNil(bed.backend.pendingEnumeration)
+            bed.backend.releaseEnumeration(returnTerminalTask ? [early.task.handle] : [])
+            await bed.center.waitForPendingRestoration()
+            XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+            let observed = lifecycleEarlyOutcome(bed, events: events)
+            let expected = LifecycleEarlyOutcome(state: .failed(message: DownloadFailureText.message(for: error)), location: nil,
+                                                 locations: 0, finishes: 0, failures: 1)
+            XCTExpectFailure("A-D2 unresolved: pre-adoption failure reason is dropped; terminal-list=\(returnTerminalTask)") {
+                XCTAssertEqual(observed, expected)
+            }
+        }
+    }
+
+    @MainActor
+    func testEarlyLocationMustSurviveUntilCompletionAfterViableAdoption() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        var events: [DownloadDriverEvent] = []
+        let forward = bed.driver.onEvent
+        bed.driver.onEvent = { events.append($0); forward?($0) }
+        let early = try await lifecycleHeldRestore(bed, knownLocation: false)
+        for _ in 0..<2 { early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url) }
+        await lifecycleCallbacks()
+        XCTAssertNotNil(bed.backend.pendingEnumeration)
+        bed.backend.releaseEnumeration([early.task.handle])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertTrue(bed.driver.hasTask(programID: "A"))
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+        early.task.reportedState = .completed
+        early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+        XCTAssertEqual(early.task.resumeCount, 0)
+        let observed = lifecycleEarlyOutcome(bed, events: events)
+        let expected = LifecycleEarlyOutcome(state: .downloaded(bytes: Int64(early.bytes.count)), location: early.url,
+                                             locations: 1, finishes: 1, failures: 0)
+        XCTExpectFailure("A-D2 unresolved: early willDownload is lost even when the same native identity is later adopted") {
+            XCTAssertEqual(observed, expected)
+        }
+    }
+
+    @MainActor
+    func testEarlyNativeCancellationPreservesPartialDataWithoutInventingSuccessOrFailure() async throws {
+        for returnTerminalTask in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            var events: [DownloadDriverEvent] = []
+            let forward = bed.driver.onEvent
+            bed.driver.onEvent = { events.append($0); forward?($0) }
+            let early = try await lifecycleHeldRestore(bed, knownLocation: true)
+            early.task.reportedState = .completed
+            for _ in 0..<2 { early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: URLError(.cancelled)) }
+            await lifecycleCallbacks()
+            XCTAssertNotNil(bed.backend.pendingEnumeration)
+            bed.backend.releaseEnumeration(returnTerminalTask ? [early.task.handle] : [])
+            await bed.center.waitForPendingRestoration()
+            let outcome = lifecycleEarlyOutcome(bed, events: events)
+            XCTAssertEqual(outcome.state, .paused(progress: 0.4))
+            XCTAssertEqual(outcome.finishes + outcome.failures, 0)
+            XCTAssertTrue(bed.center.isInterrupted("A"))
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+            XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+            XCTAssertEqual(early.task.resumeCount + early.task.suspendCount + early.task.cancelCount, 0)
+        }
+    }
+
+    @MainActor
+    func testEarlyCallbacksCannotResurrectExplicitCancelOrOverwriteANewCompletedAttempt() async throws {
+        for replace in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            let early = try await lifecycleHeldRestore(bed, knownLocation: false)
+            early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+            early.task.reportedState = .completed
+            early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+            await lifecycleCallbacks()
+            XCTAssertNotNil(bed.backend.pendingEnumeration)
+            bed.center.cancel("A")
+            var replacementURL: URL?
+            let replacementBytes = Data("new-attempt-completed-bytes".utf8)
+            if replace {
+                try await bed.begin(lifecycleProgram("A"))
+                let replacement = try XCTUnwrap(bed.backend.created.last)
+                let url = try bed.writeAsset("new-attempt", bytes: replacementBytes)
+                replacementURL = url
+                early.delegate.receiveWillDownload(replacement.session, task: replacement.task, location: url)
+                await lifecycleCallbacks()
+                replacement.reportedState = .completed
+                early.delegate.urlSession(replacement.session, task: replacement.task, didCompleteWithError: nil)
+                await lifecycleCallbacks()
+            }
+            bed.backend.releaseEnumeration([early.task.handle])
+            await bed.center.waitForPendingRestoration()
+            early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+            await lifecycleCallbacks()
+            if let url = replacementURL {
+                XCTAssertEqual(bed.center.state(for: "A"), .downloaded(bytes: Int64(replacementBytes.count)))
+                XCTAssertEqual(bed.center.offlineAssetURL(for: "A"), url)
+                XCTAssertEqual(try Data(contentsOf: url.appendingPathComponent("segment.ts")), replacementBytes)
+            } else {
+                XCTAssertEqual(bed.center.state(for: "A"), .notDownloaded)
+                XCTAssertNil(bed.center.offlineAssetURL(for: "A"))
+            }
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        }
+    }
+
+    @MainActor
+    func testEarlyCallbacksFromAnOlderRestorationCannotReplaceTheNewerNativeOwner() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let early = try await lifecycleHeldRestore(bed, knownLocation: true)
+        early.task.reportedState = .completed
+        early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        let priorRestoration = Task { @MainActor in await bed.center.waitForPendingRestoration() }
+        await lifecycleCallbacks()
+        let newerBytes = Data("newer-restoration-owner".utf8)
+        let newerURL = try bed.writeAsset("newer", bytes: newerBytes)
+        let newerRecord = DownloadPersistedRecord(program: lifecycleProgram("A"), phase: .downloading, progress: 0.7, bytes: 0,
+                                                  message: nil, bookmark: nil, relativePath: "newer.movpkg", updatedAt: Date())
+        try JSONEncoder().encode([newerRecord]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+        let newer = bed.backend.legacy("A", allowingCellular: true)
+        newer.reportedState = .running
+        bed.backend.enumerated[true] = [newer.handle]
+        bed.center.restore()
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(bed.center.state(for: "A"), .downloading(progress: 0.7))
+        bed.backend.releaseEnumeration([early.task.handle])
+        await priorRestoration.value
+        early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+        early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.state(for: "A"), .downloading(progress: 0.7))
+        XCTAssertTrue(bed.driver.hasTask(programID: "A"))
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+        newer.reportedState = .completed
+        early.delegate.urlSession(newer.session, task: newer.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.offlineAssetURL(for: "A"), newerURL)
+        XCTAssertEqual(bed.center.state(for: "A"), .downloaded(bytes: Int64(newerBytes.count)))
+        XCTAssertEqual(try Data(contentsOf: newerURL.appendingPathComponent("segment.ts")), newerBytes)
+    }
+
+    @MainActor
+    func testEarlyCallbacksForANonRestoringSavedRecordCannotReplaceItsCopy() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let savedBytes = Data("saved-record-is-not-a-restoration-target".utf8)
+        let savedURL = try bed.writeAsset("saved", bytes: savedBytes)
+        let saved = DownloadPersistedRecord(program: lifecycleProgram("saved"), phase: .downloaded, progress: 1,
+                                            bytes: Int64(savedBytes.count), message: nil, bookmark: nil, relativePath: "saved.movpkg", updatedAt: Date())
+        let early = try await lifecycleHeldRestore(bed, knownLocation: true, additionalRecords: [saved])
+        let unrelated = bed.backend.legacy("saved", allowingCellular: true)
+        unrelated.reportedState = .completed
+        let staleURL = try bed.writeAsset("stale-saved", bytes: Data("stale".utf8))
+        early.delegate.receiveWillDownload(unrelated.session, task: unrelated.task, location: staleURL)
+        early.delegate.urlSession(unrelated.session, task: unrelated.task, didCompleteWithError: URLError(.timedOut))
+        early.delegate.urlSession(unrelated.session, task: unrelated.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertNotNil(bed.backend.pendingEnumeration)
+        bed.backend.releaseEnumeration([unrelated.handle])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(bed.center.state(for: "saved"), .downloaded(bytes: Int64(savedBytes.count)))
+        XCTAssertEqual(bed.center.offlineAssetURL(for: "saved"), savedURL)
+        XCTAssertEqual(try Data(contentsOf: savedURL.appendingPathComponent("segment.ts")), savedBytes)
+        XCTAssertFalse(bed.driver.hasTask(programID: "saved"))
+        XCTAssertEqual(unrelated.resumeCount + unrelated.suspendCount + unrelated.cancelCount, 0)
+    }
+
 }
 
 private var lifecycleURL: URL { URL(string: "https://example.invalid/lifecycle-no-network.m3u8")! }
@@ -915,4 +1134,52 @@ private final class LifecycleCenterBed {
         defaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: directory)
     }
+}
+
+
+private struct LifecycleEarlyOutcome: Equatable {
+    let state: DownloadState
+    let location: URL?
+    let locations: Int
+    let finishes: Int
+    let failures: Int
+}
+
+@MainActor
+private func lifecycleEarlyOutcome(_ bed: LifecycleCenterBed, events: [DownloadDriverEvent]) -> LifecycleEarlyOutcome {
+    LifecycleEarlyOutcome(state: bed.center.state(for: "A"), location: bed.center.offlineAssetURL(for: "A"),
+                          locations: events.filter { if case .willDownload = $0 { return true }; return false }.count,
+                          finishes: events.filter { if case .finished = $0 { return true }; return false }.count,
+                          failures: events.filter { if case .failed = $0 { return true }; return false }.count)
+}
+
+@MainActor
+private struct LifecycleHeldRestoration {
+    let task: LifecycleTaskProbe
+    let delegate: AssetDownloadDelegate
+    let url: URL
+    let bytes: Data
+}
+
+/// Only fixture setup: real Center.restore -> real Driver -> held backend allTasks -> native identity bridge.
+@MainActor
+private func lifecycleHeldRestore(_ bed: LifecycleCenterBed, knownLocation: Bool,
+                                  additionalRecords: [DownloadPersistedRecord] = []) async throws -> LifecycleHeldRestoration {
+    let bytes = Data("early-native-callback-package".utf8)
+    if knownLocation { _ = try bed.writeAsset("A", bytes: bytes) }
+    let record = DownloadPersistedRecord(program: lifecycleProgram("A"), phase: .downloading, progress: 0.4, bytes: 0,
+                                         message: nil, bookmark: nil, relativePath: knownLocation ? "A.movpkg" : nil, updatedAt: Date())
+    try JSONEncoder().encode(additionalRecords + [record]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+    bed.backend.holdNextEnumeration = true
+    bed.center.restore()
+    try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+    XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+    XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+    let delegate = try XCTUnwrap(bed.backend.delegate)
+    let task = bed.backend.legacy("A")
+    task.reportedState = .running
+    XCTAssertEqual(task.task.state, .suspended, "The actual SDK task has never been resumed")
+    // Unknown-location packages are created only after restore's disk scan, as with a new native willDownload.
+    let url = try bed.writeAsset("A", bytes: bytes)
+    return LifecycleHeldRestoration(task: task, delegate: delegate, url: url, bytes: bytes)
 }
