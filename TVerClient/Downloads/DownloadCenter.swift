@@ -477,6 +477,54 @@ final class DownloadCenter: ObservableObject {
         notices.removeAll { notice in notice.id == noticeID }
     }
 
+    /// Notice recovery is narrower than the explicit refetch API: only the current paused/failed rows.
+    func noticeRestartRequest(programIDs: [String]) -> DownloadNoticeRestartRequest? {
+        refreshRecoveryNotices()
+        let targets = noticeRecoveryRecords(programIDs)
+        return targets.isEmpty ? nil : DownloadNoticeRestartRequest(targets: targets)
+    }
+
+    private func noticeRecoveryRecords(_ programIDs: [String]) -> [DownloadRecord] {
+        var seen: Set<String> = []
+        return programIDs.compactMap { programID in
+            guard seen.insert(programID).inserted,
+                  let record = records.first(where: { $0.id == programID }) else { return nil }
+            switch record.state {
+            case .paused, .failed: return record
+            case .notDownloaded, .queued, .downloading, .downloaded: return nil
+            }
+        }
+    }
+
+    /// Reconcile aggregate notices whenever records change; an old action must not keep naming recovered rows.
+    private func refreshRecoveryNotices() {
+        let refreshed = notices.compactMap { notice -> DownloadNotice? in
+            let oldIDs: [String]
+            switch notice.action {
+            case .none: return notice
+            case let .restart(ids, _), let .resumeOnCellular(ids, _): oldIDs = ids
+            }
+            let current = noticeRecoveryRecords(oldIDs)
+            let ids = current.map(\.id)
+            guard !ids.isEmpty else { return nil }
+            guard ids != oldIDs else { return notice }
+            let action: DownloadNotice.Action
+            switch notice.action {
+            case let .restart(_, label): action = .restart(programIDs: ids, label: label)
+            case let .resumeOnCellular(_, label): action = .resumeOnCellular(programIDs: ids, label: label)
+            case .none: return notice
+            }
+            let subjects = current.map { "\(Self.displayTitle($0.program))（ID: \($0.id)）" }.joined(separator: "、")
+            return DownloadNotice(
+                id: notice.id, kind: notice.kind,
+                message: "現在、停止・失敗しているダウンロードは\(ids.count)件です。",
+                recovery: "\(subjects)。再開できない場合は、途中データの削除を確認してから最初からやり直してください。",
+                action: action
+            )
+        }
+        if refreshed != notices { notices = refreshed }
+    }
+
     /// Awaits every in-flight stream resolution so a caller can observe the
     /// state that follows `start(_:)`.
     func waitForPendingResolutions() async {
@@ -497,6 +545,11 @@ final class DownloadCenter: ObservableObject {
             return refusal.result
         }
 
+        return enqueueAcceptedStart(program, allowingCellular: allowingCellular)
+    }
+
+    /// Preflight is synchronous and happens once, before an approved restart removes any data.
+    private func enqueueAcceptedStart(_ program: TVerProgram, allowingCellular: Bool) -> DownloadStartResult {
         lastRejection = nil
         interruptedIDs.remove(program.id)
         dismissNotice(Self.failureNoticeID(program.id))
@@ -612,7 +665,6 @@ final class DownloadCenter: ObservableObject {
             return refusal.result
         }
 
-        let previous = records.first { entry in entry.id == programID }
         resolutions[programID]?.cancel()
         resolutions[programID] = nil
         driver.cancel(programID: programID)
@@ -624,30 +676,7 @@ final class DownloadCenter: ObservableObject {
         records.removeAll { entry in entry.id == programID }
         persistRecords()
 
-        let result = start(program, allowingCellular: allowingCellular)
-        switch result {
-        case .started, .alreadyPresent:
-            return result
-        case .blockedByCellular, .rejected:
-            // 事前判定をすり抜けたときの保険。畳んでしまった行を戻してから返す。
-            if let previous { reinstate(previous) }
-            return result
-        }
-    }
-
-    /// やり直しに失敗したときに、消してしまった行を一覧へ戻す。
-    ///
-    /// 実体はすでに手元にないので、続きからは進めない行として戻す。黙って
-    /// 一覧から消えるより、やり直せる行が残っている方が利用者は困らない。
-    private func reinstate(_ record: DownloadRecord) {
-        guard !records.contains(where: { entry in entry.id == record.id }) else { return }
-        var restored = record
-        restored.state = .paused(progress: Self.inFlightProgress(record.state))
-        restored.updatedAt = Date()
-        records.insert(restored, at: 0)
-        interruptedIDs.insert(record.id)
-        persistRecords()
-        refreshStorage()
+        return enqueueAcceptedStart(program, allowingCellular: allowingCellular)
     }
 
     func retry(_ programID: String) {
@@ -655,7 +684,7 @@ final class DownloadCenter: ObservableObject {
         restart(record.program)
     }
 
-    /// お知らせの「最初からやり直す」からまとめて呼ばれる。
+    /// お知らせの確認で承認した対象だけを渡す。個別の明示的再取得とは異なり、保存済みや実行中は保護する。
     ///
     /// 1件分の拒否だけを出して残りを黙らせない。断られた件数と理由、次の一手を
     /// まとめてお知らせにする。
@@ -665,14 +694,19 @@ final class DownloadCenter: ObservableObject {
         var reasons: [String] = []
         var recoveries: [String] = []
         var onlyCellular = true
+        var firstRefusal: Rejection?
 
-        for programID in programIDs {
-            guard let record = records.first(where: { entry in entry.id == programID }) else {
-                continue
-            }
+        for programID in noticeRecoveryRecords(programIDs).map(\.id) {
+            // Recheck each row, not only the earlier confirmation or aggregate notice.
+            guard let record = noticeRecoveryRecords([programID]).first else { continue }
             let result = restart(record.program)
             if result == .started || result == .alreadyPresent { continue }
             if result != .blockedByCellular { onlyCellular = false }
+            if result == .blockedByCellular, var rejection = lastRejection {
+                rejection.requiresRestartOnCellular = true
+                lastRejection = rejection
+            }
+            if firstRefusal == nil { firstRefusal = lastRejection }
             refusedIDs.append(programID)
             refusedTitles.append(Self.displayTitle(record.program))
             if let reason = lastRejection?.message, !reasons.contains(reason) {
@@ -683,6 +717,8 @@ final class DownloadCenter: ObservableObject {
             }
         }
 
+        refreshRecoveryNotices()
+        if let firstRefusal { lastRejection = firstRefusal }
         guard !refusedIDs.isEmpty else { return }
         let details = ([Self.joined(refusedTitles)] + reasons + recoveries)
             .filter { text in !text.isEmpty }
@@ -695,7 +731,7 @@ final class DownloadCenter: ObservableObject {
             action: onlyCellular
                 ? .resumeOnCellular(
                     programIDs: refusedIDs,
-                    label: "今回だけモバイル通信でやり直す"
+                    label: "今回だけモバイル通信で再開を確認"
                 )
                 : .restart(programIDs: refusedIDs, label: "もう一度やり直す")
         ))
@@ -1231,6 +1267,7 @@ final class DownloadCenter: ObservableObject {
     private func post(_ notice: DownloadNotice) {
         notices.removeAll { existing in existing.id == notice.id }
         notices.append(notice)
+        refreshRecoveryNotices()
         if notices.count > 4 { notices.removeFirst(notices.count - 4) }
     }
 
@@ -1262,6 +1299,7 @@ final class DownloadCenter: ObservableObject {
     }
 
     private func persistRecords() {
+        refreshRecoveryNotices()
         ensureDirectory()
         let entries: [DownloadPersistedRecord] = records.compactMap { record in
             let phase: DownloadPersistedRecord.Phase

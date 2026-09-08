@@ -599,8 +599,20 @@ struct LibraryView: View {
         switch action {
         case .none:
             return nil
-        case let .restart(programIDs, _):
-            return { downloadCenter.restartAll(programIDs) }
+        case .restart:
+            return {
+                guard let request = action.prepareRestart(on: downloadCenter) else { return }
+                pendingAction = PendingDestructiveAction(
+                    confirmation: request.confirmation,
+                    perform: {
+                        Task { @MainActor in
+                            // Let the confirmation close before a possible refusal alert is presented.
+                            await Task.yield()
+                            request.perform(on: downloadCenter)
+                        }
+                    }
+                )
+            }
         case let .resumeOnCellular(programIDs, _):
             return { downloadCenter.resumeAllAllowingCellular(programIDs) }
         }
