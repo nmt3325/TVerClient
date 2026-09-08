@@ -12,7 +12,11 @@ struct PlayerControlLayout: Equatable {
 
     init(availableWidth: CGFloat, availableHeight: CGFloat, isFullScreen: Bool, hasLargeText: Bool = false) {
         prioritizesFooter = availableHeight < 260
-        condensesSupportingText = prioritizesFooter && hasLargeText
+        // A very short safe rectangle cannot fit header, transport and footer
+        // as three separate rows, even at ordinary text sizes. Consolidate
+        // only wide full-screen surfaces; retain semantic fonts and targets.
+        let needsShortHeader = isFullScreen && availableWidth >= 480 && availableHeight < 180
+        condensesSupportingText = (prioritizesFooter && hasLargeText) || needsShortHeader
         compactTransport = availableHeight < 220 || condensesSupportingText
         separatesTitle = isFullScreen && availableWidth < 500 && availableHeight >= 280
         // Five 44pt utilities plus compact transport and gaps fit in this
