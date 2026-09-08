@@ -278,6 +278,11 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                 XCTAssertGreaterThan(rect.height, 44, "AX5 time must retain its semantic font size", file: file, line: line)
             }
         }
+        // Non-overlap alone allows the two clock strings to look concatenated.
+        if timeRects.count == 2 {
+            XCTAssertGreaterThanOrEqual(timeRects[1].minX - timeRects[0].maxX + 0.000_001, DS.Spacing.s,
+                                      "Elapsed and remaining times need a readable gap", file: file, line: line)
+        }
         // Also compare elapsed with remaining, not only text against controls.
         let measuredRects = targetRects + timeRects
         for (index, rect) in measuredRects.enumerated() {
