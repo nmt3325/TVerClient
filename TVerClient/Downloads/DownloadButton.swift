@@ -13,6 +13,120 @@ struct DownloadButton: View {
 
     @EnvironmentObject private var downloadCenter: DownloadCenter
     @State private var pendingConfirmation: DownloadConfirmation?
+    @State private var queuedFailure: RequestFailure?
+    @State private var presentedFailure: RequestFailure?
+
+    /// 同期要求を実行した操作元だけが拒否を受け取る。全ボタンで共有通知を監視しない。
+    enum Request: Equatable {
+        case start, resume, retry, restart
+
+        static func recoveryRequest(for state: DownloadState, isInterrupted: Bool) -> Request? {
+            switch state {
+            case .notDownloaded: return .start
+            case .paused: return isInterrupted ? .restart : .resume
+            case .failed: return .retry
+            case .queued, .downloading, .downloaded: return nil
+            }
+        }
+
+        func canPerform(state: DownloadState, isInterrupted: Bool) -> Bool {
+            Self.recoveryRequest(for: state, isInterrupted: isInterrupted) == self
+        }
+
+        /// Libraryの一覧操作は共有alertを所有するため、この非消費経路を使える。
+        @MainActor
+        @discardableResult
+        func perform(on center: DownloadCenter, program: TVerProgram, allowingCellular: Bool = false) -> Bool {
+            guard canPerform(state: center.state(for: program.id), isInterrupted: center.isInterrupted(program.id)) else {
+                return false
+            }
+            switch self {
+            case .start:
+                center.start(program, allowingCellular: allowingCellular)
+            case .resume:
+                center.resume(program.id, allowingCellular: allowingCellular)
+            case .retry:
+                if allowingCellular {
+                    center.restart(program, allowingCellular: true)
+                } else {
+                    center.retry(program.id)
+                }
+            case .restart:
+                center.restart(program, allowingCellular: allowingCellular)
+            }
+            return true
+        }
+
+        /// MainActorの同期呼び出し内で要求→ID照合→消費まで完結する。
+        /// これでLibraryのglobal alertには、このボタンが所有する拒否を残さない。
+        @MainActor
+        func performConsumingRejection(
+            on center: DownloadCenter,
+            program: TVerProgram,
+            allowingCellular: Bool = false
+        ) -> RequestFailure? {
+            guard perform(on: center, program: program, allowingCellular: allowingCellular),
+                  let rejection = center.lastRejection,
+                  rejection.programID == program.id else { return nil }
+            center.clearRejection()
+            // resume()中にタスク消失が分かった場合は、以後の同意をやり直しとして明示する。
+            let recovery = Self.recoveryRequest(
+                for: center.state(for: program.id), isInterrupted: center.isInterrupted(program.id)
+            ) ?? self
+            return RequestFailure(rejection: rejection, program: program, request: recovery)
+        }
+    }
+
+    struct RequestFailure: Identifiable {
+        let id = UUID()
+        let rejection: DownloadCenter.Rejection
+        let program: TVerProgram
+        let request: Request
+
+        var title: String {
+            switch request {
+            case .start: return "ダウンロードを開始できませんでした"
+            case .resume: return "ダウンロードを再開できませんでした"
+            case .retry, .restart: return "ダウンロードをやり直せませんでした"
+            }
+        }
+
+        var message: String {
+            let recovery = rejection.recovery?.trimmingCharacters(in: .whitespacesAndNewlines)
+            var parts = [rejection.message]
+            if let recovery, !recovery.isEmpty {
+                parts.append(recovery)
+            } else {
+                parts.append("番組はそのまま残っています。視聴画面で利用可能な再生方法を確認してください。")
+            }
+            if request == .restart || request == .retry {
+                parts.append("やり直すと途中までのデータを削除し、最初からダウンロードします。")
+            }
+            if canRetryOnCellular {
+                parts.append("許可するのは今回の操作だけです。Wi-Fi限定の設定は変わりません。")
+            }
+            return parts.joined(separator: "\n")
+        }
+
+        var canRetryOnCellular: Bool {
+            rejection.canRetryOnCellular && rejection.programID == program.id
+                && rejection.program?.id == program.id
+        }
+
+        var cellularRetryLabel: String {
+            switch request {
+            case .start: return "今回だけモバイル通信でダウンロード"
+            case .resume: return "今回だけモバイル通信で再開"
+            case .retry, .restart: return "今回だけモバイル通信で最初からやり直す"
+            }
+        }
+
+        @MainActor
+        func retryOnCellular(on center: DownloadCenter) -> RequestFailure? {
+            guard canRetryOnCellular else { return nil }
+            return request.performConsumingRejection(on: center, program: program, allowingCellular: true)
+        }
+    }
 
     init(program: TVerProgram) {
         self.program = program
@@ -87,12 +201,38 @@ struct DownloadButton: View {
                     confirmation.confirmLabel,
                     role: confirmation.isDestructive ? ButtonRole.destructive : nil
                 ) {
-                    perform(confirmation.target)
                     pendingConfirmation = nil
+                    perform(confirmation.target)
                 }
                 Button("やめる", role: .cancel) { pendingConfirmation = nil }
             } message: { confirmation in
                 Text(confirmation.message)
+            }
+            .alert(
+                presentedFailure?.title ?? "ダウンロードを開始できませんでした",
+                isPresented: Binding(
+                    get: { presentedFailure != nil },
+                    set: { if !$0 { presentedFailure = nil } }
+                ),
+                presenting: presentedFailure
+            ) { failure in
+                if failure.canRetryOnCellular {
+                    Button(failure.cellularRetryLabel) {
+                        presentedFailure = nil
+                        queuedFailure = failure.retryOnCellular(on: downloadCenter)
+                    }
+                }
+                Button("閉じる", role: .cancel) { presentedFailure = nil }
+            } message: { failure in
+                Text(failure.message)
+            }
+            .task(id: queuedFailure?.id) {
+                guard let failure = queuedFailure else { return }
+                // 確認ダイアログ/前のalertを閉じた次の更新で提示する。要求と消費は既に同期完了。
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                queuedFailure = nil
+                presentedFailure = failure
             }
     }
 
@@ -133,7 +273,7 @@ struct DownloadButton: View {
         }
         if case .failed = state {
             Button {
-                downloadCenter.retry(program.id)
+                request(.retry)
             } label: {
                 Label(
                     "最初から再試行",
@@ -161,7 +301,7 @@ struct DownloadButton: View {
     private func activate() {
         switch primaryAction {
         case .start:
-            downloadCenter.start(program)
+            request(.start)
         case .cancel:
             confirm(.runningDownload)
         case .pause:
@@ -169,7 +309,7 @@ struct DownloadButton: View {
         case .resume, .restart:
             resumeOrRestart()
         case .retry:
-            downloadCenter.retry(program.id)
+            request(.retry)
         case .savedOptions:
             break // 保存済みの主操作はMenuで受ける。
         }
@@ -177,10 +317,14 @@ struct DownloadButton: View {
 
     private func resumeOrRestart() {
         guard isInterrupted else {
-            downloadCenter.resume(program.id)
+            request(.resume)
             return
         }
         confirm(.restartDownload)
+    }
+
+    private func request(_ request: Request) {
+        queuedFailure = request.performConsumingRejection(on: downloadCenter, program: program)
     }
 
     private func confirm(_ target: DownloadConfirmation.Target) {
@@ -197,7 +341,7 @@ struct DownloadButton: View {
             downloadCenter.delete(program.id)
         case .restartDownload:
             guard case .paused = state, isInterrupted else { return }
-            downloadCenter.restart(program)
+            request(.restart)
         case .favorite, .allFavorites, .recent, .allRecents, .selection:
             break
         }
