@@ -336,6 +336,237 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(bed.backend.created.count, 1)
         XCTAssertFalse(bed.center.notices.contains { $0.id == DownloadCenter.failureNoticeID(program.id) })
     }
+    @MainActor
+    func testHandleStateUsesNativeDefaultOrControlledStateWithoutRealResume() {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let probe = backend.legacy("A")
+        let native = AssetDownloadTaskHandle(session: probe.session, task: probe.task)
+        XCTAssertEqual(probe.task.state, .suspended)
+        XCTAssertTrue(native.isSuspended)
+        XCTAssertTrue(native.isViable)
+        probe.reportedState = .running
+        XCTAssertFalse(probe.handle.isSuspended)
+        XCTAssertTrue(probe.handle.isViable)
+        probe.reportedState = .canceling
+        XCTAssertFalse(probe.handle.isViable)
+        probe.reportedState = .completed
+        XCTAssertFalse(probe.handle.isViable)
+        XCTAssertEqual(probe.task.state, .suspended, "The OS task itself was never resumed or changed through private APIs")
+        XCTAssertEqual(probe.resumeCount, 0)
+    }
+
+    @MainActor
+    func testPauseBeforeEnumerationStopsTheDiscoveredRunningTaskWithoutResuming() async {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let legacy = backend.legacy("A")
+        legacy.reportedState = .running
+        backend.enumerated[false] = [legacy.handle, legacy.handle]
+        let driver = AVAssetDownloadDriver(backend: backend)
+        driver.pause(programID: "A")
+        XCTAssertFalse(driver.hasTask(programID: "A"), "Remembered pause is not ownership of a real transfer")
+        let adopted = await driver.adoptRunningTasks(knownLocations: [:])
+        XCTAssertEqual(adopted, ["A"])
+        XCTAssertEqual(legacy.suspendCount, 1)
+        XCTAssertEqual(legacy.resumeCount, 0)
+        XCTAssertEqual(legacy.reportedState, .suspended)
+        XCTAssertEqual(driver.cellularPolicy(programID: "A"), .unknown)
+        driver.pause(programID: "A")
+        XCTAssertEqual(legacy.suspendCount, 1)
+    }
+
+    @MainActor
+    func testPauseWhileEnumerationWaitsStopsOnlyItsProgramAndCannotQueueAResume() async throws {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let a = backend.legacy("A"), b = backend.legacy("B")
+        a.reportedState = .running; b.reportedState = .running
+        backend.holdNextEnumeration = true
+        let driver = AVAssetDownloadDriver(backend: backend)
+        var events: [DownloadDriverEvent] = []
+        driver.onEvent = { events.append($0) }
+        let adoption = Task { await driver.adoptRunningTasks(knownLocations: [:]) }
+        try await lifecycleWait { backend.pendingEnumeration != nil }
+        driver.pause(programID: "A")
+        driver.resume(programID: "A") // No handle: not a future resume or a permission grant.
+        backend.releaseEnumeration([a.handle, b.handle])
+        let adopted = await adoption.value
+        XCTAssertEqual(adopted, ["A", "B"])
+        XCTAssertEqual(a.suspendCount, 1)
+        XCTAssertEqual(b.suspendCount, 0)
+        XCTAssertEqual(a.resumeCount + b.resumeCount, 0)
+        XCTAssertEqual(a.reportedState, .suspended)
+        XCTAssertEqual(b.reportedState, .running)
+        XCTAssertEqual(driver.cellularPolicy(programID: "A"), .unknown)
+        let delegate = try XCTUnwrap(backend.delegate)
+        delegate.receiveProgress(a.session, task: a.task, fraction: 0.9)
+        delegate.receiveProgress(b.session, task: b.task, fraction: 0.7)
+        await lifecycleCallbacks()
+        XCTAssertEqual(events, [.progress(programID: "B", fraction: 0.7)])
+    }
+
+    @MainActor
+    func testPauseOfAcceptedTaskDuringSecondEnumerationKeepsThatOwner() async throws {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let legacy = backend.legacy("A")
+        legacy.reportedState = .running
+        backend.enumerated[false] = [legacy.handle]
+        backend.holdEnumerationForCellular = true
+        let driver = AVAssetDownloadDriver(backend: backend)
+        let adoption = Task { await driver.adoptRunningTasks(knownLocations: [:]) }
+        try await lifecycleWait { backend.pendingEnumeration != nil }
+        XCTAssertTrue(driver.hasTask(programID: "A"))
+        driver.pause(programID: "A")
+        backend.releaseEnumeration([])
+        let adopted = await adoption.value
+        XCTAssertEqual(adopted, ["A"])
+        XCTAssertEqual(legacy.suspendCount, 1)
+        XCTAssertEqual(legacy.resumeCount, 0)
+        XCTAssertEqual(driver.cellularPolicy(programID: "A"), .unknown)
+    }
+
+    @MainActor
+    func testCancelAndReplacementSupersedePauseOfAnUnresolvedLegacyTask() async throws {
+        for replacement in [false, true] {
+            let backend = LifecycleBackend()
+            defer { backend.cleanUp() }
+            let legacy = backend.legacy("A")
+            legacy.reportedState = .running
+            backend.holdNextEnumeration = true
+            let driver = AVAssetDownloadDriver(backend: backend)
+            let adoption = Task { await driver.adoptRunningTasks(knownLocations: [:]) }
+            try await lifecycleWait { backend.pendingEnumeration != nil }
+            driver.pause(programID: "A")
+            if replacement {
+                driver.start(programID: "A", assetURL: lifecycleURL, title: "new", allowsCellularAccess: true)
+                await driver.waitForPendingPreparations()
+            } else {
+                driver.cancel(programID: "A")
+            }
+            backend.releaseEnumeration([legacy.handle])
+            let adopted = await adoption.value
+            XCTAssertTrue(adopted.isEmpty)
+            XCTAssertEqual(legacy.cancelCount, 1)
+            XCTAssertEqual(legacy.suspendCount, 0)
+            XCTAssertEqual(legacy.resumeCount, 0)
+            if replacement {
+                let current = try XCTUnwrap(backend.created.first)
+                XCTAssertEqual(current.suspendCount, 0)
+                XCTAssertEqual(current.cancelCount, 0)
+                XCTAssertEqual(current.resumeCount, 1)
+                XCTAssertEqual(driver.cellularPolicy(programID: "A"), .allowed)
+            } else {
+                XCTAssertFalse(driver.hasTask(programID: "A"))
+                XCTAssertEqual(driver.cellularPolicy(programID: "A"), .unknown)
+            }
+        }
+    }
+
+    @MainActor
+    func testExplicitStartBeforeEnumerationDoesNotInheritAnUnownedPause() async throws {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let driver = AVAssetDownloadDriver(backend: backend)
+        driver.pause(programID: "A")
+        driver.start(programID: "A", assetURL: lifecycleURL, title: "new", allowsCellularAccess: true)
+        await driver.waitForPendingPreparations()
+        let current = try XCTUnwrap(backend.created.first)
+        backend.enumerated[true] = [current.handle]
+        let adopted = await driver.adoptRunningTasks(knownLocations: [:])
+        XCTAssertEqual(adopted, ["A"])
+        XCTAssertEqual(current.resumeCount, 1)
+        XCTAssertEqual(current.suspendCount, 0)
+        XCTAssertEqual(driver.cellularPolicy(programID: "A"), .allowed)
+    }
+
+    @MainActor
+    func testPendingPauseDoesNotAdoptOrSuspendTerminalTasks() async {
+        for state: URLSessionTask.State in [.canceling, .completed] {
+            let backend = LifecycleBackend()
+            defer { backend.cleanUp() }
+            let legacy = backend.legacy("A")
+            legacy.reportedState = state
+            backend.enumerated[false] = [legacy.handle]
+            let driver = AVAssetDownloadDriver(backend: backend)
+            driver.pause(programID: "A")
+            let adopted = await driver.adoptRunningTasks(knownLocations: [:])
+            XCTAssertTrue(adopted.isEmpty)
+            XCTAssertFalse(driver.hasTask(programID: "A"))
+            XCTAssertEqual(legacy.suspendCount + legacy.resumeCount + legacy.cancelCount, 0)
+        }
+    }
+
+    @MainActor
+    func testColdRestorePauseCallDoesNotReachUnownedDriverOrStrandAutoResume() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let program = lifecycleProgram("A")
+        let entry = DownloadPersistedRecord(program: program, phase: .downloading, progress: 0.4, bytes: 0, message: nil, bookmark: nil, relativePath: nil, updatedAt: Date())
+        try JSONEncoder().encode([entry]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+        let legacy = bed.backend.legacy(program.id)
+        legacy.reportedState = .running
+        bed.backend.holdNextEnumeration = true
+        bed.center.restore()
+        try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+        XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.4))
+        XCTAssertFalse(bed.driver.hasTask(programID: program.id))
+        bed.center.pause(program.id) // Current Center accepts pause only for .downloading, not a restoring .paused row.
+        let delegate = try XCTUnwrap(bed.backend.delegate)
+        delegate.receiveProgress(legacy.session, task: legacy.task, fraction: 0.8)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.4))
+        bed.backend.releaseEnumeration([legacy.handle])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(bed.center.state(for: program.id), .downloading(progress: 0.4))
+        XCTAssertFalse(bed.center.isInterrupted(program.id))
+        XCTAssertEqual(legacy.suspendCount, 0)
+        XCTAssertEqual(legacy.resumeCount, 0, "Running native state needs no fabricated transport resume")
+        bed.center.pause(program.id)
+        XCTAssertEqual(legacy.suspendCount, 1)
+        XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.4))
+    }
+
+    @MainActor
+    func testCenterRestoredPauseAndCellularRefusalStopRunningTasksWithoutLosingBytes() async throws {
+        let bed = try LifecycleCenterBed(networkStatus: { .cellular })
+        defer { bed.cleanUp() }
+        let a = lifecycleProgram("A"), b = lifecycleProgram("B")
+        let bytes = Data("unchanged-partial-data".utf8)
+        let aURL = try bed.writeAsset("A", bytes: bytes), bURL = try bed.writeAsset("B", bytes: bytes)
+        let entries = [
+            DownloadPersistedRecord(program: a, phase: .paused, progress: 0.4, bytes: 0, message: nil, bookmark: nil, relativePath: "A.movpkg", updatedAt: Date()),
+            DownloadPersistedRecord(program: b, phase: .downloading, progress: 0.4, bytes: 0, message: nil, bookmark: nil, relativePath: "B.movpkg", updatedAt: Date())
+        ]
+        try JSONEncoder().encode(entries).write(to: bed.directory.appendingPathComponent("metadata.json"))
+        let oldA = bed.backend.legacy(a.id), oldB = bed.backend.legacy(b.id, allowingCellular: true)
+        oldA.reportedState = .running; oldB.reportedState = .running
+        bed.backend.enumerated[false] = [oldA.handle]
+        bed.backend.holdEnumerationForCellular = true
+        bed.center.restore()
+        try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+        let delegate = try XCTUnwrap(bed.backend.delegate)
+        delegate.receiveProgress(oldA.session, task: oldA.task, fraction: 0.8)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.state(for: a.id), .paused(progress: 0.4), "Owned progress still cannot make a restoring row in-flight")
+        bed.backend.releaseEnumeration([oldB.handle])
+        await bed.center.waitForPendingRestoration()
+        for task in [oldA, oldB] {
+            XCTAssertEqual(task.suspendCount, 1)
+            XCTAssertEqual(task.resumeCount, 0)
+            XCTAssertEqual(task.reportedState, .suspended)
+            XCTAssertEqual(bed.driver.cellularPolicy(programID: task.programID), .unknown)
+            XCTAssertFalse(bed.center.isInterrupted(task.programID))
+        }
+        XCTAssertEqual(bed.center.state(for: a.id), .paused(progress: 0.4))
+        XCTAssertEqual(bed.center.state(for: b.id), .paused(progress: 0.4))
+        XCTAssertEqual(try Data(contentsOf: aURL.appendingPathComponent("segment.ts")), bytes)
+        XCTAssertEqual(try Data(contentsOf: bURL.appendingPathComponent("segment.ts")), bytes)
+        XCTAssertTrue(bed.center.wifiOnly)
+        XCTAssertTrue(bed.backend.created.isEmpty)
+    }
+
 }
 
 private var lifecycleURL: URL { URL(string: "https://example.invalid/lifecycle-no-network.m3u8")! }
@@ -372,6 +603,8 @@ private final class LifecycleTaskProbe {
     let allowsCellular: Bool
     let session: URLSession, task: URLSessionDataTask
     var resumeCount = 0, suspendCount = 0, cancelCount = 0
+    // nil preserves the original fixture. Controlled state never changes the real suspended task.
+    var reportedState: URLSessionTask.State?
 
     init(programID: String, title: String, allowsCellular: Bool, session: URLSession) {
         self.programID = programID; self.title = title; self.allowsCellular = allowsCellular; self.session = session
@@ -381,9 +614,20 @@ private final class LifecycleTaskProbe {
 
     var handle: AssetDownloadTaskHandle {
         AssetDownloadTaskHandle(session: session, task: task,
-            resume: { [weak self] in self?.resumeCount += 1 },
-            suspend: { [weak self] in self?.suspendCount += 1 },
-            cancel: { [weak self] in self?.cancelCount += 1; self?.task.cancel() })
+            resume: { [weak self] in
+                self?.resumeCount += 1
+                if self?.reportedState != nil { self?.reportedState = .running }
+            },
+            suspend: { [weak self] in
+                self?.suspendCount += 1
+                if self?.reportedState != nil { self?.reportedState = .suspended }
+            },
+            cancel: { [weak self] in
+                self?.cancelCount += 1
+                if self?.reportedState != nil { self?.reportedState = .canceling }
+                self?.task.cancel()
+            },
+            state: { [weak self] in self?.reportedState ?? self?.task.state ?? .completed })
     }
 }
 
@@ -394,6 +638,7 @@ private final class LifecycleBackend: AssetDownloadTaskBackend {
     let anySession = URLSession(configuration: .ephemeral)
     var delegate: AssetDownloadDelegate?
     var holdPreparations = false, holdNextEnumeration = false
+    var holdEnumerationForCellular: Bool?
     var prepareCount = 0
     var pendingPreparations: [Int: CheckedContinuation<PreparedAssetDownload, Error>] = [:]
     var pendingEnumeration: CheckedContinuation<[AssetDownloadTaskHandle], Never>?
@@ -425,8 +670,9 @@ private final class LifecycleBackend: AssetDownloadTaskBackend {
 
     func allTasks(allowsCellularAccess: Bool, delegate: AssetDownloadDelegate) async -> [AssetDownloadTaskHandle] {
         self.delegate = delegate
-        if holdNextEnumeration {
+        if holdNextEnumeration || holdEnumerationForCellular == allowsCellularAccess {
             holdNextEnumeration = false
+            holdEnumerationForCellular = nil
             return await withCheckedContinuation { pendingEnumeration = $0 }
         }
         return enumerated[allowsCellularAccess] ?? []
@@ -475,7 +721,7 @@ private final class LifecycleCenterBed {
     let backend: LifecycleBackend, driver: AVAssetDownloadDriver, center: DownloadCenter
     private let previousProvider: ((String) -> URL?)?
 
-    init(resolver: TVerStreamResolving? = nil) throws {
+    init(resolver: TVerStreamResolving? = nil, networkStatus: @escaping () -> DownloadNetworkStatus = { .wifi }) throws {
         let name = "asset-driver-lifecycle-" + UUID().uuidString
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -484,7 +730,7 @@ private final class LifecycleCenterBed {
         self.directory = directory; self.defaults = defaults; self.suiteName = name
         self.backend = backend; self.driver = driver
         previousProvider = OfflineAssetRegistry.provider
-        center = DownloadCenter(directory: directory, driver: driver, resolver: resolver ?? LifecycleImmediateResolver(), defaults: defaults, settingsKey: name, networkStatus: { .wifi })
+        center = DownloadCenter(directory: directory, driver: driver, resolver: resolver ?? LifecycleImmediateResolver(), defaults: defaults, settingsKey: name, networkStatus: networkStatus)
     }
 
     func begin(_ program: TVerProgram) async throws {
