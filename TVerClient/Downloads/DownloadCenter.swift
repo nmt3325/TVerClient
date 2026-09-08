@@ -48,6 +48,12 @@ final class DownloadNetworkMonitor: ObservableObject {
 
 // MARK: - Download driver
 
+/// 作成済みタスクの実際の通信条件。アプリの現在のWi-Fi設定とは別物。
+/// 古いタスクや権限を報告しないドライバは、安全側のunknownとして扱う。
+enum DownloadTaskCellularPolicy: Equatable, Sendable {
+    case allowed, wifiOnly, unknown
+}
+
 /// Emitted by the download driver while an offline copy is produced.
 enum DownloadDriverEvent: Equatable, Sendable {
     /// 保存先が決まった時点の通知。完了を待たずに控えておかないと、アプリを
@@ -98,6 +104,9 @@ protocol OfflineDownloadDriving: AnyObject {
     /// 何も起きない「再開」を出さないために、呼ぶ側が先に確かめる。
     func hasTask(programID: String) -> Bool
 
+    /// セッション作成時の条件。既存タスクを後から許可したことにしてはいけない。
+    func cellularPolicy(programID: String) -> DownloadTaskCellularPolicy
+
     /// 前回の起動から生き残った転送を拾い直し、操作を取り戻せた番組IDを返す。
     ///
     /// バックグラウンドセッションのタスクはプロセスをまたいで生き残るのに、
@@ -112,6 +121,9 @@ extension OfflineDownloadDriving {
 
     /// 在庫を答えられないドライバは、これまで通り握っている前提で扱う。
     func hasTask(programID _: String) -> Bool { true }
+
+    /// 既存mock/呼出元はsource-compatible。分からない権限を許可済みと推測しない。
+    func cellularPolicy(programID _: String) -> DownloadTaskCellularPolicy { .unknown }
 }
 
 /// Forwards `AVAssetDownloadURLSession` callbacks out of the delegate queue.
@@ -176,6 +188,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     private let delegate = AssetDownloadDelegate()
     private var sessions: [Bool: AVAssetDownloadURLSession] = [:]
     private var tasks: [String: AVAggregateAssetDownloadTask] = [:]
+    private var taskCellularPolicies: [String: DownloadTaskCellularPolicy] = [:]
     private var locations: [String: URL] = [:]
 
     init(configurationIdentifier: String = "dev.nmt3325.TVerClient.downloads") {
@@ -217,6 +230,8 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
             }
             task.taskDescription = programID
             self.tasks[programID] = task
+            // SDK: taskは作成時の設定をコピーし、後からのconfiguration変更を無視する。
+            self.taskCellularPolicies[programID] = allowsCellularAccess ? .allowed : .wifiOnly
             task.resume()
         }
     }
@@ -227,9 +242,14 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
 
     func hasTask(programID: String) -> Bool { tasks[programID] != nil }
 
+    func cellularPolicy(programID: String) -> DownloadTaskCellularPolicy {
+        taskCellularPolicies[programID] ?? .unknown
+    }
+
     func cancel(programID: String) {
         tasks[programID]?.cancel()
         tasks[programID] = nil
+        taskCellularPolicies[programID] = nil
         locations[programID] = nil
     }
 
@@ -249,6 +269,12 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                 guard let identifier = task.taskDescription,
                       let aggregate = task as? AVAggregateAssetDownloadTask
                 else { continue }
+                if let current = tasks[identifier], current === aggregate {
+                    // この起動中に作った同じタスクの既知条件だけは保持する。
+                } else {
+                    // 再起動前の設定は現在の設定やidentifierから推測しない。
+                    taskCellularPolicies[identifier] = .unknown
+                }
                 tasks[identifier] = aggregate
                 adopted.insert(identifier)
             }
@@ -259,6 +285,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     private func complete(programID: String, outcome: AssetDownloadOutcome) {
         let location = locations[programID]
         tasks[programID] = nil
+        taskCellularPolicies[programID] = nil
         locations[programID] = nil
         switch outcome {
         case .cancelled:
@@ -326,8 +353,8 @@ struct DownloadPersistedRecord: Codable, Equatable {
 /// Owns every offline copy and the offline-playback lookup.
 @MainActor
 final class DownloadCenter: ObservableObject {
-    /// Why a start request could not be accepted. Shown inline by the library
-    /// screen rather than through an alert.
+    /// Why a start/resume request could not be accepted. The initiating UI
+    /// consumes its own refusal; Library handles any unconsumed fallback.
     struct Rejection: Equatable, Identifiable, Sendable {
         let programID: String
         let message: String
@@ -335,6 +362,8 @@ final class DownloadCenter: ObservableObject {
         var recovery: String?
         /// Wi-Fi制限で止めたときだけ「今回だけ進める」を提示する。
         var canRetryOnCellular = false
+        /// 「再開」の同意では足りず、部分データ削除と最初からの取得への同意が必要。
+        var requiresRestartOnCellular = false
         /// やり直しの導線をお知らせから直接押せるようにしておく。
         var program: TVerProgram?
         var id: String { programID }
@@ -471,6 +500,7 @@ final class DownloadCenter: ObservableObject {
         lastRejection = nil
         interruptedIDs.remove(program.id)
         dismissNotice(Self.failureNoticeID(program.id))
+        dismissNotice("download.resume.waiting." + program.id)
         upsert(program: program, state: .queued)
 
         let allowsCellularAccess = !wifiOnly || allowingCellular
@@ -507,33 +537,34 @@ final class DownloadCenter: ObservableObject {
 
     /// 一時停止からの再開。
     ///
-    /// 拾い直せなかった転送はここで無言に行き止まるのではなく、最初からやり直す。
-    /// Wi-Fi限定の判定も、開始時だけでなく再開時にも必ず通す。
+    /// 再開は既存データを維持する操作。タスク消失や通信条件の変更を理由に、
+    /// resumeの同意だけで破壊的なrestartへ切り替えない。
     func resume(_ programID: String, allowingCellular: Bool = false) {
         guard case let .paused(progress) = state(for: programID) else { return }
         guard let record = records.first(where: { entry in entry.id == programID }) else { return }
-
-        if interruptedIDs.contains(programID) {
-            restart(record.program, allowingCellular: allowingCellular)
-            return
-        }
-
-        // ドライバがタスクを握っていない行は、再開しても進捗が二度と来ない。
-        // 「ダウンロード中 0%」で固まる代わりに、最初からやり直す。
-        guard driver.hasTask(programID: programID) else {
-            interruptedIDs.insert(programID)
-            restart(record.program, allowingCellular: allowingCellular)
-            return
-        }
-
-        if let rejection = cellularRejection(for: record.program, allowingCellular: allowingCellular) {
+        if !driver.hasTask(programID: programID) { interruptedIDs.insert(programID) }
+        if let rejection = resumeRejection(for: record.program, allowingCellular: allowingCellular) {
             lastRejection = rejection
             return
         }
 
         lastRejection = nil
+        dismissNotice("download.resume.waiting." + programID)
         driver.resume(programID: programID)
         update(programID, to: .downloading(progress: progress))
+    }
+
+    /// 部分データを捨てることまで明示的に同意したUI専用。Boolは要求を実行したか。
+    /// 同意中にqueued/running/savedへ変わった古い対象は何もしない。
+    @discardableResult
+    func restartAfterCellularConsent(_ program: TVerProgram) -> Bool {
+        switch state(for: program.id) {
+        case .paused, .failed:
+            restart(program, allowingCellular: true)
+            return true
+        case .notDownloaded, .queued, .downloading, .downloaded:
+            return false
+        }
     }
 
     func cancel(_ programID: String) {
@@ -542,6 +573,7 @@ final class DownloadCenter: ObservableObject {
         driver.cancel(programID: programID)
         interruptedIDs.remove(programID)
         dismissNotice(Self.failureNoticeID(programID))
+        dismissNotice("download.resume.waiting." + programID)
         guard let index = records.firstIndex(where: { record in record.id == programID }) else {
             return
         }
@@ -559,6 +591,7 @@ final class DownloadCenter: ObservableObject {
         driver.cancel(programID: programID)
         interruptedIDs.remove(programID)
         dismissNotice(Self.failureNoticeID(programID))
+        dismissNotice("download.resume.waiting." + programID)
         removeStoredAsset(for: programID)
         records.removeAll { record in record.id == programID }
         persistRecords()
@@ -587,6 +620,7 @@ final class DownloadCenter: ObservableObject {
         interruptedIDs.remove(programID)
         pendingAutoResumeIDs.remove(programID)
         dismissNotice(Self.failureNoticeID(programID))
+        dismissNotice("download.resume.waiting." + programID)
         records.removeAll { entry in entry.id == programID }
         persistRecords()
 
@@ -669,17 +703,21 @@ final class DownloadCenter: ObservableObject {
 
     /// Wi-Fi制限で止めた分を、今回だけモバイル通信で進める。
     ///
-    /// 続きから戻せない行は `resume()` が弾いてしまう。その場合はやり直しに
-    /// 回して、押しても何も起きないボタンを残さない。
+    /// 続きから戻せない行はデータを保持したまま理由を返す。
+    /// 破壊的なやり直しには、別の明示的な同意が必要。
     func resumeAllAllowingCellular(_ programIDs: [String]) {
         for programID in programIDs {
             guard let record = records.first(where: { entry in entry.id == programID }) else {
                 continue
             }
-            if case .paused = record.state {
+            switch record.state {
+            case .paused:
                 resume(programID, allowingCellular: true)
-            } else if !record.state.isFinished {
-                restart(record.program, allowingCellular: true)
+            case .failed:
+                // 「続ける」の同意を失敗後の破壊的なやり直しへ流用しない。
+                lastRejection = restartRequiredRejection(for: record.program)
+            case .notDownloaded, .queued, .downloading, .downloaded:
+                continue
             }
         }
     }
@@ -734,6 +772,45 @@ final class DownloadCenter: ObservableObject {
     }
 
     // MARK: - Wi-Fi restriction
+
+    private func restartRequiredRejection(for program: TVerProgram) -> Rejection {
+        let onCellular = networkStatus() == .cellular
+        return Rejection(
+            programID: program.id,
+            message: "続きから再開できる転送がありません。途中までのデータは保持しています。",
+            recovery: "番組の「最初からやり直す」を選び、途中データの削除を確認してから再試行してください。",
+            canRetryOnCellular: onCellular,
+            requiresRestartOnCellular: onCellular,
+            program: program
+        )
+    }
+
+    /// アプリ設定のoverrideは、作成済みAVタスクの通信条件を変更しない。
+    /// SDKの正式なAPIにそのsetterは無いため、保持してWi-Fi待ちを既定にする。
+    private func resumeRejection(for program: TVerProgram, allowingCellular: Bool) -> Rejection? {
+        if interruptedIDs.contains(program.id) || !driver.hasTask(programID: program.id) {
+            return restartRequiredRejection(for: program)
+        }
+        if networkStatus() == .unavailable {
+            return Rejection(
+                programID: program.id,
+                message: "オフラインのためダウンロードを再開できません。途中までのデータは保持しています。",
+                recovery: "Wi-Fiなどの接続が戻ってから、もう一度再開してください。",
+                program: program
+            )
+        }
+        if networkStatus() == .cellular, driver.cellularPolicy(programID: program.id) != .allowed {
+            return Rejection(
+                programID: program.id,
+                message: "この転送の通信条件では、モバイル通信で続きから再開できません。途中までのデータは保持しています。",
+                recovery: "Wi-Fiに接続してから再開してください。今すぐモバイル通信を使う場合は、途中データを削除して最初からやり直す必要があります。",
+                canRetryOnCellular: true,
+                requiresRestartOnCellular: true,
+                program: program
+            )
+        }
+        return cellularRejection(for: program, allowingCellular: allowingCellular)
+    }
 
     /// `start()` が受け付けない理由と、返すべき結果。
     ///
@@ -812,9 +889,9 @@ final class DownloadCenter: ObservableObject {
             restartRequired += 1
         }
 
-        var recovery = "Wi-Fiに接続すると続きから進みます。"
+        var recovery = "Wi-Fiに接続してから番組の再開ボタンを押してください。"
         if restartRequired > 0 {
-            recovery += "このうち\(restartRequired)件はまだ受け取りが始まっていないため、最初からやり直します。"
+            recovery += "このうち\(restartRequired)件は続きから再開できないため、最初からやり直す確認が必要です。"
         }
         post(DownloadNotice(
             id: "download.wifiOnly.enforced",
@@ -956,7 +1033,14 @@ final class DownloadCenter: ObservableObject {
             }
             interruptedIDs.remove(programID)
             guard pendingAutoResumeIDs.contains(programID) else { continue }
-            guard cellularRejection(for: record.program, allowingCellular: false) == nil else {
+            if let rejection = resumeRejection(for: record.program, allowingCellular: false) {
+                driver.pause(programID: programID)
+                post(DownloadNotice(
+                    id: "download.resume.waiting." + programID,
+                    kind: .info,
+                    message: rejection.message,
+                    recovery: rejection.recovery
+                ))
                 continue
             }
             driver.resume(programID: programID)
