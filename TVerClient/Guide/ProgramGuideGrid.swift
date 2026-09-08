@@ -451,6 +451,42 @@ private struct GuideCanvasColumn: Identifiable {
     var id: String { column.id }
 }
 
+/// Shared horizontal geometry for cells and the current-time rule. The rule
+/// occupies gutters only: translucent live/paused/dimmed cards cannot expose a
+/// red line behind their title, detail or badge, regardless of its vertical Y.
+enum GuideCanvasVisualLayout {
+    static let slotHorizontalInset: CGFloat = 3
+    static let nowRuleHeight: CGFloat = 1
+    static let nowDotDiameter: CGFloat = 7
+    static let nowDotOffsetX = slotHorizontalInset - nowDotDiameter
+
+    static func programFrame(column: Int, y: CGFloat, height: CGFloat) -> CGRect {
+        CGRect(
+            x: ProgramGuideMetrics.xPosition(forColumn: column) + slotHorizontalInset,
+            y: y,
+            width: ProgramGuideMetrics.stationWidth - 2 * slotHorizontalInset,
+            height: height
+        )
+    }
+
+    static func nowRuleSegments(visibleColumns: [Int], contentWidth: CGFloat) -> [CGRect] {
+        guard contentWidth.isFinite, contentWidth > 0 else { return [] }
+        let bounds = CGRect(x: 0, y: 0, width: contentWidth, height: nowRuleHeight)
+        return Set(visibleColumns).sorted().filter { $0 >= 0 }.flatMap { column -> [CGRect] in
+            let x = ProgramGuideMetrics.xPosition(forColumn: column)
+            let gutters = [
+                CGRect(x: x, y: 0, width: slotHorizontalInset, height: nowRuleHeight),
+                CGRect(x: x + ProgramGuideMetrics.stationWidth - slotHorizontalInset,
+                       y: 0, width: slotHorizontalInset, height: nowRuleHeight)
+            ]
+            return gutters.compactMap { gutter in
+                let clipped = gutter.intersection(bounds)
+                return clipped.isEmpty ? nil : clipped
+            }
+        }
+    }
+}
+
 /// Absolutely positioned slots for one day, drawn at the current zoom.
 ///
 /// `Equatable` なのは意図的。親はスクロールのたびに body を見直すので、
@@ -505,8 +541,9 @@ struct ProgramGuideCanvas: View, Equatable {
             Color(uiColor: .systemBackground)
             columnBackgrounds
             gridLines
-            programs
+            // The marker is noninteractive and behind cells as an extra safeguard.
             currentTimeLine
+            programs
         }
         .frame(width: width, height: height)
     }
@@ -555,6 +592,9 @@ struct ProgramGuideCanvas: View, Equatable {
         ForEach(visibleColumns) { entry in
             ForEach(visibleFrames(in: entry.column)) { frame in
                 let state = state(for: entry.column.channel, program: frame.program)
+                let rect = GuideCanvasVisualLayout.programFrame(
+                    column: entry.index, y: frame.y, height: frame.height
+                )
                 ProgramGuideBlock(
                     stationName: entry.column.channel.name,
                     program: frame.program,
@@ -563,11 +603,8 @@ struct ProgramGuideCanvas: View, Equatable {
                 ) {
                     onSelect(entry.column.channel, frame.program, state)
                 }
-                .frame(width: ProgramGuideMetrics.stationWidth - 6, height: frame.height)
-                .offset(
-                    x: ProgramGuideMetrics.xPosition(forColumn: entry.index) + 3,
-                    y: frame.y
-                )
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
             }
         }
     }
@@ -575,12 +612,23 @@ struct ProgramGuideCanvas: View, Equatable {
     @ViewBuilder
     private var currentTimeLine: some View {
         if let nowLineY {
+            let segments = GuideCanvasVisualLayout.nowRuleSegments(
+                visibleColumns: visibleColumns.map(\.index), contentWidth: width
+            )
             ZStack(alignment: .leading) {
-                Rectangle().fill(DS.Palette.live).frame(width: width, height: 1)
-                Circle().fill(DS.Palette.live).frame(width: 7, height: 7).offset(x: -3)
+                Path { path in
+                    for segment in segments { path.addRect(segment) }
+                }
+                .fill(DS.Palette.live)
+                .frame(width: width, height: GuideCanvasVisualLayout.nowRuleHeight)
+                Circle().fill(DS.Palette.live)
+                    .frame(width: GuideCanvasVisualLayout.nowDotDiameter,
+                           height: GuideCanvasVisualLayout.nowDotDiameter)
+                    .offset(x: GuideCanvasVisualLayout.nowDotOffsetX)
             }
             .offset(y: nowLineY)
             .accessibilityHidden(true)
+            .allowsHitTesting(false)
         }
     }
 
