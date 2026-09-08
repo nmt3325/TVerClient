@@ -610,7 +610,7 @@ struct PlayerOverlayControls: View {
             Text(ScrubberMath.formattedTime(playbackController.currentTime))
                 .fixedSize()
                 .background(PlayerFooterLayoutProbe(element: .elapsedTime).allowsHitTesting(false))
-            Spacer(minLength: 0)
+            Spacer(minLength: DS.Spacing.s)
             Text(
                 ScrubberMath.remainingText(
                     elapsed: playbackController.currentTime,
