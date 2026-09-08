@@ -120,6 +120,7 @@ struct PlayerOverlayControls: View {
     var onBackgroundSingleTap: () -> Void = {}
     var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
     @State private var showsFailureDetails = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     // Keep the existing call surface independent from private presentation state.
     init(
@@ -157,7 +158,8 @@ struct PlayerOverlayControls: View {
             let layout = PlayerControlLayout(
                 availableWidth: proxy.size.width - chromeInsets.leading - chromeInsets.trailing,
                 availableHeight: proxy.size.height - chromeInsets.top - chromeInsets.bottom,
-                isFullScreen: isFullScreen
+                isFullScreen: isFullScreen,
+                hasLargeText: dynamicTypeSize.isAccessibilitySize
             )
             ZStack {
                 PlayerScrim()
@@ -175,6 +177,7 @@ struct PlayerOverlayControls: View {
                     }
             }
         }
+        .background(PlayerFooterLayoutProbe(element: .surface).allowsHitTesting(false))
         .tint(.white)
         .foregroundStyle(.white)
         .sheet(isPresented: $showsFailureDetails) {
@@ -201,27 +204,35 @@ struct PlayerOverlayControls: View {
     }
 
     private func controlStack(layout: PlayerControlLayout) -> some View {
-        VStack(spacing: 0) {
-            topBar(separatesTitle: layout.separatesTitle)
+        let mergesPrimary = layout.mergesPrimaryIntoHeader
+            && !(showsContinuityNotice && playbackController.continuityNotice != nil)
+        return VStack(spacing: 0) {
+            topBar(layout: layout, mergesPrimary: mergesPrimary)
                 .accessibilitySortPriority(4)
-            Spacer(minLength: layout.compactTransport ? 0 : DS.Spacing.s)
-            // 停止理由と回復ボタンがあるときは、無意味な再生ボタンを重ねない。
-            if showsContinuityNotice, playbackController.continuityNotice != nil {
-                continuityBanner
-                    .accessibilitySortPriority(3)
-            } else if playbackController.errorPresentation != nil {
-                failureRecoveryRow
-                    .accessibilitySortPriority(3)
-            } else {
-                transportRow(layout: layout)
-                    .accessibilitySortPriority(2)
-            }
-            Spacer(minLength: layout.compactTransport ? 0 : DS.Spacing.s)
+            Spacer(minLength: layout.prioritizesFooter ? 0 : DS.Spacing.s)
+            if !mergesPrimary { primaryControls(layout: layout) }
+            Spacer(minLength: layout.prioritizesFooter ? 0 : DS.Spacing.s)
             bottomBar
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
                 .accessibilitySortPriority(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
         .padding(chromeInsets)
+    }
+
+    @ViewBuilder
+    private func primaryControls(layout: PlayerControlLayout) -> some View {
+        // Recovery still replaces transport and uses the same Button closures.
+        if showsContinuityNotice, playbackController.continuityNotice != nil {
+            continuityBanner.accessibilitySortPriority(3)
+        } else if playbackController.errorPresentation != nil {
+            failureRecoveryRow(compact: layout.condensesSupportingText)
+                .accessibilitySortPriority(3)
+        } else {
+            transportRow(layout: layout).accessibilitySortPriority(2)
+        }
     }
 
     /// 固定の余白と安全領域の大きいほうを採る。横向きではノッチ側だけ
@@ -239,7 +250,7 @@ struct PlayerOverlayControls: View {
 
     // MARK: - Top
 
-    private func topBar(separatesTitle: Bool) -> some View {
+    private func topBar(layout: PlayerControlLayout, mergesPrimary: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: DS.Spacing.xs) {
                 if isFullScreen {
@@ -248,9 +259,11 @@ struct PlayerOverlayControls: View {
                         label: "全画面を閉じる",
                         identifier: PlaybackAccessibilityIdentifier.fullScreenExit
                     ) { onToggleFullScreen?() }
-                    if !separatesTitle { titleStack }
+                    .background(PlayerFooterLayoutProbe(element: .fullScreenClose).allowsHitTesting(false))
+                    if !layout.separatesTitle && !layout.condensesSupportingText { titleStack }
                 }
                 Spacer(minLength: 0)
+                if mergesPrimary { primaryControls(layout: layout) }
                 if isFullScreen {
                     PlayerIconButton(
                         systemImage: model.videoGravitySystemImage,
@@ -263,9 +276,9 @@ struct PlayerOverlayControls: View {
                     .accessibilityLabel("AirPlay")
                     .playerControlHitRegion()
                 pictureInPictureButton
-                settingsMenu
+                settingsMenu(includesProgramTitle: layout.condensesSupportingText)
             }
-            if separatesTitle { titleStack }
+            if layout.separatesTitle { titleStack }
         }
     }
 
@@ -306,8 +319,14 @@ struct PlayerOverlayControls: View {
         }
     }
 
-    private var settingsMenu: some View {
+    private func settingsMenu(includesProgramTitle: Bool) -> some View {
         Menu {
+            if includesProgramTitle {
+                Section("再生中") {
+                    Text(title)
+                    if let subtitle, !subtitle.isEmpty { Text(subtitle) }
+                }
+            }
             Picker("再生速度", selection: speedBinding) {
                 ForEach(PlaybackSpeed.allCases) { speed in
                     Text(speed.title).tag(speed)
@@ -433,30 +452,43 @@ struct PlayerOverlayControls: View {
         showsFailureDetails = true
     }
 
-    private var failureRecoveryRow: some View {
+    private func failureRecoveryRow(compact: Bool) -> some View {
         HStack(spacing: DS.Spacing.s) {
-            Text(playbackController.errorPresentation?.title ?? "再生できませんでした")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // The existing detail sheet keeps the complete explanation. On a
+            // short accessibility surface it must not compete with the footer.
+            if !compact {
+                Text(playbackController.errorPresentation?.title ?? "再生できませんでした")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             PlayerIconButton(systemImage: "info.circle", label: "再生エラーの詳細", action: openFailureDetails)
             .background(PlayerControlHitTarget(
                 identifier: PlayerControlHitTargetView.failureDetailsIdentifier,
                 isEnabled: model.areControlsVisible, action: openFailureDetails
             ))
             Button(action: activateFailureRecovery) {
-                Label(primaryAction.title, systemImage: primaryAction.systemImage)
-                    .font(.subheadline.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, DS.Spacing.s)
-                    .frame(minHeight: DS.Size.minimumTapTarget)
-                    .background(Color.white.opacity(0.22), in: Capsule())
-                    .contentShape(Capsule())
+                Group {
+                    if compact {
+                        Image(systemName: primaryAction.systemImage)
+                            .font(.system(size: 20, weight: .semibold))
+                            .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
+                    } else {
+                        Label(primaryAction.title, systemImage: primaryAction.systemImage)
+                            .font(.subheadline.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, DS.Spacing.s)
+                            .frame(minHeight: DS.Size.minimumTapTarget)
+                    }
+                }
+                .background(Color.white.opacity(0.22), in: Capsule())
+                .contentShape(Capsule())
             }
             // A bordered style adds padding outside the 44pt label and can
             // overflow the 180pt stage; own that background inside the target.
             .buttonStyle(.plain)
             .disabled(!primaryAction.isEnabled)
+            .accessibilityLabel(primaryAction.title)
             .accessibilityHint("現在の番組の再生をもう一度試します")
             .playerControlHitRegion()
             .background(PlayerControlHitTarget(
@@ -567,6 +599,8 @@ struct PlayerOverlayControls: View {
     private var timeLabels: some View {
         HStack {
             Text(ScrubberMath.formattedTime(playbackController.currentTime))
+                .fixedSize()
+                .background(PlayerFooterLayoutProbe(element: .elapsedTime).allowsHitTesting(false))
             Spacer(minLength: 0)
             Text(
                 ScrubberMath.remainingText(
@@ -574,6 +608,8 @@ struct PlayerOverlayControls: View {
                     duration: playbackController.duration ?? 0
                 )
             )
+            .fixedSize()
+            .background(PlayerFooterLayoutProbe(element: .remainingTime).allowsHitTesting(false))
         }
         .font(.subheadline.monospacedDigit())
         .foregroundStyle(.white.opacity(0.8))

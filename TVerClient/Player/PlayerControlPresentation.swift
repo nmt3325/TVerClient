@@ -6,10 +6,18 @@ import Foundation
 struct PlayerControlLayout: Equatable {
     let compactTransport: Bool
     let separatesTitle: Bool
+    let prioritizesFooter: Bool
+    let condensesSupportingText: Bool
+    let mergesPrimaryIntoHeader: Bool
 
-    init(availableWidth: CGFloat, availableHeight: CGFloat, isFullScreen: Bool) {
-        compactTransport = availableHeight < 220
+    init(availableWidth: CGFloat, availableHeight: CGFloat, isFullScreen: Bool, hasLargeText: Bool = false) {
+        prioritizesFooter = availableHeight < 260
+        condensesSupportingText = prioritizesFooter && hasLargeText
+        compactTransport = availableHeight < 220 || condensesSupportingText
         separatesTitle = isFullScreen && availableWidth < 500 && availableHeight >= 280
+        // Five 44pt utilities plus compact transport and gaps fit in this
+        // width. Reuse that row instead of shrinking large time labels.
+        mergesPrimaryIntoHeader = isFullScreen && condensesSupportingText && availableWidth >= 480
     }
 
     var skipDiameter: CGFloat { compactTransport ? 44 : 52 }
