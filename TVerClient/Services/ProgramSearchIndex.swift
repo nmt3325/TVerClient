@@ -42,6 +42,14 @@ struct ProgramSearchEntry: Identifiable, Hashable, Codable, Sendable {
         self.isFavorite = isFavorite
     }
 
+    /// 見逃し・ライブラリはシリーズ名が主見出し。画面と同じ見出しで並べる。
+    var displayTitle: String {
+        guard source != .programGuide,
+              !seriesTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return title }
+        return seriesTitle
+    }
+
     func isOnAir(at date: Date) -> Bool {
         guard let startAt, let endAt, startAt < endAt else { return false }
         return startAt <= date && date < endAt
@@ -124,6 +132,25 @@ enum ProgramSearchSort: String, CaseIterable, Sendable {
 }
 
 enum ProgramSearchResultMapping {
+    /// 検索中と通常の一覧で同じ番組を一度だけ表示する。
+    /// 同じ日付のページもまとめ、SwiftUI の行・セクションIDを一意に保つ。
+    static func uniqueVideoOnDemandDays(_ days: [ProgramDay]) -> [ProgramDay] {
+        var seen = Set<String>()
+        var dayIndices: [Date: Int] = [:]
+        var result: [ProgramDay] = []
+        for day in days {
+            let programs = day.programs.filter { seen.insert($0.id).inserted }
+            guard !programs.isEmpty else { continue }
+            if let index = dayIndices[day.date] {
+                result[index].programs.append(contentsOf: programs)
+            } else {
+                dayIndices[day.date] = result.count
+                result.append(ProgramDay(date: day.date, programs: programs))
+            }
+        }
+        return result
+    }
+
     static func videoOnDemandPrograms(
         _ entries: [ProgramSearchEntry],
         in days: [ProgramDay]
@@ -231,7 +258,7 @@ struct ProgramSearchIndex: Sendable {
         _ days: [ProgramDay],
         favoriteProgramIDs: Set<String> = []
     ) -> ProgramSearchIndex {
-        ProgramSearchIndex(entries: days.flatMap { day in
+        ProgramSearchIndex(entries: ProgramSearchResultMapping.uniqueVideoOnDemandDays(days).flatMap { day in
             day.programs.map { program in
                 ProgramSearchEntry(
                     id: "vod:\(program.id)",
@@ -284,7 +311,11 @@ struct ProgramSearchIndex: Sendable {
                     return lhs.sourceOrder < rhs.sourceOrder
                 }
             case .title:
-                let comparison = lhs.entry.title.localizedCompare(rhs.entry.title)
+                let comparison = lhs.entry.displayTitle.compare(
+                    rhs.entry.displayTitle,
+                    options: [.numeric, .caseInsensitive, .widthInsensitive],
+                    locale: Locale(identifier: "ja_JP")
+                )
                 if comparison != .orderedSame {
                     return comparison == .orderedAscending
                 }
