@@ -1,0 +1,12 @@
+{
+  "source_commit": "0f87b543b47ec97f98e0dc83de40d3d62626db58",
+  "synthetic_fixture_data": true,
+  "pixel_review": "pending",
+  "images": {
+    "shared-row-presence-320-accessibility.png": "9f47552a3f4b561226f1edf72d35b3ed5cc13a151778ffc2fb28984e50d86c0f",
+    "player-failed-fullscreen-640-accessibility5.png": "b9b58de79636a26c1b18bd4cfcb4b91997463d40a8ca873160815725db7d1ac3",
+    "library-saved-320-accessibility5.png": "0ec0ab556712dbad6500e8eb0741092c687713aab0259a37fbee4ce06e54d964",
+    "guide-grid-375-light.png": "0ad30adafa4d4c37a4f8de9a950e28e0a2dd22b4d7c743c6edb1267e892b594d",
+    "guide-320-accessibility5-list-fallback.png": "89f65ae3627a5ad1314900c2fefea95e7dec2f3c8848d6357a996a6f47d9c726"
+  }
+}
