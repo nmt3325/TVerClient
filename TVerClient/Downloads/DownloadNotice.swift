@@ -26,6 +26,13 @@ struct DownloadNotice: Identifiable, Equatable, Sendable {
         /// Wi-Fi制限で止めた分を、今回だけモバイル通信で進める。
         case resumeOnCellular(programIDs: [String], label: String)
 
+        /// The normal button and context menu share this exact confirmation-preparation path.
+        @MainActor
+        func prepareRestart(on center: DownloadCenter) -> DownloadNoticeRestartRequest? {
+            guard case let .restart(programIDs, _) = self else { return nil }
+            return center.noticeRestartRequest(programIDs: programIDs)
+        }
+
         var label: String? {
             switch self {
             case .none:
@@ -43,6 +50,32 @@ struct DownloadNotice: Identifiable, Equatable, Sendable {
     let message: String
     var recovery: String?
     var action: Action = .none
+}
+
+/// One-shot approval for the exact records described by the notice confirmation, not a reusable ID list.
+@MainActor
+final class DownloadNoticeRestartRequest {
+    private let targets: [DownloadRecord]
+    private var consumed = false
+
+    init(targets: [DownloadRecord]) { self.targets = targets }
+
+    var programIDs: [String] { targets.map(\.id) }
+
+    var confirmation: DownloadConfirmation {
+        DownloadConfirmation(
+            target: .restartDownload, subject: "\(targets.count)件",
+            restartItems: targets.map { "\(DownloadCenter.displayTitle($0.program))（ID: \($0.id)）" }
+        )
+    }
+
+    func perform(on center: DownloadCenter) {
+        guard !consumed else { return }
+        consumed = true
+        // Even another paused/failed attempt needs fresh consent; updatedAt/state must still match.
+        let currentIDs = targets.filter { target in center.records.contains(target) }.map(\.id)
+        center.restartAll(currentIDs)
+    }
 }
 
 /// `localizedDescription` の生出しをやめ、原因と次の一手に言い換える。

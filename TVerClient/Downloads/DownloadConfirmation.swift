@@ -59,11 +59,14 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
     /// 何に対する操作か。番組名、または「12件」のような数量。
     let subject: String
     let selectionKind: SelectionKind?
+    /// Notice-only exact subjects, including IDs. Empty preserves every existing caller's copy.
+    let restartItems: [String]
 
-    init(target: Target, subject: String, selectionKind: SelectionKind? = nil) {
+    init(target: Target, subject: String, selectionKind: SelectionKind? = nil, restartItems: [String] = []) {
         self.target = target
         self.subject = subject
         self.selectionKind = selectionKind
+        self.restartItems = restartItems
     }
 
     var id: String { "\(target.rawValue):\(selectionKind?.rawValue ?? ""):\(subject)" }
@@ -78,6 +81,7 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .runningDownload:
             return "「\(subject)」の\(Vocabulary.Download.action)を中止しますか？"
         case .restartDownload:
+            if !restartItems.isEmpty { return "\(restartItems.count)件を最初からやり直しますか？" }
             return "「\(subject)」を最初からやり直しますか？"
         case .favorite:
             return "「\(subject)」を\(Vocabulary.Library.favorites)から外しますか？"
@@ -108,6 +112,11 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .runningDownload:
             return "途中まで受け取ったデータを削除します。もう一度\(Vocabulary.Download.action)すると最初からやり直しになります。"
         case .restartDownload:
+            if !restartItems.isEmpty {
+                return "対象：\n" + restartItems.joined(separator: "\n")
+                    + "\n\nこの\(restartItems.count)件の途中までのデータを削除し、最初からダウンロードし直します。"
+                    + "確認中に状態が変わった番組は処理しません。保存済みの動画と進行中・順番待ちの転送は残ります。Wi-Fi設定は変更しません。"
+            }
             return "続きから再開できる転送が残っていません。途中まで受け取ったデータを削除し、最初から\(Vocabulary.Download.action)し直します。"
         case .favorite:
             return "\(Vocabulary.Library.favorites)から外すだけです。\(Vocabulary.Library.downloads)の動画と\(Vocabulary.Library.history)は残ります。"
@@ -131,6 +140,7 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         case .runningDownload:
             return Vocabulary.Download.cancel
         case .restartDownload:
+            if !restartItems.isEmpty { return "この\(restartItems.count)件を最初からやり直す" }
             return "最初からやり直す"
         case .favorite:
             return "\(Vocabulary.Library.favorites)から外す"
