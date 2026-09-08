@@ -141,6 +141,7 @@ final class ProgramGuideViewModel: ObservableObject {
 }
 
 struct ProgramGuideView: View {
+    @EnvironmentObject private var catchUpAvailability: CatchUpAvailabilityStore
     @StateObject private var viewModel: ProgramGuideViewModel
     @ObservedObject private var playbackController: PlaybackController
     @ObservedObject private var libraryStore: ProgramLibraryStore
@@ -237,7 +238,8 @@ struct ProgramGuideView: View {
                 playbackController: playbackController,
                 libraryStore: libraryStore,
                 notificationScheduler: notificationScheduler,
-                catchUpLookup: catchUpLookup
+                catchUpLookup: catchUpLookup,
+                availabilityStore: catchUpAvailability
             )
             .presentationDetents([.medium, .large])
         }
@@ -512,7 +514,7 @@ struct ProgramGuideView: View {
 struct ProgramGuideSelection: Identifiable {
     let channel: TVerLiveChannel
     let program: TVerLiveProgram
-    /// 見逃し配信の状態。再生だけを止めるために詳細まで持ち回す。
+    /// Selection-time hint only. Details read the observed store and its TTL instead.
     let availability: CatchUpAvailability
 
     init(
@@ -530,21 +532,23 @@ struct ProgramGuideSelection: Identifiable {
     }
 }
 
-private struct ProgramGuideDetailSheet: View {
+@MainActor
+struct ProgramGuideDetailSheet: View {
     let selection: ProgramGuideSelection
     @ObservedObject var playbackController: PlaybackController
     @ObservedObject var libraryStore: ProgramLibraryStore
     let notificationScheduler: ProgramNotificationScheduler
-    let catchUpLookup: GuideCatchUpLookup
-    @StateObject private var pictureInPicture = PictureInPictureCoordinator()
+    @ObservedObject private var availabilityStore: CatchUpAvailabilityStore
+    @StateObject private var playback: GuideDetailsPlaybackModel
+    @StateObject private var pictureInPicture: PictureInPictureCoordinator
+    private let rendersVideoLayer: Bool
     /// 埋め込み再生の操作面。標準の再生画面と同じ部品を使う。
     @StateObject private var playerChrome = PlayerChromeModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @State private var requestedPlayback = false
-    @State private var currentDate = Date()
-    @State private var catchUpState: GuideCatchUpState = .idle
-    @State private var catchUpPlayback: TVerProgram?
+    private var requestedPlayback: Bool { playback.requestedPlayback }
+    private var currentDate: Date { playback.currentDate }
+    private var catchUpState: GuideCatchUpState { playback.catchUpState }
     @State private var selectedLeadTime: ProgramNotificationLeadTime
     @State private var isNotificationScheduled = false
     @State private var isUpdatingNotification = false
@@ -557,22 +561,31 @@ private struct ProgramGuideDetailSheet: View {
         playbackController: PlaybackController,
         libraryStore: ProgramLibraryStore,
         notificationScheduler: ProgramNotificationScheduler,
-        catchUpLookup: GuideCatchUpLookup
+        catchUpLookup: GuideCatchUpLookup,
+        availabilityStore: CatchUpAvailabilityStore,
+        now: @escaping () -> Date = Date.init,
+        playbackModel: GuideDetailsPlaybackModel? = nil,
+        pictureInPicture: PictureInPictureCoordinator? = nil,
+        rendersVideoLayer: Bool = true
     ) {
         self.selection = selection
         self.playbackController = playbackController
         self.libraryStore = libraryStore
         self.notificationScheduler = notificationScheduler
-        self.catchUpLookup = catchUpLookup
+        self.availabilityStore = availabilityStore
+        _playback = StateObject(wrappedValue: playbackModel ?? GuideDetailsPlaybackModel(
+            selection: selection, controller: playbackController,
+            availabilityStore: availabilityStore, lookup: catchUpLookup, now: now
+        ))
+        _pictureInPicture = StateObject(wrappedValue: pictureInPicture ?? PictureInPictureCoordinator())
+        self.rendersVideoLayer = rendersVideoLayer
         let preferredLeadTime: ProgramNotificationLeadTime = selection.program.startAt
-            .addingTimeInterval(-ProgramNotificationLeadTime.fiveMinutes.rawValue) > Date()
+            .addingTimeInterval(-ProgramNotificationLeadTime.fiveMinutes.rawValue) > now()
             ? .fiveMinutes : .atStart
         _selectedLeadTime = State(initialValue: preferredLeadTime)
     }
 
-    private var route: GuidePlaybackRoute {
-        GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state, now: currentDate)
-    }
+    private var route: GuidePlaybackRoute { playback.route }
 
     private var canPlay: Bool { route == .live }
 
@@ -596,7 +609,7 @@ private struct ProgramGuideDetailSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if requestedPlayback {
+                    if requestedPlayback, route == .live, isCurrent {
                         // ライブなのでシークは出さない。PiP は PlayerStage の重なり側にある。
                         PlayerStage(
                             playbackController: playbackController,
@@ -605,7 +618,8 @@ private struct ProgramGuideDetailSheet: View {
                             title: selection.program.seriesTitle,
                             subtitle: selection.channel.name,
                             accessibilityLabel: "\(selection.program.seriesTitle)のライブ動画プレイヤー",
-                            supportsSeeking: false
+                            supportsSeeking: false,
+                            rendersVideoLayer: rendersVideoLayer
                         )
                         .frame(maxWidth: .infinity)
                         .aspectRatio(16 / 9, contentMode: .fit)
@@ -658,13 +672,14 @@ private struct ProgramGuideDetailSheet: View {
                             .accessibilityLabel("この番組の見逃し配信はありません")
                     }
 
-                    if requestedPlayback, isCurrent, let presentation = playbackController.errorPresentation {
+                    if let presentation = playback.failurePresentation {
                         PlaybackFailureView(presentation: presentation, officialURL: selection.channel.webURL) {
-                            Task { await playbackController.playLive(playbackChannel) }
+                            playback.requestRetry()
                         }
+                        .accessibilityIdentifier(GuideAccessibilityIdentifier.failureRecovery)
                     } else {
                         Button {
-                            handlePlayAction()
+                            playback.requestPrimaryAction()
                         } label: {
                             if playButtonState.isSearching {
                                 HStack(spacing: 8) {
@@ -723,7 +738,7 @@ private struct ProgramGuideDetailSheet: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
 
-                    if !(requestedPlayback && isCurrent && playbackController.errorPresentation != nil) {
+                    if playback.failurePresentation == nil {
                         Button { openURL(selection.channel.webURL) } label: {
                             Label("TVer公式ライブページで開く", systemImage: "safari")
                                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -747,10 +762,10 @@ private struct ProgramGuideDetailSheet: View {
                 }
             }
         }
-        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { date in
-            currentDate = date
+        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in
+            playback.refreshClock()
         }
-        .sheet(item: $catchUpPlayback) { program in
+        .sheet(item: $playback.catchUpPlayback) { program in
             // 視聴画面は自前のバーを持たないので、シートで出すときはここで包む。
             NavigationStack {
                 PlaybackView(
@@ -763,10 +778,11 @@ private struct ProgramGuideDetailSheet: View {
         .onAppear {
             // ここを結んでおかないと、小窓の「元の画面に戻る」が AVKit へ false を
             // 返し、小窓だけが消えて何も起きない。停止でも小窓が生き残る。
-            currentDate = Date()
+            playback.refreshClock()
             playbackController.bindPictureInPicture(pictureInPicture)
         }
         .onDisappear {
+            playback.cancelPendingAction()
             playbackController.unbindPictureInPicture(pictureInPicture)
         }
     }
@@ -775,7 +791,7 @@ private struct ProgramGuideDetailSheet: View {
     private var hasNothingToPlay: Bool {
         GuideAvailabilityPresentation.hasNothingToPlay(
             isOnAir: canPlay,
-            availability: selection.availability
+            availability: playback.availability
         )
     }
 
@@ -952,19 +968,7 @@ private struct ProgramGuideDetailSheet: View {
         }
     }
 
-    private var playButtonState: GuidePlaybackButtonState {
-        GuidePlaybackButtonState.make(
-            route: route,
-            program: selection.program,
-            catchUpState: catchUpState,
-            isLivePlaybackRequested: requestedPlayback && isCurrent,
-            isLiveResolving: playbackController.state == .resolving,
-            isLivePlaying: playbackController.isPlaying,
-            hasLivePlayerItem: isCurrent && playbackController.player.currentItem != nil,
-            now: currentDate
-        )
-        .reflectingAvailability(selection.availability, route: route, catchUpState: catchUpState)
-    }
+    private var playButtonState: GuidePlaybackButtonState { playback.playButtonState }
 
     private var playButtonHint: String {
         switch route {
@@ -989,46 +993,141 @@ private struct ProgramGuideDetailSheet: View {
         }
     }
 
-    private func handlePlayAction() {
-        // Recheck the boundary at the tap, not just at the last UI clock tick.
-        switch GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state, now: Date()) {
-        case .live:
-            if requestedPlayback, isCurrent, playbackController.player.currentItem != nil {
-                playbackController.togglePlayback()
-            } else {
-                DiagnosticLogStore.shared.record(
-                    .info,
-                    category: "playback",
-                    message: "Guide live playback selected"
-                )
-                requestedPlayback = true
-                Task { await playbackController.playLive(playbackChannel) }
+}
+
+/// The detail sheet's real action owner: expiry, current target and time routing
+/// are evaluated here, not captured in a rendered button or selection snapshot.
+@MainActor
+final class GuideDetailsPlaybackModel: ObservableObject {
+    let selection: ProgramGuideSelection
+    private let controller: PlaybackController
+    private let availabilityStore: CatchUpAvailabilityStore
+    private let lookup: GuideCatchUpLookup
+    private let clock: () -> Date
+    @Published private(set) var currentDate: Date
+    @Published private(set) var requestedPlayback = false
+    @Published private(set) var catchUpState: GuideCatchUpState = .idle
+    @Published var catchUpPlayback: TVerProgram?
+    private var actionTask: Task<Void, Never>?
+    private var actionGeneration = 0
+
+    init(
+        selection: ProgramGuideSelection, controller: PlaybackController,
+        availabilityStore: CatchUpAvailabilityStore, lookup: GuideCatchUpLookup,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.selection = selection
+        self.controller = controller
+        self.availabilityStore = availabilityStore
+        self.lookup = lookup
+        clock = now
+        currentDate = now()
+    }
+
+    deinit { actionTask?.cancel() }
+
+    func refreshClock() { currentDate = clock() }
+
+    var route: GuidePlaybackRoute {
+        GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state, now: currentDate)
+    }
+
+    var isCurrent: Bool { controller.currentLiveChannel?.id == selection.channel.id }
+
+    var availability: CatchUpAvailability {
+        availabilityStore.availability(
+            channelID: selection.channel.id, program: selection.program,
+            channelState: selection.channel.state, now: currentDate
+        )
+    }
+
+    var failurePresentation: TVerErrorPresentation? {
+        guard route == .live, requestedPlayback, isCurrent else { return nil }
+        return controller.errorPresentation
+    }
+
+    var playButtonState: GuidePlaybackButtonState {
+        GuidePlaybackButtonState.make(
+            route: route, program: selection.program, catchUpState: catchUpState,
+            isLivePlaybackRequested: requestedPlayback && isCurrent,
+            isLiveResolving: controller.state == .resolving,
+            isLivePlaying: controller.isPlaying,
+            hasLivePlayerItem: isCurrent && controller.player.currentItem != nil,
+            now: currentDate
+        ).reflectingAvailability(availability, route: route, catchUpState: catchUpState)
+    }
+
+    func requestPrimaryAction() { enqueueAction(isRetry: false) }
+    func requestRetry() { enqueueAction(isRetry: true) }
+
+    func waitForPendingAction() async { await actionTask?.value }
+
+    @discardableResult
+    func cancelPendingAction() -> Task<Void, Never>? {
+        let pending = actionTask
+        actionGeneration += 1
+        pending?.cancel()
+        actionTask = nil
+        if catchUpState == .searching { catchUpState = .idle }
+        return pending
+    }
+
+    private func enqueueAction(isRetry: Bool) {
+        guard actionTask == nil else { return }
+        actionGeneration += 1
+        let generation = actionGeneration
+        actionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.actionGeneration == generation { self.actionTask = nil }
             }
-        case .catchUp:
-            startCatchUpPlayback()
-        case .unavailable:
-            break
+            await self.performAction(isRetry: isRetry)
         }
     }
 
-    private func startCatchUpPlayback() {
-        if case let .found(episode) = catchUpState {
-            catchUpPlayback = episode
-            return
-        }
-        guard catchUpState != .searching else { return }
-        DiagnosticLogStore.shared.record(
-            .info,
-            category: "playback",
-            message: "Guide catch-up playback selected",
-            metadata: ["channel": selection.channel.id, "slot": selection.program.id]
-        )
-        catchUpState = .searching
-        Task {
-            let result = await catchUpLookup.resolve(
-                channelID: selection.channel.id,
-                program: selection.program
+    private func performAction(isRetry: Bool) async {
+        guard !Task.isCancelled else { return }
+        // This runs inside the task: a tap queued just before endAt must not
+        // resolve the next live show, nor recover a different current target.
+        refreshClock()
+        if isRetry && !isCurrent { return }
+        switch route {
+        case .live:
+            if isRetry {
+                guard controller.errorPresentation != nil else { return }
+                await PlayerPrimaryAction.resolve(using: controller).perform(using: controller)
+                return
+            }
+            let wasRequested = requestedPlayback
+            requestedPlayback = true
+            if isCurrent {
+                // Opening an already-playing surface must not pause it.
+                if !wasRequested && controller.isPlaying { return }
+                let action = PlayerPrimaryAction.resolve(using: controller)
+                if action != .unavailable {
+                    await action.perform(using: controller)
+                    return
+                }
+            }
+            let channel = TVerLiveChannel(
+                id: selection.channel.id, name: selection.channel.name,
+                iconURL: selection.channel.iconURL, projectID: selection.channel.projectID,
+                mediaID: selection.channel.mediaID, apiKey: selection.channel.apiKey,
+                currentProgram: selection.program, state: .onAir
             )
+            await controller.playLive(channel)
+        case .catchUp:
+            if case let .found(episode) = catchUpState {
+                catchUpPlayback = episode
+                return
+            }
+            guard catchUpState != .searching else { return }
+            // A fresh negative answer is respected. At its actual ten-minute
+            // expiry the store returns unknown and this same action can search.
+            guard catchUpState != .idle || availability != .unavailable else { return }
+            catchUpState = .searching
+            let result = await lookup.resolve(channelID: selection.channel.id, program: selection.program)
+            guard !Task.isCancelled else { return }
             catchUpState = result
             switch result {
             case let .found(episode):
@@ -1040,6 +1139,8 @@ private struct ProgramGuideDetailSheet: View {
             default:
                 break
             }
+        case .unavailable:
+            break
         }
     }
 }
@@ -1048,6 +1149,7 @@ enum GuideAccessibilityIdentifier {
     static let zoomOut = "guide.zoom.out"
     static let zoomIn = "guide.zoom.in"
     static let playButton = "guide.play.button"
+    static let failureRecovery = "guide.failure.recovery"
     static let catchUpNotFound = "guide.catchup.notfound"
     static let catchUpBadge = "guide.catchup.badge"
     static let offlineBanner = "guide.offline.banner"
