@@ -229,6 +229,58 @@ enum ProgramGuideMetrics {
     }
 }
 
+/// Scheduled pauses must never acquire a live badge merely because the clock is inside their slot.
+enum GuideProgramTimeStatus {
+    static func isOnAir(_ program: TVerLiveProgram, now: Date) -> Bool {
+        !program.isPause && program.startAt <= now && now < program.endAt
+    }
+}
+
+/// Shared by rotation/filter handling and the UIKit scroll bridge.
+enum GuideViewport {
+    static func clampedOffset(_ offset: CGPoint, contentSize: CGSize, viewportSize: CGSize) -> CGPoint {
+        CGPoint(
+            x: min(max(0, offset.x), max(0, contentSize.width - max(0, viewportSize.width))),
+            y: min(max(0, offset.y), max(0, contentSize.height - max(0, viewportSize.height)))
+        )
+    }
+}
+
+/// Filtering must agree with the checkmarks, including stale preferences from older builds.
+enum GuideChannelFilter {
+    static func normalizedHiddenIDs(_ hiddenIDs: Set<String>, channelIDs: Set<String>) -> Set<String> {
+        let knownHiddenIDs = hiddenIDs.intersection(channelIDs)
+        // Older builds allowed every channel to be unchecked while displaying them all.
+        return knownHiddenIDs == channelIDs ? [] : knownHiddenIDs
+    }
+
+    static func toggling(_ channelID: String, hiddenIDs: Set<String>, channelIDs: Set<String>) -> Set<String> {
+        var hidden = normalizedHiddenIDs(hiddenIDs, channelIDs: channelIDs)
+        guard channelIDs.contains(channelID) else { return hidden }
+        if hidden.contains(channelID) {
+            hidden.remove(channelID)
+        } else if channelIDs.subtracting(hidden).count > 1 {
+            hidden.insert(channelID)
+        }
+        return hidden
+    }
+}
+
+/// All date controls use the 05:00 broadcast boundary, never the calendar day.
+enum GuideDayNavigation {
+    static func currentDate(in dates: [Date], now: Date = Date()) -> Date? {
+        dates.first { GuideBroadcastAxis.isSameDay($0, now) }
+    }
+
+    static func adjacentDate(in dates: [Date], to selectedDate: Date, direction: Int) -> Date? {
+        guard direction == -1 || direction == 1,
+              let index = dates.firstIndex(where: { GuideBroadcastAxis.isSameDay($0, selectedDate) })
+        else { return nil }
+        let target = index + direction
+        return dates.indices.contains(target) ? dates[target] : nil
+    }
+}
+
 /// Sanitises the persisted guide density before it reaches layout code.
 /// `UserDefaults` can retain values written by older builds (or non-finite
 /// values written by diagnostics), so every display pass uses this seam and

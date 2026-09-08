@@ -50,6 +50,7 @@ struct ProgramGuideGrid: View {
     @State private var visibleWindow = GuideVisibleWindow.unbounded
     @State private var pinchSession: GuideZoomPinchSession?
     @State private var lastPrefetchKey = ""
+    @State private var hasPositionedInitially = false
 
     private var contentSize: CGSize {
         ProgramGuideMetrics.gridSize(channelCount: guide.count, pointsPerMinute: zoom)
@@ -115,9 +116,22 @@ struct ProgramGuideGrid: View {
                 .onAppear {
                     zoom = GuideZoomPreference.normalizedPointsPerMinute(pointsPerMinute)
                     rebuildLayout()
-                    scrollToStartPosition(bodyHeight: bodyHeight)
+                    if !hasPositionedInitially, bodyHeight > 0 {
+                        hasPositionedInitially = true
+                        scrollToStartPosition(bodyHeight: bodyHeight)
+                    }
                     updateVisibleWindow(viewportSize: viewportSize)
                     prefetchVisible(now: context.date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
+                }
+                .onChange(of: viewportSize) { size in
+                    if !hasPositionedInitially, size.height > 0 {
+                        hasPositionedInitially = true
+                        scrollToStartPosition(bodyHeight: size.height)
+                    }
+                    contentOffset = GuideViewport.clampedOffset(contentOffset, contentSize: contentSize, viewportSize: size)
+                    updateVisibleWindow(viewportSize: size)
+                    lastPrefetchKey = ""
+                    prefetchVisible(now: context.date, bodyHeight: size.height, viewportWidth: size.width)
                 }
                 .onChange(of: context.date) { date in
                     prefetchVisible(now: date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
@@ -128,7 +142,10 @@ struct ProgramGuideGrid: View {
                 }
                 .onChange(of: guide) { _ in
                     rebuildLayout()
+                    contentOffset = GuideViewport.clampedOffset(contentOffset, contentSize: contentSize, viewportSize: viewportSize)
                     updateVisibleWindow(viewportSize: viewportSize)
+                    lastPrefetchKey = ""
+                    prefetchVisible(now: context.date, bodyHeight: bodyHeight, viewportWidth: viewportWidth)
                 }
                 .onChange(of: selectedDate) { _ in
                     rebuildLayout()
@@ -541,7 +558,7 @@ struct ProgramGuideCanvas: View, Equatable {
                 ProgramGuideBlock(
                     stationName: entry.column.channel.name,
                     program: frame.program,
-                    isOnAir: frame.program.startAt <= now && now < frame.program.endAt,
+                    isOnAir: GuideProgramTimeStatus.isOnAir(frame.program, now: now),
                     availability: state
                 ) {
                     onSelect(entry.column.channel, frame.program, state)
@@ -778,10 +795,7 @@ struct SynchronizedGuideScrollView<Content: View>: UIViewRepresentable {
     }
 
     private func clampedOffset(_ offset: CGPoint, in scrollView: UIScrollView) -> CGPoint {
-        CGPoint(
-            x: min(max(0, offset.x), max(0, contentSize.width - scrollView.bounds.width)),
-            y: min(max(0, offset.y), max(0, contentSize.height - scrollView.bounds.height))
-        )
+        GuideViewport.clampedOffset(offset, contentSize: contentSize, viewportSize: scrollView.bounds.size)
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
