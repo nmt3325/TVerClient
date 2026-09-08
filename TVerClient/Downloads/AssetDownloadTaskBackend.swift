@@ -24,20 +24,26 @@ struct AssetDownloadTaskHandle {
     private let resumeOperation: () -> Void
     private let suspendOperation: () -> Void
     private let cancelOperation: () -> Void
+    private let readState: () -> URLSessionTask.State
 
     init(
         session: URLSession, task: URLSessionTask,
-        resume: (() -> Void)? = nil, suspend: (() -> Void)? = nil, cancel: (() -> Void)? = nil
+        resume: (() -> Void)? = nil, suspend: (() -> Void)? = nil, cancel: (() -> Void)? = nil,
+        state: (() -> URLSessionTask.State)? = nil
     ) {
         identity = AssetDownloadTaskIdentity(session: session, task: task)
         resumeOperation = resume ?? { task.resume() }
         suspendOperation = suspend ?? { task.suspend() }
         cancelOperation = cancel ?? { task.cancel() }
+        readState = state ?? { task.state }
     }
 
     var programID: String? { identity.task.taskDescription }
-    var isViable: Bool { identity.task.state == .running || identity.task.state == .suspended }
-    var isSuspended: Bool { identity.task.state == .suspended }
+    var isViable: Bool {
+        let state = readState()
+        return state == .running || state == .suspended
+    }
+    var isSuspended: Bool { readState() == .suspended }
     func resume() { resumeOperation() }
     func suspend() { suspendOperation() }
     func cancel() { cancelOperation() }

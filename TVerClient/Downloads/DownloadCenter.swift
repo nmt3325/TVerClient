@@ -189,6 +189,8 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     private var lastCancellation: [String: UInt64] = [:]
     private var retiredIDs: Set<String> = []
     private var cancelledIDs: Set<String> = []
+    /// Pause is an intent even before enumeration has found a handle; start/cancel supersede it.
+    private var pausedIDs: Set<String> = []
     private var adoptionGeneration = UUID()
 
     init(
@@ -253,14 +255,16 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
 
     func pause(programID: String) {
         touch(programID)
+        pausedIDs.insert(programID)
         guard let attempt = attempts[programID], !attempt.paused else { return }
         attempt.paused = true
         attempt.handle?.suspend()
     }
 
     func resume(programID: String) {
-        touch(programID)
         guard let attempt = attempts[programID], attempt.paused else { return }
+        touch(programID)
+        pausedIDs.remove(programID)
         attempt.paused = false
         attempt.handle?.resume()
     }
@@ -272,6 +276,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         touch(programID)
         retiredIDs.insert(programID)
         cancelledIDs.insert(programID)
+        pausedIDs.remove(programID)
         lastCancellation[programID] = mutationVersion
         guard let old = attempts.removeValue(forKey: programID) else { return }
         preparations[old.generation]?.cancel()
@@ -299,7 +304,8 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                     handle.cancel()
                     continue
                 }
-                guard !retiredIDs.contains(programID), (lastMutation[programID] ?? 0) <= startedAtVersion else { continue }
+                guard !retiredIDs.contains(programID),
+                      (lastMutation[programID] ?? 0) <= startedAtVersion || pausedIDs.contains(programID) else { continue }
                 if let owned = attempts[programID] {
                     if owned.handle?.identity == handle.identity {
                         adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
@@ -308,18 +314,23 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                 }
                 let attempt = Attempt()
                 attempt.handle = handle
-                attempt.paused = handle.isSuspended
+                let mustPause = pausedIDs.contains(programID)
+                attempt.paused = mustPause || handle.isSuspended
                 attempt.location = knownLocations[programID]
                 // A recovered session's name/current preference cannot prove the task's old permission.
                 attempt.policy = .unknown
                 attempts[programID] = attempt
+                // Apply only to the accepted identity, before allowing any delegate progress through.
+                if mustPause && !handle.isSuspended { handle.suspend() }
+                guard attempts[programID] === attempt else { continue }
                 touch(programID)
                 adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
             }
         }
         return Set(adopted.compactMap { programID, entry in
-            guard (lastMutation[programID] ?? 0) == entry.version,
-                  current(programID, identity: entry.identity) != nil else { return nil }
+            guard let owned = current(programID, identity: entry.identity),
+                  (lastMutation[programID] ?? 0) == entry.version
+                    || (pausedIDs.contains(programID) && owned.paused) else { return nil }
             return programID
         })
     }
@@ -338,6 +349,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         guard attempts[programID] === attempt else { return }
         attempts[programID] = nil
         retiredIDs.insert(programID)
+        pausedIDs.remove(programID)
         touch(programID)
         onEvent?(.failed(programID: programID, message: message))
     }
@@ -347,6 +359,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         let location = attempt.location
         attempts[programID] = nil
         retiredIDs.insert(programID)
+        pausedIDs.remove(programID)
         touch(programID)
         switch outcome {
         case .cancelled: return
