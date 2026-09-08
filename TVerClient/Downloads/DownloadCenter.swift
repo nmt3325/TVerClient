@@ -126,199 +126,238 @@ extension OfflineDownloadDriving {
     func cellularPolicy(programID _: String) -> DownloadTaskCellularPolicy { .unknown }
 }
 
-/// Forwards `AVAssetDownloadURLSession` callbacks out of the delegate queue.
-private final class AssetDownloadDelegate: NSObject, AVAssetDownloadDelegate {
-    var onWillDownload: (@Sendable (String, URL) -> Void)?
-    var onProgress: (@Sendable (String, Double) -> Void)?
-    var onComplete: (@Sendable (String, AssetDownloadOutcome) -> Void)?
+/// Forwards native identities, not just the reused programID, out of the delegate queue.
+final class AssetDownloadDelegate: NSObject, AVAssetDownloadDelegate {
+    var onWillDownload: (@Sendable (String, AssetDownloadTaskIdentity, URL) -> Void)?
+    var onProgress: (@Sendable (String, AssetDownloadTaskIdentity, Double) -> Void)?
+    var onComplete: (@Sendable (String, AssetDownloadTaskIdentity, AssetDownloadOutcome) -> Void)?
 
-    func urlSession(
-        _ session: URLSession,
-        aggregateAssetDownloadTask: AVAggregateAssetDownloadTask,
-        willDownloadTo location: URL
-    ) {
-        guard let identifier = aggregateAssetDownloadTask.taskDescription else { return }
-        onWillDownload?(identifier, location)
+    func urlSession(_ session: URLSession, aggregateAssetDownloadTask: AVAggregateAssetDownloadTask, willDownloadTo location: URL) {
+        receiveWillDownload(session, task: aggregateAssetDownloadTask, location: location)
     }
 
     func urlSession(
-        _ session: URLSession,
-        aggregateAssetDownloadTask: AVAggregateAssetDownloadTask,
-        didLoad timeRange: CMTimeRange,
-        totalTimeRangesLoaded loadedTimeRanges: [NSValue],
-        timeRangeExpectedToLoad: CMTimeRange,
-        for mediaSelection: AVMediaSelection
+        _ session: URLSession, aggregateAssetDownloadTask: AVAggregateAssetDownloadTask,
+        didLoad timeRange: CMTimeRange, totalTimeRangesLoaded loadedTimeRanges: [NSValue],
+        timeRangeExpectedToLoad: CMTimeRange, for mediaSelection: AVMediaSelection
     ) {
-        guard let identifier = aggregateAssetDownloadTask.taskDescription else { return }
-        let ranges = loadedTimeRanges.map { value in value.timeRangeValue }
         let fraction = DownloadCenter.progressFraction(
-            loaded: ranges,
-            expected: timeRangeExpectedToLoad
+            loaded: loadedTimeRanges.map { $0.timeRangeValue }, expected: timeRangeExpectedToLoad
         )
-        onProgress?(identifier, fraction)
+        receiveProgress(session, task: aggregateAssetDownloadTask, fraction: fraction)
+    }
+
+    // Shared with the native callbacks above; injectable tasks can exercise the exact identity bridge without HLS.
+    func receiveWillDownload(_ session: URLSession, task: URLSessionTask, location: URL) {
+        guard let programID = task.taskDescription else { return }
+        onWillDownload?(programID, AssetDownloadTaskIdentity(session: session, task: task), location)
+    }
+
+    func receiveProgress(_ session: URLSession, task: URLSessionTask, fraction: Double) {
+        guard let programID = task.taskDescription else { return }
+        onProgress?(programID, AssetDownloadTaskIdentity(session: session, task: task), fraction)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let identifier = task.taskDescription else { return }
-        onComplete?(identifier, AssetDownloadOutcome(error: error))
+        guard let programID = task.taskDescription else { return }
+        onComplete?(programID, AssetDownloadTaskIdentity(session: session, task: task), AssetDownloadOutcome(error: error))
     }
 }
 
-/// Real driver backed by `AVAssetDownloadURLSession` and
-/// `AVAggregateAssetDownloadTask`, so audio and subtitle renditions are saved
-/// alongside the video and the transfer survives the app being backgrounded.
-///
-/// A background session identifier may only be claimed once per process, so a
-/// single shared driver owns them.
+/// Production attempt owner. The default backend still uses aggregate background AV asset downloads.
 @MainActor
 final class AVAssetDownloadDriver: OfflineDownloadDriving {
     static let shared = AVAssetDownloadDriver()
-
     var onEvent: ((DownloadDriverEvent) -> Void)?
+    var unavailableReason: String? { backend.unavailableReason }
 
-    var unavailableReason: String? {
-        #if targetEnvironment(simulator)
-            return "シミュレータでは\(Vocabulary.Download.action)を実行できません。実機でお試しください。"
-        #else
-            return nil
-        #endif
+    private final class Attempt {
+        let generation = UUID()
+        var handle: AssetDownloadTaskHandle?
+        var paused = false
+        var policy: DownloadTaskCellularPolicy = .unknown
+        var location: URL?
     }
 
-    private let configurationIdentifier: String
+    private let backend: AssetDownloadTaskBackend
     private let delegate = AssetDownloadDelegate()
-    private var sessions: [Bool: AVAssetDownloadURLSession] = [:]
-    private var tasks: [String: AVAggregateAssetDownloadTask] = [:]
-    private var taskCellularPolicies: [String: DownloadTaskCellularPolicy] = [:]
-    private var locations: [String: URL] = [:]
+    private var attempts: [String: Attempt] = [:]
+    /// Keep even cancelled preparations owned until their await returns; cleanup is generation-specific.
+    private var preparations: [UUID: Task<Void, Never>] = [:]
+    private var mutationVersion: UInt64 = 0
+    private var lastMutation: [String: UInt64] = [:]
+    private var lastCancellation: [String: UInt64] = [:]
+    private var retiredIDs: Set<String> = []
+    private var cancelledIDs: Set<String> = []
+    private var adoptionGeneration = UUID()
 
-    init(configurationIdentifier: String = "dev.nmt3325.TVerClient.downloads") {
-        self.configurationIdentifier = configurationIdentifier
-        delegate.onWillDownload = { [weak self] programID, location in
+    init(
+        configurationIdentifier: String = "dev.nmt3325.TVerClient.downloads",
+        backend: AssetDownloadTaskBackend? = nil
+    ) {
+        self.backend = backend ?? NativeAssetDownloadTaskBackend(configurationIdentifier: configurationIdentifier)
+        delegate.onWillDownload = { [weak self] programID, identity, location in
             Task { @MainActor in
-                self?.locations[programID] = location
-                self?.onEvent?(.willDownload(programID: programID, location: location))
+                guard let self, let attempt = self.current(programID, identity: identity) else { return }
+                attempt.location = location
+                self.onEvent?(.willDownload(programID: programID, location: location))
             }
         }
-        delegate.onProgress = { [weak self] programID, fraction in
+        delegate.onProgress = { [weak self] programID, identity, fraction in
             Task { @MainActor in
-                self?.onEvent?(.progress(programID: programID, fraction: fraction))
+                guard let self, let attempt = self.current(programID, identity: identity), !attempt.paused else { return }
+                self.onEvent?(.progress(programID: programID, fraction: fraction))
             }
         }
-        delegate.onComplete = { [weak self] programID, outcome in
-            Task { @MainActor in self?.complete(programID: programID, outcome: outcome) }
+        delegate.onComplete = { [weak self] programID, identity, outcome in
+            Task { @MainActor in self?.complete(programID: programID, identity: identity, outcome: outcome) }
         }
     }
 
     func start(programID: String, assetURL: URL, title: String, allowsCellularAccess: Bool) {
-        let asset = AVURLAsset(url: assetURL)
-        let session = session(allowsCellularAccess: allowsCellularAccess)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let selection = try? await asset.load(.preferredMediaSelection)
-            guard let task = session.aggregateAssetDownloadTask(
-                with: asset,
-                mediaSelections: selection.map { [$0] } ?? [],
-                assetTitle: title,
-                assetArtworkData: nil,
-                options: nil
-            ) else {
-                self.onEvent?(.failed(
-                    programID: programID,
-                    message: "この番組は\(Vocabulary.Download.action)に対応していません。ストリーミングでご覧ください。"
-                ))
-                return
+        cancel(programID: programID)
+        retiredIDs.remove(programID)
+        cancelledIDs.remove(programID)
+        let attempt = Attempt()
+        attempts[programID] = attempt
+        let backend = backend
+        preparations[attempt.generation] = Task { @MainActor [weak self] in
+            defer { self?.preparations[attempt.generation] = nil }
+            do {
+                guard !Task.isCancelled, self?.attempts[programID] === attempt else { return }
+                let prepared = try await backend.prepare(assetURL: assetURL)
+                guard !Task.isCancelled, let self, self.attempts[programID] === attempt else { return }
+                let handle = backend.makeTask(
+                    programID: programID, prepared: prepared, title: title,
+                    allowsCellularAccess: allowsCellularAccess, delegate: self.delegate
+                )
+                // A synchronous factory may also trigger replacement/cancellation before returning.
+                guard !Task.isCancelled, self.attempts[programID] === attempt else {
+                    handle?.cancel()
+                    return
+                }
+                guard let handle else {
+                    self.failPreparation(programID, attempt: attempt, message: "この番組は\(Vocabulary.Download.action)に対応していません。ストリーミングでご覧ください。")
+                    return
+                }
+                attempt.handle = handle
+                attempt.policy = allowsCellularAccess ? .allowed : .wifiOnly
+                // A task is born suspended. Preserve pause intent received while metadata was loading.
+                if !attempt.paused { handle.resume() }
+            } catch {
+                guard !Task.isCancelled, let self, self.attempts[programID] === attempt else { return }
+                self.failPreparation(programID, attempt: attempt, message: DownloadFailureText.message(for: error))
             }
-            task.taskDescription = programID
-            self.tasks[programID] = task
-            // SDK: taskは作成時の設定をコピーし、後からのconfiguration変更を無視する。
-            self.taskCellularPolicies[programID] = allowsCellularAccess ? .allowed : .wifiOnly
-            task.resume()
         }
     }
 
-    func pause(programID: String) { tasks[programID]?.suspend() }
-
-    func resume(programID: String) { tasks[programID]?.resume() }
-
-    func hasTask(programID: String) -> Bool { tasks[programID] != nil }
-
-    func cellularPolicy(programID: String) -> DownloadTaskCellularPolicy {
-        taskCellularPolicies[programID] ?? .unknown
+    func pause(programID: String) {
+        touch(programID)
+        guard let attempt = attempts[programID], !attempt.paused else { return }
+        attempt.paused = true
+        attempt.handle?.suspend()
     }
+
+    func resume(programID: String) {
+        touch(programID)
+        guard let attempt = attempts[programID], attempt.paused else { return }
+        attempt.paused = false
+        attempt.handle?.resume()
+    }
+
+    func hasTask(programID: String) -> Bool { attempts[programID] != nil }
+    func cellularPolicy(programID: String) -> DownloadTaskCellularPolicy { attempts[programID]?.policy ?? .unknown }
 
     func cancel(programID: String) {
-        tasks[programID]?.cancel()
-        tasks[programID] = nil
-        taskCellularPolicies[programID] = nil
-        locations[programID] = nil
+        touch(programID)
+        retiredIDs.insert(programID)
+        cancelledIDs.insert(programID)
+        lastCancellation[programID] = mutationVersion
+        guard let old = attempts.removeValue(forKey: programID) else { return }
+        preparations[old.generation]?.cancel()
+        old.handle?.cancel()
     }
 
-    /// バックグラウンドセッションに残っているタスクを拾い直す。
-    ///
-    /// アプリを終了しても転送自体は続いている（または中断状態で残っている）ので、
-    /// 参照さえ取り戻せば一時停止・再開・中止がそのまま効く。
+    func waitForPendingPreparations() async {
+        for task in Array(preparations.values) { await task.value }
+    }
+
     func adoptRunningTasks(knownLocations: [String: URL]) async -> Set<String> {
-        for (programID, location) in knownLocations where locations[programID] == nil {
-            locations[programID] = location
-        }
-        var adopted: Set<String> = []
-        for allowsCellularAccess in [false, true] {
-            let session = session(allowsCellularAccess: allowsCellularAccess)
-            let existing = await session.allTasks
-            for task in existing {
-                guard let identifier = task.taskDescription,
-                      let aggregate = task as? AVAggregateAssetDownloadTask
-                else { continue }
-                if let current = tasks[identifier], current === aggregate {
-                    // この起動中に作った同じタスクの既知条件だけは保持する。
-                } else {
-                    // 再起動前の設定は現在の設定やidentifierから推測しない。
-                    taskCellularPolicies[identifier] = .unknown
+        let generation = UUID()
+        adoptionGeneration = generation
+        let startedAtVersion = mutationVersion
+        var adopted: [String: (identity: AssetDownloadTaskIdentity, version: UInt64)] = [:]
+        for allowingCellular in [false, true] {
+            let existing = await backend.allTasks(allowsCellularAccess: allowingCellular, delegate: delegate)
+            guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
+            for handle in existing {
+                guard let programID = handle.programID, !programID.isEmpty, handle.isViable else { continue }
+                if cancelledIDs.contains(programID)
+                    || ((lastCancellation[programID] ?? 0) > startedAtVersion
+                        && attempts[programID]?.handle?.identity != handle.identity) {
+                    // Cancellation while enumeration was awaiting must stop the late legacy task too.
+                    handle.cancel()
+                    continue
                 }
-                tasks[identifier] = aggregate
-                adopted.insert(identifier)
+                guard !retiredIDs.contains(programID), (lastMutation[programID] ?? 0) <= startedAtVersion else { continue }
+                if let owned = attempts[programID] {
+                    if owned.handle?.identity == handle.identity {
+                        adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
+                    }
+                    continue // Never overwrite a new/preparing attempt or another session's task.
+                }
+                let attempt = Attempt()
+                attempt.handle = handle
+                attempt.paused = handle.isSuspended
+                attempt.location = knownLocations[programID]
+                // A recovered session's name/current preference cannot prove the task's old permission.
+                attempt.policy = .unknown
+                attempts[programID] = attempt
+                touch(programID)
+                adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
             }
         }
-        return adopted
+        return Set(adopted.compactMap { programID, entry in
+            guard (lastMutation[programID] ?? 0) == entry.version,
+                  current(programID, identity: entry.identity) != nil else { return nil }
+            return programID
+        })
     }
 
-    private func complete(programID: String, outcome: AssetDownloadOutcome) {
-        let location = locations[programID]
-        tasks[programID] = nil
-        taskCellularPolicies[programID] = nil
-        locations[programID] = nil
+    private func touch(_ programID: String) {
+        mutationVersion &+= 1
+        lastMutation[programID] = mutationVersion
+    }
+
+    private func current(_ programID: String, identity: AssetDownloadTaskIdentity) -> Attempt? {
+        guard let attempt = attempts[programID], attempt.handle?.identity == identity else { return nil }
+        return attempt
+    }
+
+    private func failPreparation(_ programID: String, attempt: Attempt, message: String) {
+        guard attempts[programID] === attempt else { return }
+        attempts[programID] = nil
+        retiredIDs.insert(programID)
+        touch(programID)
+        onEvent?(.failed(programID: programID, message: message))
+    }
+
+    private func complete(programID: String, identity: AssetDownloadTaskIdentity, outcome: AssetDownloadOutcome) {
+        guard let attempt = current(programID, identity: identity) else { return }
+        let location = attempt.location
+        attempts[programID] = nil
+        retiredIDs.insert(programID)
+        touch(programID)
         switch outcome {
-        case .cancelled:
-            // 利用者が止めた分。すでに記録は畳んであるので何も言わない。
-            return
-        case let .failed(message):
-            onEvent?(.failed(programID: programID, message: message))
+        case .cancelled: return
+        case let .failed(message): onEvent?(.failed(programID: programID, message: message))
         case .succeeded:
             if let location {
                 onEvent?(.finished(programID: programID, location: location))
             } else {
-                onEvent?(.failed(
-                    programID: programID,
-                    message: "\(Vocabulary.Download.failed)。保存先を特定できませんでした。もう一度\(Vocabulary.Download.action)してください。"
-                ))
+                onEvent?(.failed(programID: programID, message: "\(Vocabulary.Download.failed)。保存先を特定できませんでした。もう一度\(Vocabulary.Download.action)してください。"))
             }
         }
-    }
-
-    private func session(allowsCellularAccess: Bool) -> AVAssetDownloadURLSession {
-        if let existing = sessions[allowsCellularAccess] { return existing }
-        let suffix = allowsCellularAccess ? "any" : "wifi"
-        let configuration = URLSessionConfiguration.background(
-            withIdentifier: "\(configurationIdentifier).\(suffix)"
-        )
-        configuration.allowsCellularAccess = allowsCellularAccess
-        let created = AVAssetDownloadURLSession(
-            configuration: configuration,
-            assetDownloadDelegate: delegate,
-            delegateQueue: .main
-        )
-        sessions[allowsCellularAccess] = created
-        return created
     }
 }
 
@@ -407,6 +446,9 @@ final class DownloadCenter: ObservableObject {
     private var assetURLs: [String: URL] = [:]
     private var bookmarks: [String: Data] = [:]
     private var resolutions: [String: Task<Void, Never>] = [:]
+    private var resolutionGenerations: [String: UUID] = [:]
+    private var restorationTask: Task<Void, Never>?
+    private var restorationGeneration = UUID()
     private var isApplyingStoredSettings = false
     /// 走っている最中に落ちた分。拾い直せたら自動で続きを進める。
     private var pendingAutoResumeIDs: Set<String> = []
@@ -533,6 +575,16 @@ final class DownloadCenter: ObservableObject {
         }
     }
 
+    func waitForPendingRestoration() async {
+        if let task = restorationTask { await task.value }
+    }
+
+    private func cancelResolution(_ programID: String) {
+        resolutions[programID]?.cancel()
+        resolutions[programID] = nil
+        resolutionGenerations[programID] = nil
+    }
+
     // MARK: - Commands
 
     @discardableResult
@@ -558,26 +610,29 @@ final class DownloadCenter: ObservableObject {
 
         let allowsCellularAccess = !wifiOnly || allowingCellular
         let title = Self.displayTitle(program)
-        resolutions[program.id]?.cancel()
+        cancelResolution(program.id)
+        let generation = UUID()
+        resolutionGenerations[program.id] = generation
         resolutions[program.id] = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.resolutionGenerations[program.id] == generation {
+                    self.resolutions[program.id] = nil
+                    self.resolutionGenerations[program.id] = nil
+                }
+            }
+            guard !Task.isCancelled, self.resolutionGenerations[program.id] == generation else { return }
             do {
                 let assetURL = try await self.resolver.resolveStream(for: program)
-                guard !Task.isCancelled, self.state(for: program.id).isInFlight else { return }
-                self.driver.start(
-                    programID: program.id,
-                    assetURL: assetURL,
-                    title: title,
-                    allowsCellularAccess: allowsCellularAccess
-                )
+                guard !Task.isCancelled, self.resolutionGenerations[program.id] == generation,
+                      self.state(for: program.id).isInFlight else { return }
+                self.driver.start(programID: program.id, assetURL: assetURL, title: title, allowsCellularAccess: allowsCellularAccess)
                 self.update(program.id, to: .downloading(progress: 0))
-            } catch is CancellationError {
-                return
             } catch {
+                guard !Task.isCancelled, self.resolutionGenerations[program.id] == generation else { return }
                 let presentation = TVerClientError.normalized(from: error).presentation
                 self.fail(program.id, message: presentation.message)
             }
-            self.resolutions[program.id] = nil
         }
         return .started
     }
@@ -621,8 +676,7 @@ final class DownloadCenter: ObservableObject {
     }
 
     func cancel(_ programID: String) {
-        resolutions[programID]?.cancel()
-        resolutions[programID] = nil
+        cancelResolution(programID)
         driver.cancel(programID: programID)
         interruptedIDs.remove(programID)
         dismissNotice(Self.failureNoticeID(programID))
@@ -639,8 +693,7 @@ final class DownloadCenter: ObservableObject {
     }
 
     func delete(_ programID: String) {
-        resolutions[programID]?.cancel()
-        resolutions[programID] = nil
+        cancelResolution(programID)
         driver.cancel(programID: programID)
         interruptedIDs.remove(programID)
         dismissNotice(Self.failureNoticeID(programID))
@@ -665,8 +718,7 @@ final class DownloadCenter: ObservableObject {
             return refusal.result
         }
 
-        resolutions[programID]?.cancel()
-        resolutions[programID] = nil
+        cancelResolution(programID)
         driver.cancel(programID: programID)
         removeStoredAsset(for: programID)
         interruptedIDs.remove(programID)
@@ -925,8 +977,7 @@ final class DownloadCenter: ObservableObject {
                 driver.pause(programID: record.id)
                 continue
             }
-            resolutions[record.id]?.cancel()
-            resolutions[record.id] = nil
+            cancelResolution(record.id)
             driver.cancel(programID: record.id)
             interruptedIDs.insert(record.id)
             restartRequired += 1
@@ -956,6 +1007,11 @@ final class DownloadCenter: ObservableObject {
     /// 以前は実体の見つからない記録を黙って捨て、中断分は一律に「一時停止中」として
     /// 二度と動かない行にしていた。消えたことを告げ、やり直せる状態まで戻す。
     func restore() {
+        restorationTask?.cancel()
+        restorationTask = nil
+        restorationGeneration = UUID()
+        let generation = restorationGeneration
+        for programID in Array(resolutions.keys) { cancelResolution(programID) }
         isApplyingStoredSettings = true
         if let stored = defaults.object(forKey: wifiOnlyKey) as? Bool { wifiOnly = stored }
         if let stored = defaults.object(forKey: deleteAfterWatchingKey) as? Bool {
@@ -1035,7 +1091,10 @@ final class DownloadCenter: ObservableObject {
         refreshStorage()
 
         // 拾い直しは非同期。拾えたものは進め、拾えなかったものはそう告げる。
-        Task { [weak self] in await self?.adoptInterruptedTransfers() }
+        restorationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.adoptInterruptedTransfers(generation: generation)
+        }
     }
 
     private func restoreInterrupted(
@@ -1058,24 +1117,31 @@ final class DownloadCenter: ObservableObject {
     }
 
     /// バックグラウンドに残っている転送を拾い直し、拾えなかった分はやり直せるようにする。
-    private func adoptInterruptedTransfers() async {
-        let candidates = interruptedIDs
+    private func adoptInterruptedTransfers(generation: UUID) async {
+        defer { if restorationGeneration == generation { restorationTask = nil } }
+        guard !Task.isCancelled, restorationGeneration == generation else { return }
+        let candidates = records.filter { interruptedIDs.contains($0.id) }
         guard !candidates.isEmpty else { return }
         let adopted = await driver.adoptRunningTasks(knownLocations: assetURLs)
+        guard !Task.isCancelled, restorationGeneration == generation else { return }
 
         var strandedIDs: [String] = []
         var strandedTitles: [String] = []
-        for programID in candidates {
-            guard let record = records.first(where: { entry in entry.id == programID }) else {
-                continue
-            }
+        for snapshot in candidates {
+            let programID = snapshot.id
+            guard let record = records.first(where: { entry in entry.id == programID }),
+                  record == snapshot, interruptedIDs.contains(programID),
+                  case .paused = record.state else { continue }
             guard adopted.contains(programID) else {
                 strandedIDs.append(programID)
                 strandedTitles.append(Self.displayTitle(record.program))
                 continue
             }
             interruptedIDs.remove(programID)
-            guard pendingAutoResumeIDs.contains(programID) else { continue }
+            guard pendingAutoResumeIDs.contains(programID) else {
+                driver.pause(programID: programID)
+                continue
+            }
             if let rejection = resumeRejection(for: record.program, allowingCellular: false) {
                 driver.pause(programID: programID)
                 post(DownloadNotice(
