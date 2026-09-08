@@ -84,9 +84,9 @@ final class PlaybackController: ObservableObject {
     /// Set only when the system suspended playback that we had asked for, so
     /// the end of an interruption restores those sessions and nothing else.
     private var shouldResumeAfterInterruption = false
-    /// 画面が用意した Picture in Picture。停止したときに小窓だけが生き残る
-    /// 経路を作らないよう、弱参照で覚えておいて一緒に畳む。
-    private weak var pictureInPicture: PictureInPictureCoordinator?
+    /// Retain visible surfaces and genuinely in-flight PiP, including a source
+    /// that has left navigation. Settled, unowned coordinators are released.
+    private let pictureInPictureOwnership = PlaybackPictureInPictureOwnership()
     /// ドラッグ追従用の許容。ゼロ許容はフレーム単位で正確な代わりに遅く、
     /// 指に付いてこない。確定シークだけがゼロ許容。
     private static let scrubTolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
@@ -158,26 +158,22 @@ final class PlaybackController: ObservableObject {
     }
 
     private var hasLoadedItemOrPendingRequest: Bool {
-        // An audio-session failure can retain a valid item. Reopening must not
-        // discard that item or its position; the explicit recovery action resumes it.
-        player.currentItem != nil || (state == .resolving && playbackRequestTask != nil)
+        // Request ownership is independent of the displayed state: pause and
+        // interruptions may precede item attachment. Stop/new generations and
+        // resolution completion clear the handle, not a surface's disappearance.
+        player.currentItem != nil || playbackRequestTask != nil
     }
 
-    /// 画面が持っている Picture in Picture を預かる。`stop()` は必ずこれも畳む。
-    func bindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
-        pictureInPicture = coordinator
-        // 小窓の「元の画面に戻る」は、このフックを繋いでおかないと AVKit へ
-        // false を返し、何も起きないまま小窓だけが消える。
-        coordinator.restoresUserInterface = { [weak self] in
+    /// An optional surface scope preserves the legacy API while keeping inline
+    /// and full-screen owners independent when they share a coordinator.
+    func bindPictureInPicture(_ coordinator: PictureInPictureCoordinator, owner: UUID? = nil) {
+        pictureInPictureOwnership.bind(coordinator, owner: owner) { [weak self] in
             self?.requestPlayerPresentation()
         }
     }
 
-    /// 預かっていたものを返す。すでに別の画面のものへ差し替わっているときは何もしない。
-    func unbindPictureInPicture(_ coordinator: PictureInPictureCoordinator) {
-        guard pictureInPicture === coordinator else { return }
-        coordinator.restoresUserInterface = nil
-        pictureInPicture = nil
+    func unbindPictureInPicture(_ coordinator: PictureInPictureCoordinator, owner: UUID? = nil) {
+        pictureInPictureOwnership.unbind(coordinator, owner: owner)
     }
 
     /// 再生画面の提示を願い出る。誰も拾わなければ何も起きないし、
@@ -301,7 +297,7 @@ final class PlaybackController: ObservableObject {
         playbackRequestTask = nil
         wantsPlayback = false
         shouldResumeAfterInterruption = false
-        pictureInPicture?.stop()
+        pictureInPictureOwnership.stopAll()
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         removeTimeObserver()
@@ -316,7 +312,7 @@ final class PlaybackController: ObservableObject {
         wantsPlayback = false
         shouldResumeAfterInterruption = false
         player.pause()
-        pictureInPicture?.stop()
+        pictureInPictureOwnership.stopAll()
         removeTimeObserver()
         transition(to: .ended)
         deactivateAudioSession()

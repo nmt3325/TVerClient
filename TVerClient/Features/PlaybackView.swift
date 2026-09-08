@@ -87,15 +87,10 @@ struct PlaybackView: View {
                 .accessibilityHint("共有、公式ページ、再生の停止")
             }
         }
-        .onAppear {
-            // 停止したときに Picture in Picture の小窓だけが生き残らないよう、
-            // この画面が持っている調整役を再生側へ預ける。
-            playbackController.bindPictureInPicture(pictureInPicture)
-        }
-        .onDisappear {
-            // 画面を離れたら預けたものを返す。別の画面が預け直したあとなら何もしない。
-            playbackController.unbindPictureInPicture(pictureInPicture)
-        }
+        .modifier(PlaybackPictureInPictureSurfaceBinding(
+            controller: playbackController,
+            coordinator: pictureInPicture
+        ))
         .task(id: program.id) {
             libraryStore.recordRecentlyViewed(program)
             // 最小化して開き直しただけなら、最初からに戻さず続きを見せる。

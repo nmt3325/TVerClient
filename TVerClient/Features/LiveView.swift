@@ -473,11 +473,11 @@ struct LivePlaybackView: View {
         .navigationTitle(channel.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { stopToolbar }
-        .onAppear {
-            guard channel.isPlayable else { return }
-            playbackController.bindPictureInPicture(pictureInPicture)
-        }
-        .onDisappear { playbackController.unbindPictureInPicture(pictureInPicture) }
+        .modifier(PlaybackPictureInPictureSurfaceBinding(
+            controller: playbackController,
+            coordinator: pictureInPicture,
+            isEnabled: channel.isPlayable
+        ))
         .task(id: channel.id) {
             // Unavailable metadata does not interrupt playback; reopening a
             // current live surface does not resolve/restart the stream again.

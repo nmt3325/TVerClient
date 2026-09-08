@@ -73,6 +73,10 @@ struct FullScreenPlaybackView: View {
         .accessibilityLabel("全画面再生")
         .onAppear { model.showControls() }
         .onDisappear { model.cancelAutoHide() }
+        .modifier(PlaybackPictureInPictureSurfaceBinding(
+            controller: playbackController,
+            coordinator: pictureInPicture
+        ))
     }
 
     /// Swiping down leaves full screen, the way the system player does.
