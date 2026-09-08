@@ -84,6 +84,18 @@ enum AssetDownloadOutcome: Equatable, Sendable {
     }
 }
 
+/// Exact Center records and a synchronous, generation-aware validation fence. Locations are not targets.
+@MainActor
+struct DownloadRestorationScope {
+    let records: [DownloadRecord]
+    let isCurrent: @MainActor (DownloadRecord) -> Bool
+
+    func accepts(_ programID: String) -> Bool {
+        guard let snapshot = records.first(where: { $0.id == programID }) else { return false }
+        return isCurrent(snapshot)
+    }
+}
+
 /// Abstracts `AVAssetDownloadURLSession` so the state machine can be exercised
 /// without a real HLS asset, which no simulator can fetch.
 @MainActor
@@ -112,9 +124,15 @@ protocol OfflineDownloadDriving: AnyObject {
     /// バックグラウンドセッションのタスクはプロセスをまたいで生き残るのに、
     /// 参照を捨てていたせいで「一時停止中」から二度と動かなくなっていた。
     func adoptRunningTasks(knownLocations: [String: URL]) async -> Set<String>
+    func adoptRunningTasks(knownLocations: [String: URL], restoration: DownloadRestorationScope) async -> Set<String>
 }
 
 extension OfflineDownloadDriving {
+    /// Existing injected drivers retain their original adoption implementation.
+    func adoptRunningTasks(knownLocations: [String: URL], restoration: DownloadRestorationScope) async -> Set<String> {
+        await adoptRunningTasks(knownLocations: knownLocations)
+    }
+
     /// 拾い直しの仕組みを持たないドライバは「拾えるものは無い」と答える。
     /// 呼び出し側はその場合、やり直せる状態へ戻す。
     func adoptRunningTasks(knownLocations _: [String: URL]) async -> Set<String> { [] }
@@ -205,6 +223,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
 
     private let backend: AssetDownloadTaskBackend
     private let delegate = AssetDownloadDelegate()
+    private let callbackGate = AssetDownloadCallbackGate()
     private var attempts: [String: Attempt] = [:]
     private var retainedTasks: [String: [RetainedTask]] = [:]
     /// Keep even cancelled preparations owned until their await returns; cleanup is generation-specific.
@@ -223,21 +242,33 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         backend: AssetDownloadTaskBackend? = nil
     ) {
         self.backend = backend ?? NativeAssetDownloadTaskBackend(configurationIdentifier: configurationIdentifier)
+        let gate = callbackGate
         delegate.onWillDownload = { [weak self] programID, identity, location in
+            // Capture synchronously on the delegate queue, before a MainActor hop can cross windows.
+            guard let generation = gate.capture(programID, identity: identity, location: location) else { return }
             Task { @MainActor in
-                guard let self, let attempt = self.current(programID, identity: identity) else { return }
+                guard let self, let attempt = self.current(programID, identity: identity),
+                      attempt.generation == generation else { return }
                 attempt.location = location
                 self.onEvent?(.willDownload(programID: programID, location: location))
             }
         }
         delegate.onProgress = { [weak self] programID, identity, fraction in
+            guard let generation = gate.ownerGeneration(programID, identity: identity) else { return }
             Task { @MainActor in
-                guard let self, let attempt = self.current(programID, identity: identity), !attempt.paused else { return }
+                guard let self, let attempt = self.current(programID, identity: identity),
+                      attempt.generation == generation, !attempt.paused else { return }
                 self.onEvent?(.progress(programID: programID, fraction: fraction))
             }
         }
         delegate.onComplete = { [weak self] programID, identity, outcome in
-            Task { @MainActor in self?.complete(programID: programID, identity: identity, outcome: outcome) }
+            let generation = gate.capture(programID, identity: identity, outcome: outcome)
+            Task { @MainActor in
+                guard let self else { return }
+                if self.discardRetained(programID, identity: identity) { return }
+                guard let generation, self.current(programID, identity: identity)?.generation == generation else { return }
+                self.complete(programID: programID, identity: identity, outcome: outcome)
+            }
         }
     }
 
@@ -268,6 +299,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                     return
                 }
                 attempt.handle = handle
+                self.callbackGate.register(programID, identity: handle.identity, generation: attempt.generation)
                 attempt.policy = allowsCellularAccess ? .allowed : .wifiOnly
                 // A task is born suspended. Preserve pause intent received while metadata was loading.
                 if !attempt.paused { handle.resume() }
@@ -305,6 +337,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         pausedIDs.remove(programID)
         lastCancellation[programID] = mutationVersion
         if let old = attempts.removeValue(forKey: programID) {
+            callbackGate.unregister(programID, generation: old.generation)
             preparations[old.generation]?.cancel()
             if let handle = old.handle { retain(handle, for: programID).cancel() }
         }
@@ -318,13 +351,36 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     }
 
     func adoptRunningTasks(knownLocations: [String: URL]) async -> Set<String> {
+        await adoptTasks(knownLocations: knownLocations, restoration: nil)
+    }
+
+    func adoptRunningTasks(knownLocations: [String: URL], restoration: DownloadRestorationScope) async -> Set<String> {
+        await adoptTasks(knownLocations: knownLocations, restoration: restoration)
+    }
+
+    private func adoptTasks(knownLocations: [String: URL], restoration: DownloadRestorationScope?) async -> Set<String> {
         let generation = UUID()
         adoptionGeneration = generation
         let startedAtVersion = mutationVersion
+        callbackGate.open(generation, targets: Set(restoration?.records.map(\.id) ?? []),
+                          excluding: retainedTasks.values.flatMap { $0.map { $0.handle.identity } })
         var adopted: [String: (identity: AssetDownloadTaskIdentity, version: UInt64)] = [:]
-        for allowingCellular in [false, true] {
-            let existing = await backend.allTasks(allowsCellularAccess: allowingCellular, delegate: delegate)
-            guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
+        var newlyAdopted: [String: Attempt] = [:]
+        var promoted = false
+        var enumerated: [AssetDownloadTaskHandle] = []
+        defer {
+            _ = callbackGate.close(generation)
+            if restoration != nil, !promoted {
+                // A cancelled/superseded window must not leave a task owned without a callback route.
+                for (programID, attempt) in newlyAdopted where attempts[programID] === attempt {
+                    attempts[programID] = nil
+                    callbackGate.unregister(programID, generation: attempt.generation)
+                    if let handle = attempt.handle { retain(handle, for: programID).stop() }
+                }
+            }
+        }
+
+        func accept(_ existing: [AssetDownloadTaskHandle]) {
             for handle in existing {
                 guard let programID = handle.programID, !programID.isEmpty else { continue }
                 guard handle.isViable else {
@@ -336,6 +392,10 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                         && attempts[programID]?.handle?.identity != handle.identity) {
                     // Cancellation while enumeration was awaiting must stop the late legacy task too.
                     retain(handle, for: programID).cancel()
+                    continue
+                }
+                if let restoration, !restoration.accepts(programID) {
+                    if attempts[programID]?.handle?.identity != handle.identity { retain(handle, for: programID).stop() }
                     continue
                 }
                 if let owned = attempts[programID] {
@@ -362,6 +422,10 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                 // A recovered session's name/current preference cannot prove the task's old permission.
                 attempt.policy = .unknown
                 attempts[programID] = attempt
+                newlyAdopted[programID] = attempt
+                if restoration == nil {
+                    callbackGate.register(programID, identity: handle.identity, generation: attempt.generation)
+                }
                 // Apply only to the accepted identity, before allowing any delegate progress through.
                 if mustPause && !handle.isSuspended { handle.suspend() }
                 guard attempts[programID] === attempt else { continue }
@@ -369,15 +433,92 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                 adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
             }
         }
+
+        for allowingCellular in [false, true] {
+            let gate = callbackGate
+            let existing = await withTaskCancellationHandler {
+                await backend.allTasks(allowsCellularAccess: allowingCellular, delegate: delegate)
+            } onCancel: {
+                _ = gate.close(generation)
+            }
+            guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
+            if restoration != nil { enumerated += existing }
+            else { accept(existing) }
+        }
+        if let restoration {
+            // Scoped restoration chooses owners only after both session snapshots are available.
+            // No live owner is invented for a terminal task that disappeared from allTasks.
+            accept(enumerated)
+            guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
+            let owners = adopted.compactMap { programID, entry -> AssetDownloadCallbackGate.Owner? in
+                guard restoration.accepts(programID), let attempt = current(programID, identity: entry.identity) else { return nil }
+                return .init(programID: programID, identity: entry.identity, generation: attempt.generation)
+            }
+            let receipts = callbackGate.close(generation, installing: owners)
+            promoted = true
+            reconcile(receipts, enumerated: enumerated, newlyAdopted: Set(newlyAdopted.keys),
+                      adopted: adopted, startedAtVersion: startedAtVersion, knownLocations: knownLocations, restoration: restoration)
+        }
         return Set(adopted.compactMap { programID, entry in
             guard let owned = current(programID, identity: entry.identity),
                   (lastMutation[programID] ?? 0) == entry.version
-                    || (pausedIDs.contains(programID) && owned.paused) else { return nil }
+                    || (pausedIDs.contains(programID) && owned.paused),
+                  restoration?.accepts(programID) ?? true else { return nil }
             return programID
         })
     }
 
+    private func reconcile(
+        _ receipts: [AssetDownloadCallbackGate.Receipt], enumerated: [AssetDownloadTaskHandle],
+        newlyAdopted: Set<String>, adopted: [String: (identity: AssetDownloadTaskIdentity, version: UInt64)],
+        startedAtVersion: UInt64, knownLocations: [String: URL], restoration: DownloadRestorationScope
+    ) {
+        for snapshot in restoration.records {
+            let programID = snapshot.id
+            guard restoration.isCurrent(snapshot), !cancelledIDs.contains(programID), !retiredIDs.contains(programID),
+                  (lastCancellation[programID] ?? 0) <= startedAtVersion else { continue }
+            let candidates = receipts.filter { $0.programID == programID }
+            var identities: [AssetDownloadTaskIdentity] = []
+            for identity in enumerated.filter({ $0.programID == programID }).map(\.identity) + candidates.map(\.identity) {
+                if !identities.contains(identity) { identities.append(identity) }
+            }
+            if let attempt = attempts[programID] {
+                guard let entry = adopted[programID], attempt.handle?.identity == entry.identity,
+                      (lastMutation[programID] ?? 0) == entry.version
+                        || (pausedIDs.contains(programID) && attempt.paused) else { continue }
+                let receipt = candidates.first { $0.identity == entry.identity && !$0.ambiguous && !$0.excluded }
+                // First viable enumerated identity wins, but another identity's path never follows it.
+                if newlyAdopted.contains(programID), identities.count > 1 { attempt.location = nil }
+                if let location = receipt?.location {
+                    attempt.location = location
+                    onEvent?(.willDownload(programID: programID, location: location))
+                }
+                guard attempts[programID] === attempt, restoration.isCurrent(snapshot),
+                      (lastCancellation[programID] ?? 0) <= startedAtVersion else { continue }
+                if let outcome = receipt?.outcome {
+                    complete(programID: programID, identity: entry.identity, outcome: outcome)
+                }
+            } else {
+                // Without a live owner, only one unambiguous native identity can settle the record.
+                // Multiple terminal/unknown identities leave the partial record interrupted, untouched.
+                guard identities.count == 1, let receipt = candidates.first, !receipt.ambiguous, !receipt.excluded,
+                      let outcome = receipt.outcome,
+                      (lastMutation[programID] ?? 0) <= startedAtVersion || pausedIDs.contains(programID),
+                      retainedTasks[programID]?.contains(where: { $0.handle.identity == receipt.identity }) != true else { continue }
+                retiredIDs.insert(programID)
+                pausedIDs.remove(programID)
+                touch(programID)
+                let settledAtVersion = lastMutation[programID]
+                if let location = receipt.location { onEvent?(.willDownload(programID: programID, location: location)) }
+                guard attempts[programID] == nil, lastMutation[programID] == settledAtVersion,
+                      restoration.isCurrent(snapshot) else { continue }
+                emitCompletion(programID: programID, location: receipt.location ?? knownLocations[programID], outcome: outcome)
+            }
+        }
+    }
+
     private func retain(_ handle: AssetDownloadTaskHandle, for programID: String) -> RetainedTask {
+        callbackGate.exclude(handle.identity)
         if let existing = retainedTasks[programID]?.first(where: { $0.handle.identity == handle.identity }) {
             return existing
         }
@@ -407,6 +548,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     private func failPreparation(_ programID: String, attempt: Attempt, message: String) {
         guard attempts[programID] === attempt else { return }
         attempts[programID] = nil
+        callbackGate.unregister(programID, generation: attempt.generation)
         retiredIDs.insert(programID)
         pausedIDs.remove(programID)
         touch(programID)
@@ -418,9 +560,14 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         guard let attempt = current(programID, identity: identity) else { return }
         let location = attempt.location
         attempts[programID] = nil
+        callbackGate.unregister(programID, generation: attempt.generation)
         retiredIDs.insert(programID)
         pausedIDs.remove(programID)
         touch(programID)
+        emitCompletion(programID: programID, location: location, outcome: outcome)
+    }
+
+    private func emitCompletion(programID: String, location: URL?, outcome: AssetDownloadOutcome) {
         switch outcome {
         case .cancelled: return
         case let .failed(message): onEvent?(.failed(programID: programID, message: message))
@@ -1195,7 +1342,14 @@ final class DownloadCenter: ObservableObject {
         guard !Task.isCancelled, restorationGeneration == generation else { return }
         let candidates = records.filter { interruptedIDs.contains($0.id) }
         guard !candidates.isEmpty else { return }
-        let adopted = await driver.adoptRunningTasks(knownLocations: assetURLs)
+        let scope = DownloadRestorationScope(records: candidates) { [weak self] snapshot in
+            guard let self, self.restorationGeneration == generation,
+                  self.interruptedIDs.contains(snapshot.id),
+                  self.records.first(where: { $0.id == snapshot.id }) == snapshot,
+                  case .paused = snapshot.state else { return false }
+            return true
+        }
+        let adopted = await driver.adoptRunningTasks(knownLocations: assetURLs, restoration: scope)
         guard !Task.isCancelled, restorationGeneration == generation else { return }
 
         var strandedIDs: [String] = []

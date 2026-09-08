@@ -728,8 +728,7 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(extra.cancelCount, 1)
     }
 
-    // A-D2 remains unresolved. These strict expected failures describe desired behavior, not
-    // acceptance of dropped callbacks. Setup, byte-preservation and safety guards stay unmasked.
+    // A-D2 regression gates: desired outcomes and every byte-preservation/safety assertion are ordinary assertions.
     @MainActor
     func testEarlyTerminalSuccessDuringEnumerationRequiresIdentityScopedReconciliation() async throws {
         for knownLocation in [false, true] {
@@ -756,9 +755,7 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
                 let observed = lifecycleEarlyOutcome(bed, events: events)
                 let expected = LifecycleEarlyOutcome(state: .downloaded(bytes: Int64(early.bytes.count)), location: early.url,
                                                      locations: knownLocation ? 0 : 1, finishes: 1, failures: 0)
-                XCTExpectFailure("A-D2 unresolved: early success is dropped before owner creation; known=\(knownLocation), terminal-list=\(returnTerminalTask)") {
-                    XCTAssertEqual(observed, expected)
-                }
+                XCTAssertEqual(observed, expected)
             }
         }
     }
@@ -784,9 +781,7 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
             let observed = lifecycleEarlyOutcome(bed, events: events)
             let expected = LifecycleEarlyOutcome(state: .failed(message: DownloadFailureText.message(for: error)), location: nil,
                                                  locations: 0, finishes: 0, failures: 1)
-            XCTExpectFailure("A-D2 unresolved: pre-adoption failure reason is dropped; terminal-list=\(returnTerminalTask)") {
-                XCTAssertEqual(observed, expected)
-            }
+            XCTAssertEqual(observed, expected)
         }
     }
 
@@ -813,9 +808,7 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         let observed = lifecycleEarlyOutcome(bed, events: events)
         let expected = LifecycleEarlyOutcome(state: .downloaded(bytes: Int64(early.bytes.count)), location: early.url,
                                              locations: 1, finishes: 1, failures: 0)
-        XCTExpectFailure("A-D2 unresolved: early willDownload is lost even when the same native identity is later adopted") {
-            XCTAssertEqual(observed, expected)
-        }
+        XCTAssertEqual(observed, expected)
     }
 
     @MainActor
@@ -945,6 +938,123 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: savedURL.appendingPathComponent("segment.ts")), savedBytes)
         XCTAssertFalse(bed.driver.hasTask(programID: "saved"))
         XCTAssertEqual(unrelated.resumeCount + unrelated.suspendCount + unrelated.cancelCount, 0)
+    }
+
+
+    @MainActor
+    func testEarlyLosingIdentityNeverSuppliesTheViableWinnersLocation() async throws {
+        for winnerReportsLocation in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            var events: [DownloadDriverEvent] = []
+            let forward = bed.driver.onEvent
+            bed.driver.onEvent = { events.append($0); forward?($0) }
+            let early = try await lifecycleHeldRestore(bed, knownLocation: true)
+            early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+            early.task.reportedState = .completed
+            early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+            let winner = bed.backend.legacy("A", allowingCellular: true)
+            winner.reportedState = .running
+            let winnerBytes = Data("distinct-winner-package".utf8)
+            let winnerURL = try bed.writeAsset("winner", bytes: winnerBytes)
+            if winnerReportsLocation {
+                early.delegate.receiveWillDownload(winner.session, task: winner.task, location: winnerURL)
+            }
+            // No actor drain: receipts must already belong to this window at native receipt time.
+            bed.backend.releaseEnumeration([early.task.handle, winner.handle])
+            await bed.center.waitForPendingRestoration()
+            XCTAssertTrue(bed.driver.hasTask(programID: "A"))
+            XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+            winner.reportedState = .completed
+            early.delegate.urlSession(winner.session, task: winner.task, didCompleteWithError: nil)
+            await lifecycleCallbacks()
+            let outcome = lifecycleEarlyOutcome(bed, events: events)
+            if winnerReportsLocation {
+                XCTAssertEqual(outcome.location, winnerURL)
+                XCTAssertEqual(outcome.state, .downloaded(bytes: Int64(winnerBytes.count)))
+                XCTAssertEqual(outcome.finishes, 1)
+            } else {
+                XCTAssertNil(outcome.location)
+                XCTAssertEqual(outcome.finishes, 0)
+                XCTAssertEqual(outcome.failures, 1, "Ambiguous persisted path is not proof of the winner's location")
+            }
+            XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+            XCTAssertEqual(try Data(contentsOf: winnerURL.appendingPathComponent("segment.ts")), winnerBytes)
+            XCTAssertEqual(early.task.resumeCount + winner.resumeCount, 0)
+        }
+    }
+
+    @MainActor
+    func testMultipleEarlyTerminalIdentitiesLeaveTheSnapshotInterrupted() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        var events: [DownloadDriverEvent] = []
+        let forward = bed.driver.onEvent
+        bed.driver.onEvent = { events.append($0); forward?($0) }
+        let early = try await lifecycleHeldRestore(bed, knownLocation: true)
+        let other = bed.backend.legacy("A", allowingCellular: true)
+        for task in [early.task, other] {
+            task.reportedState = .completed
+            early.delegate.receiveWillDownload(task.session, task: task.task, location: early.url)
+            early.delegate.urlSession(task.session, task: task.task, didCompleteWithError: nil)
+        }
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+        XCTAssertTrue(bed.center.isInterrupted("A"))
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: early.url.appendingPathComponent("segment.ts")), early.bytes)
+        XCTAssertEqual(early.task.resumeCount + early.task.suspendCount + early.task.cancelCount, 0)
+        XCTAssertEqual(other.resumeCount + other.suspendCount + other.cancelCount, 0)
+    }
+
+    @MainActor
+    func testEarlyTerminalRechecksTheSnapshotAfterLocationObserversCancel() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let early = try await lifecycleHeldRestore(bed, knownLocation: false)
+        let forward = bed.driver.onEvent
+        var terminals = 0
+        bed.driver.onEvent = { event in
+            forward?(event)
+            switch event {
+            case .willDownload: bed.center.cancel("A")
+            case .finished, .failed: terminals += 1
+            case .progress: break
+            }
+        }
+        early.delegate.receiveWillDownload(early.task.session, task: early.task.task, location: early.url)
+        early.task.reportedState = .completed
+        early.delegate.urlSession(early.task.session, task: early.task.task, didCompleteWithError: nil)
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(bed.center.state(for: "A"), .notDownloaded)
+        XCTAssertNil(bed.center.offlineAssetURL(for: "A"))
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        XCTAssertEqual(terminals, 0)
+    }
+
+    @MainActor
+    func testCallbackCaptureWindowCannotBeRelabelledOrClosedByAnOlderGeneration() {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let old = backend.legacy("A"), newer = backend.legacy("A", allowingCellular: true)
+        let gate = AssetDownloadCallbackGate(), first = UUID(), second = UUID(), owner = UUID()
+        gate.open(first, targets: ["A"])
+        XCTAssertNil(gate.capture("A", identity: old.handle.identity, outcome: .succeeded))
+        gate.open(second, targets: ["A"])
+        XCTAssertTrue(gate.close(first).isEmpty, "Old cleanup cannot close or drain the new window")
+        XCTAssertNil(gate.capture("A", identity: newer.handle.identity, outcome: .succeeded))
+        let receipts = gate.close(second, installing: [.init(programID: "A", identity: newer.handle.identity, generation: owner)])
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.identity, newer.handle.identity)
+        XCTAssertEqual(receipts.first?.outcome, .succeeded)
+        XCTAssertEqual(gate.capture("A", identity: newer.handle.identity, outcome: .succeeded), owner)
+        XCTAssertNil(gate.capture("A", identity: old.handle.identity, outcome: .succeeded))
+        XCTAssertTrue(gate.close(second).isEmpty, "Each window drains only once")
+        gate.unregister("A", generation: owner)
+        XCTAssertNil(gate.capture("A", identity: newer.handle.identity, outcome: .succeeded))
     }
 
 }
