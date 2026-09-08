@@ -6,7 +6,8 @@ import XCTest
 
 /// Opt-in review artifacts, not pixel-baseline tests. Run only with
 /// TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 when invoking xcodebuild (it forwards
-/// RECORD_UI_SNAPSHOTS=1 to the test process). No network is used.
+/// RECORD_UI_SNAPSHOTS=1 to the test process). The fixtures inject offline
+/// services and do not request a live stream.
 @MainActor
 final class UIRenderingRegressionTests: XCTestCase {
     private struct SnapshotRecord: Codable {
@@ -229,9 +230,14 @@ final class UIRenderingRegressionTests: XCTestCase {
                 transaction.animation = nil
                 transaction.disablesAnimations = true
             }
-            .defaultAppStorage(fixture.defaults)
-            .frame(width: size.width, height: size.height))
-        let harness = UIRenderingHost(root: root, size: size, colorScheme: colorScheme)
+            .defaultAppStorage(fixture.defaults))
+        // A full-window fixed SwiftUI frame would be centered inside the
+        // window's smaller safe-area proposal, shifting controls outside the
+        // captured bounds. Screen fixtures accept that proposal; isolated
+        // player components intentionally use a zero-inset drawing canvas.
+        let hostedRoot = validatesPlayerBounds ? AnyView(root.ignoresSafeArea()) : root
+        let harness = UIRenderingHost(root: hostedRoot, size: size, colorScheme: colorScheme,
+                                      isIsolatedCanvas: validatesPlayerBounds)
         fixture.mountedHost = harness
         await Task.yield()
         try await Task.sleep(nanoseconds: 250_000_000)
@@ -241,6 +247,7 @@ final class UIRenderingRegressionTests: XCTestCase {
         let rootView = try XCTUnwrap(harness.rootView)
         XCTAssertEqual(rootView.bounds.size, size)
         XCTAssertFalse(rootView.subviews.isEmpty, "Expected a mounted production hierarchy")
+        print("UI_REVIEW_GEOMETRY name=\(name) \(harness.geometryDescription)")
 
         if validatesPlayerBounds {
             let controls = descendants(of: rootView, matching: PlayerControlHitTargetView.self)
@@ -299,21 +306,28 @@ private final class UIRenderingHost {
     private var window: UIWindow?
     var rootView: UIView? { host?.view }
 
-    init(root: AnyView, size: CGSize, colorScheme: ColorScheme = .light) {
+    init(root: AnyView, size: CGSize, colorScheme: ColorScheme = .light, isIsolatedCanvas: Bool = false) {
         let host = UIHostingController(rootView: root)
+        if #available(iOS 16.4, *), isIsolatedCanvas { host.safeAreaRegions = [] }
         let window = UIWindow(frame: CGRect(origin: .zero, size: size))
         self.host = host
         self.window = window
         window.overrideUserInterfaceStyle = colorScheme == .dark ? .dark : .light
         host.view.backgroundColor = .systemBackground
         host.view.frame = window.bounds
-        // Match HostedStageHarness: do not become rootViewController, make key,
-        // or begin appearance transitions that may survive this short-lived host.
-        window.addSubview(host.view)
+        // Use normal view-controller containment so navigation bars and safe
+        // areas are laid out. This window never becomes key and is dismantled
+        // explicitly before the next capture.
+        window.rootViewController = host
         window.isHidden = false
         window.frame = CGRect(origin: .zero, size: size)
         host.view.frame = window.bounds
         layout()
+    }
+
+    var geometryDescription: String {
+        guard let host, let window else { return "detached" }
+        return "window=\(window.bounds) root=\(host.view.bounds) frame=\(host.view.frame) safe=\(host.view.safeAreaInsets)"
     }
 
     func layout() {
@@ -326,8 +340,9 @@ private final class UIRenderingHost {
         host?.rootView = AnyView(EmptyView())
         host?.view.layoutIfNeeded()
         await Task.yield()
-        host?.view.removeFromSuperview()
         window?.isHidden = true
+        window?.rootViewController = nil
+        host?.view.removeFromSuperview()
         host = nil
         window = nil
         await Task.yield()
