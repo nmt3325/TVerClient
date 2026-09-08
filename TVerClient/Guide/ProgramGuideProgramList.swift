@@ -60,10 +60,47 @@ struct ProgramGuideListSection: Identifiable {
     var id: String { channel.id }
 }
 
-/// 番組表のリスト表示。
-///
-/// 標準の `List` + `Section` + `LabeledContent` で組み、引っぱって更新やスワイプ、
-/// 行の押し込みといった OS の作法をそのまま使えるようにしている。
+/// A later channel's current show takes precedence over an earlier channel's future show.
+enum ProgramGuideListNavigation {
+    static func nowRowID(in sections: [ProgramGuideListSection], now: Date) -> String? {
+        for section in sections {
+            if let program = section.programs.first(where: {
+                !$0.isPause && $0.startAt <= now && now < $0.endAt
+            }) {
+                return ProgramGuideListRowID.make(channelID: section.channel.id, programID: program.id)
+            }
+        }
+        let upcoming = sections.compactMap { section -> (String, TVerLiveProgram)? in
+            guard let program = section.programs.filter({ !$0.isPause && $0.startAt >= now })
+                .min(by: { $0.startAt < $1.startAt }) else { return nil }
+            return (section.channel.id, program)
+        }.min { $0.1.startAt < $1.1.startAt }
+        if let (channelID, program) = upcoming {
+            return ProgramGuideListRowID.make(channelID: channelID, programID: program.id)
+        }
+        // If every station is paused, still move to the current slot without labeling it playable.
+        for section in sections {
+            if let program = section.programs.first(where: { $0.startAt <= now && now < $0.endAt }) {
+                return ProgramGuideListRowID.make(channelID: section.channel.id, programID: program.id)
+            }
+        }
+        return nil
+    }
+}
+
+/// Returning from a detail sheet must not reset the list to the live edge.
+struct ProgramGuideInitialPosition {
+    private(set) var positionedDate: Date?
+
+    mutating func target(in sections: [ProgramGuideListSection], on selectedDate: Date, now: Date) -> String? {
+        guard !sections.isEmpty, positionedDate != selectedDate else { return nil }
+        positionedDate = selectedDate
+        guard GuideBroadcastAxis.isSameDay(selectedDate, now) else { return nil }
+        return ProgramGuideListNavigation.nowRowID(in: sections, now: now)
+    }
+}
+
+/// 番組表のリスト表示。標準の List で番組を読み、引っぱって更新する。
 @MainActor
 struct ProgramGuideProgramList: View {
     let guide: [TVerGuideChannel]
@@ -75,84 +112,91 @@ struct ProgramGuideProgramList: View {
 
     @EnvironmentObject private var availabilityStore: CatchUpAvailabilityStore
     @EnvironmentObject private var tabReselection: TabReselection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var initialPosition = ProgramGuideInitialPosition()
 
     var body: some View {
         ScrollViewReader { proxy in
             let listSections = sections
-            List {
-                ForEach(listSections) { section in
-                    Section {
-                        ForEach(section.programs) { program in
-                            row(channel: section.channel, program: program)
-                                .id(ProgramGuideListRowID.make(
-                                    channelID: section.channel.id,
-                                    programID: program.id
-                                ))
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                List {
+                    ForEach(listSections) { section in
+                        Section {
+                            ForEach(section.programs) { program in
+                                row(channel: section.channel, program: program, now: context.date)
+                                    .id(ProgramGuideListRowID.make(
+                                        channelID: section.channel.id,
+                                        programID: program.id
+                                    ))
+                            }
+                        } header: {
+                            Text(section.channel.name)
+                                .id(section.id == listSections.first?.id
+                                    ? StandardScrollAnchor.top
+                                    : ProgramGuideListRowID.section(channelID: section.channel.id))
                         }
-                    } header: {
-                        Text(section.channel.name)
-                            .id(section.id == listSections.first?.id
-                                ? StandardScrollAnchor.top
-                                : ProgramGuideListRowID.section(channelID: section.channel.id))
                     }
                 }
-            }
-            .listStyle(.insetGrouped)
-            .refreshable { await onRefresh() }
-            .onChange(of: scrollToNowToken) { _ in
-                guard let target = nowRowID(now: Date()) else { return }
-                withAnimation { proxy.scrollTo(target, anchor: .top) }
-            }
-            .onReceive(tabReselection.events) { tab in
-                guard tab == .guide else { return }
-                withAnimation { proxy.scrollTo(StandardScrollAnchor.top, anchor: .top) }
+                .listStyle(.insetGrouped)
+                .refreshable { await onRefresh() }
+                .task(id: selectedDate) {
+                    // Let List install its rows before asking ScrollViewReader for their IDs.
+                    await Task.yield()
+                    guard !Task.isCancelled,
+                          let target = initialPosition.target(in: listSections, on: selectedDate, now: Date())
+                    else { return }
+                    proxy.scrollTo(target, anchor: .top)
+                }
+                .onChange(of: scrollToNowToken) { _ in
+                    guard let target = ProgramGuideListNavigation.nowRowID(in: listSections, now: Date()) else { return }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(target, anchor: .top) }
+                }
+                .onReceive(tabReselection.events) { tab in
+                    guard tab == .guide else { return }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(StandardScrollAnchor.top, anchor: .top) }
+                }
             }
         }
     }
 
     @ViewBuilder
-    private func row(channel: TVerLiveChannel, program: TVerLiveProgram) -> some View {
-        let now = Date()
-        let isOnAir = program.startAt <= now && now < program.endAt
+    private func row(channel: TVerLiveChannel, program: TVerLiveProgram, now: Date) -> some View {
+        let isOnAir = GuideProgramTimeStatus.isOnAir(program, now: now)
         let availability = availabilityStore.availability(
             channelID: channel.id,
             program: program,
             channelState: channel.state,
             now: now
         )
-        let hasNothingToPlay = GuideAvailabilityPresentation
-            .hasNothingToPlay(isOnAir: isOnAir, availability: availability)
+        let badge = GuideAvailabilityPresentation.badgeKind(isOnAir: isOnAir, availability: availability)
         Button {
             onSelect(channel, program, availability)
         } label: {
             LabeledContent {
-                // 押すと詳細が開くことを、標準の一覧と同じ形で示す。
                 Image(systemName: "chevron.forward")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.tertiary)
             } label: {
                 VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                    HStack(alignment: .firstTextBaseline, spacing: DS.Spacing.s) {
-                        Text(GuideBroadcastAxis.timeRangeLabel(for: program))
-                            .font(.subheadline.monospacedDigit().weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        if isOnAir {
-                            Text("放送中")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(DS.Palette.live)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: DS.Spacing.s) {
+                            timeLabel(for: program)
+                            if let badge { MediaBadge(badge) }
+                        }
+                        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                            timeLabel(for: program)
+                            if let badge { MediaBadge(badge) }
                         }
                     }
                     Text(program.seriesTitle)
-                        .font(.body)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     if program.title != program.seriesTitle {
                         Text(program.title)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                    }
-                    if let kind = GuideAvailabilityPresentation
-                        .badgeKind(isOnAir: isOnAir, availability: availability)
-                    {
-                        MediaBadge(kind)
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     }
                 }
                 .multilineTextAlignment(.leading)
@@ -164,11 +208,10 @@ struct ProgramGuideProgramList: View {
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
         .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
-        // 見逃しが無くても詳細の閲覧と通知予約は使えるので、押せなくしない。
-        .opacity(hasNothingToPlay ? 0.72 : 1)
-        .onAppear {
-            // 見逃しの有無は、行が実際に見えたときだけ問い合わせる。
-            availabilityStore.prefetch(channelID: channel.id, programs: [program])
+        // A no-catch-up badge is enough; fading the whole row made its title harder to read.
+        .onAppear { availabilityStore.prefetch(channelID: channel.id, programs: [program]) }
+        .onChange(of: isOnAir) { onAir in
+            if !onAir { availabilityStore.prefetch(channelID: channel.id, programs: [program]) }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
@@ -183,12 +226,16 @@ struct ProgramGuideProgramList: View {
             )
         )
         .accessibilityHint(
-            GuideAvailabilityPresentation.accessibilityHint(
-                isOnAir: isOnAir,
-                availability: availability
-            )
+            GuideAvailabilityPresentation.accessibilityHint(isOnAir: isOnAir, availability: availability)
         )
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
+    }
+
+    private func timeLabel(for program: TVerLiveProgram) -> some View {
+        Text(GuideBroadcastAxis.timeRangeLabel(for: program))
+            .font(.subheadline.monospacedDigit().weight(.medium))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// 選択中の日に番組がある局だけを、放送順に並べて返す。
@@ -201,93 +248,115 @@ struct ProgramGuideProgramList: View {
         }
     }
 
-    /// 「今」で戻る先。放送中の枠が無ければ、次に始まる枠に寄せる。
-    private func nowRowID(now: Date) -> String? {
-        for section in sections {
-            let onAir = section.programs.first { $0.startAt <= now && now < $0.endAt }
-            let upcoming = section.programs.first { $0.startAt >= now }
-            guard let target = onAir ?? upcoming else { continue }
-            return ProgramGuideListRowID.make(
-                channelID: section.channel.id,
-                programID: target.id
-            )
-        }
-        return nil
-    }
 }
 
-/// 放送日の切り替え。自作の横スクロールチップをやめ、標準の `Picker` に寄せる。
-///
-/// 日数が少ないうちは `.segmented`、増えたら `.menu` に落として文字を潰さない。
+/// Date, adjacent-day navigation and the live edge stay together without covering any rows.
 @MainActor
 struct ProgramGuideDateSelector: View {
     let dates: [Date]
     @Binding var selectedDate: Date
-
-    /// これを超える日数を segmented に詰めると、1つあたりが 44pt を割る。
-    private let segmentedLimit = 4
+    var onJumpToNow: (() -> Void)? = nil
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        content
-            .padding(.horizontal, DS.Spacing.l)
-            .padding(.vertical, DS.Spacing.s)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
-            .accessibilityElement(children: .contain)
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: DS.Spacing.xs) {
+                    dateControls
+                    nowButton
+                }
+            } else {
+                HStack(spacing: DS.Spacing.s) {
+                    dateControls
+                    nowButton
+                }
+            }
+        }
+        .padding(.horizontal, DS.Spacing.l)
+        .padding(.vertical, DS.Spacing.xs)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var dateControls: some View {
+        HStack(spacing: DS.Spacing.xs) {
+            if dates.count > 1 { dayButton(direction: -1) }
+            if dates.count > 1 {
+                Menu {
+                    Picker("放送日", selection: selection) {
+                        ForEach(dates, id: \.self) { date in
+                            Text(longLabel(for: date))
+                                .accessibilityLabel(accessibilityLabel(for: date))
+                                .tag(date)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: DS.Spacing.xs) {
+                        Text(longLabel(for: selection.wrappedValue))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Image(systemName: "chevron.down").font(.caption)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel("放送日")
+                .accessibilityValue(accessibilityLabel(for: selection.wrappedValue))
+                .accessibilityHint("放送日を選びます。1日は朝5時から翌朝5時までです")
+            } else if let only = dates.first {
+                Text(longLabel(for: only))
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget, alignment: .leading)
+                    .accessibilityLabel(accessibilityLabel(for: only))
+            }
+            if dates.count > 1 { dayButton(direction: 1) }
+        }
+    }
+
+    private func dayButton(direction: Int) -> some View {
+        let target = GuideDayNavigation.adjacentDate(in: dates, to: selection.wrappedValue, direction: direction)
+        return Button {
+            if let target { selectedDate = target }
+        } label: {
+            Image(systemName: direction < 0 ? "chevron.left" : "chevron.right")
+                .font(.subheadline.weight(.semibold))
+                .frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
+        }
+        .disabled(target == nil)
+        .accessibilityLabel(direction < 0 ? "前の放送日" : "次の放送日")
     }
 
     @ViewBuilder
-    private var content: some View {
-        if dates.count > segmentedLimit {
-            picker(usesShortLabel: false)
-                .pickerStyle(.menu)
-        } else if dates.count > 1 {
-            picker(usesShortLabel: true)
-                .pickerStyle(.segmented)
-        } else if let only = dates.first {
-            // 選べる日が1日だけなら切り替えを出さず、その日を示すだけにする。
-            Text(longLabel(for: only))
-                .font(.subheadline.weight(.semibold))
-                .accessibilityLabel(accessibilityLabel(for: only))
-        }
-    }
-
-    private func picker(usesShortLabel: Bool) -> some View {
-        Picker("放送日", selection: selection) {
-            ForEach(dates, id: \.self) { date in
-                Text(usesShortLabel ? shortLabel(for: date) : longLabel(for: date))
-                    .accessibilityLabel(accessibilityLabel(for: date))
-                    .tag(date)
+    private var nowButton: some View {
+        if let onJumpToNow {
+            Button(action: onJumpToNow) {
+                Text("現在")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minWidth: ProgramGuideMetrics.minimumTapTarget, minHeight: ProgramGuideMetrics.minimumTapTarget)
             }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("現在時刻に戻る")
+            .accessibilityHint("今日の放送中または次の番組へ移動します")
         }
     }
 
-    /// 表示中の日を、必ず選択肢のどれかに寄せて返す。
     private var selection: Binding<Date> {
         Binding(
-            get: {
-                dates.first { GuideBroadcastAxis.isSameDay($0, selectedDate) } ?? selectedDate
-            },
+            get: { dates.first { GuideBroadcastAxis.isSameDay($0, selectedDate) } ?? dates.first ?? selectedDate },
             set: { selectedDate = $0 }
         )
     }
 
-    private func shortLabel(for date: Date) -> String {
-        GuideBroadcastAxis.relativeDayLabel(for: date) ?? GuideBroadcastAxis.monthDayLabel(for: date)
-    }
-
     private func longLabel(for date: Date) -> String {
-        guard let relative = GuideBroadcastAxis.relativeDayLabel(for: date) else {
-            return GuideBroadcastAxis.fullDayLabel(for: date)
-        }
-        return "\(relative)（\(GuideBroadcastAxis.monthDayLabel(for: date))）"
+        let day = GuideBroadcastAxis.monthDayLabel(for: date)
+        if let relative = GuideBroadcastAxis.relativeDayLabel(for: date) { return "\(relative) \(day)" }
+        return "\(day)（\(GuideBroadcastAxis.weekdayLabel(for: date))）"
     }
 
     private func accessibilityLabel(for date: Date) -> String {
         TVerAccessibilityText.guideDate(
             date,
-            relativeLabel: GuideBroadcastAxis.relativeDayLabel(for: date)
-                ?? GuideBroadcastAxis.weekdayLabel(for: date)
+            relativeLabel: GuideBroadcastAxis.relativeDayLabel(for: date) ?? GuideBroadcastAxis.weekdayLabel(for: date)
         )
     }
 }

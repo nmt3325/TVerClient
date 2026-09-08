@@ -1,4 +1,5 @@
 import AVKit
+import Combine
 import SwiftUI
 import UIKit
 
@@ -144,6 +145,7 @@ struct ProgramGuideView: View {
     @ObservedObject private var playbackController: PlaybackController
     @ObservedObject private var libraryStore: ProgramLibraryStore
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// VoiceOver 中に格子を渡すと読み上げ順が追えず操作できないので、線形リストに切り替える。
     @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
     @State private var selectedDate = GuideBroadcastAxis.dayStart(containing: Date())
@@ -212,49 +214,8 @@ struct ProgramGuideView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
                 ToolbarItem(placement: ToolbarCompat.leading) { layoutModeMenu }
-                if zoomControlState.isPresented {
-                    ToolbarItem(placement: ToolbarCompat.leading) {
-                        Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
-                            Image(systemName: "minus.magnifyingglass")
-                                .frame(
-                                    width: ProgramGuideMetrics.minimumTapTarget,
-                                    height: ProgramGuideMetrics.minimumTapTarget
-                                )
-                        }
-                        .disabled(!zoomControlState.canZoomOut)
-                        .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomOut)
-                        .accessibilityLabel("番組表を縮小")
-                        .accessibilityValue(zoomControlState.accessibilityValue)
-                        .accessibilityHint("1時間あたりの表示を縮めます")
-                    }
-                    ToolbarItem(placement: ToolbarCompat.leading) {
-                        Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
-                            Image(systemName: "plus.magnifyingglass")
-                                .frame(
-                                    width: ProgramGuideMetrics.minimumTapTarget,
-                                    height: ProgramGuideMetrics.minimumTapTarget
-                                )
-                        }
-                        .disabled(!zoomControlState.canZoomIn)
-                        .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomIn)
-                        .accessibilityLabel("番組表を拡大")
-                        .accessibilityValue(zoomControlState.accessibilityValue)
-                        .accessibilityHint("1時間あたりの表示を広げます")
-                    }
-                }
                 ToolbarItem(placement: ToolbarCompat.trailing) { channelFilterMenu }
-                ToolbarItem(placement: ToolbarCompat.trailing) { notificationListButton }
-                ToolbarItem(placement: ToolbarCompat.trailing) {
-                    Button { Task { await viewModel.load() } } label: {
-                        if viewModel.isLoading {
-                            ProgressView().frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
-                        } else {
-                            Image(systemName: "arrow.clockwise").frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
-                        }
-                    }
-                    .disabled(viewModel.isLoading)
-                    .accessibilityLabel(viewModel.isLoading ? "更新中" : "番組表を更新")
-                }
+                ToolbarItem(placement: ToolbarCompat.trailing) { moreActionsMenu }
             }
         }
         .onAppear(perform: normalizeStoredPointsPerMinute)
@@ -308,27 +269,49 @@ struct ProgramGuideView: View {
             }
             ProgramGuideDateSelector(
                 dates: GuideBroadcastAxis.dates(in: viewModel.guide),
-                selectedDate: $selectedDate
+                selectedDate: $selectedDate,
+                onJumpToNow: hasTodayInGuide ? jumpToNow : nil
             )
             Divider()
             Group {
-                switch layoutMode {
-                case .list:
-                    ProgramGuideProgramList(
-                        guide: visibleGuide,
-                        selectedDate: selectedDate,
-                        scrollToNowToken: scrollToNowToken,
-                        onSelect: selectProgram,
-                        onRefresh: { await viewModel.load() }
-                    )
-                case .grid:
-                    ProgramGuideGrid(
-                        guide: visibleGuide,
-                        selectedDate: selectedDate,
-                        pointsPerMinute: pointsPerMinuteBinding,
-                        scrollToNowToken: scrollToNowToken,
-                        onSelect: selectProgram
-                    )
+                if !hasVisibleProgramsForSelectedDate {
+                    ProgramGuideStatusView(
+                        title: "この日の番組情報がありません",
+                        message: hiddenChannelIDs.isEmpty
+                            ? "別の放送日を選ぶか、番組表を更新してください。"
+                            : "選択した放送局には番組がありません。放送局の絞り込みを解除できます。",
+                        systemImage: "calendar.badge.exclamationmark"
+                    ) {
+                        if !hiddenChannelIDs.isEmpty {
+                            Button("すべての放送局を表示") { hiddenChannelIDsText = "" }
+                                .buttonStyle(.bordered)
+                                .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
+                        } else {
+                            Button("更新") { Task { await viewModel.load() } }
+                                .buttonStyle(.bordered)
+                                .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
+                                .disabled(viewModel.isLoading)
+                        }
+                    }
+                } else {
+                    switch layoutMode {
+                    case .list:
+                        ProgramGuideProgramList(
+                            guide: visibleGuide,
+                            selectedDate: selectedDate,
+                            scrollToNowToken: scrollToNowToken,
+                            onSelect: selectProgram,
+                            onRefresh: { await viewModel.load() }
+                        )
+                    case .grid:
+                        ProgramGuideGrid(
+                            guide: visibleGuide,
+                            selectedDate: selectedDate,
+                            pointsPerMinute: pointsPerMinuteBinding,
+                            scrollToNowToken: scrollToNowToken,
+                            onSelect: selectProgram
+                        )
+                    }
                 }
             }
             .id(selectedDate)
@@ -341,21 +324,6 @@ struct ProgramGuideView: View {
                     .background(.regularMaterial, in: Circle())
                     .padding(.top, 8)
                     .accessibilityLabel("更新中")
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if hasTodayInGuide {
-                Button(action: jumpToNow) {
-                    Label("今", systemImage: "clock.arrow.circlepath")
-                        .font(.footnote.weight(.semibold))
-                        .padding(.horizontal, DS.Spacing.m)
-                        .frame(minHeight: ProgramGuideMetrics.minimumTapTarget)
-                        .background(.regularMaterial, in: Capsule())
-                        .overlay { Capsule().stroke(Color(uiColor: .separator).opacity(0.4)) }
-                }
-                .buttonStyle(.plain)
-                .padding(DS.Spacing.l)
-                .accessibilityLabel("現在時刻に戻る")
             }
         }
     }
@@ -392,24 +360,24 @@ struct ProgramGuideView: View {
     }
 
     private var hiddenChannelIDs: Set<String> {
-        Set(hiddenChannelIDsText.split(separator: "\n").map(String.init))
+        GuideChannelFilter.normalizedHiddenIDs(
+            Set(hiddenChannelIDsText.split(separator: "\n").map(String.init)),
+            channelIDs: Set(viewModel.guide.map { $0.channel.id })
+        )
     }
 
     private var visibleGuide: [TVerGuideChannel] {
         let hidden = hiddenChannelIDs
-        guard !hidden.isEmpty else { return viewModel.guide }
-        let filtered = viewModel.guide.filter { !hidden.contains($0.channel.id) }
-        // Hiding every channel would leave a blank grid with no way back.
-        return filtered.isEmpty ? viewModel.guide : filtered
+        return viewModel.guide.filter { !hidden.contains($0.channel.id) }
     }
 
     private var hasTodayInGuide: Bool {
-        ProgramGuideMetrics.dates(in: viewModel.guide)
-            .contains { ProgramGuideMetrics.calendar.isDateInToday($0) }
+        GuideDayNavigation.currentDate(in: GuideBroadcastAxis.dates(in: viewModel.guide)) != nil
     }
 
     private var channelFilterMenu: some View {
         Menu {
+            Text("\(visibleGuide.count) / \(viewModel.guide.count)局を表示")
             Button { hiddenChannelIDsText = "" } label: {
                 Label("すべて表示", systemImage: "eye")
             }
@@ -423,17 +391,16 @@ struct ProgramGuideView: View {
                         Label(item.channel.name, systemImage: "checkmark")
                     }
                 }
+                .disabled(!hiddenChannelIDs.contains(item.channel.id) && visibleGuide.count == 1)
             }
+            Text("少なくとも1局を表示します")
         } label: {
-            Image(systemName: hiddenChannelIDs.isEmpty
-                ? "line.3.horizontal.decrease.circle"
-                : "line.3.horizontal.decrease.circle.fill")
-                .frame(
-                    width: ProgramGuideMetrics.minimumTapTarget,
-                    height: ProgramGuideMetrics.minimumTapTarget
-                )
+            Text(hiddenChannelIDs.isEmpty ? "放送局" : "\(visibleGuide.count)局")
+                .frame(minWidth: ProgramGuideMetrics.minimumTapTarget, minHeight: ProgramGuideMetrics.minimumTapTarget)
         }
-        .accessibilityLabel("チャンネルを絞り込む")
+        .disabled(viewModel.guide.isEmpty)
+        .accessibilityLabel("放送局を絞り込む")
+        .accessibilityValue("\(viewModel.guide.count)局中\(visibleGuide.count)局を表示")
     }
 
     /// 格子は VoiceOver でも特大文字でも成立しないので、そのときはリストを強制する。
@@ -441,52 +408,65 @@ struct ProgramGuideView: View {
         isVoiceOverRunning || dynamicTypeSize.isAccessibilitySize
     }
 
-    /// 実際に出す表示方法。利用者の選択を使い、強制リストのときだけ上書きする。
     private var layoutMode: GuideLayoutMode {
-        GuideLayoutModeResolver.resolve(
-            stored: storedLayoutMode,
-            usesAccessibleList: usesAccessibleList
-        )
+        GuideLayoutModeResolver.resolve(stored: storedLayoutMode, usesAccessibleList: usesAccessibleList)
     }
 
-    /// 表示方法の切り替え。以前は読み上げ中だけリストになったが、いまは自分で選べる。
+    /// Density is part of display settings, not two more competing toolbar buttons.
     private var layoutModeMenu: some View {
         Menu {
             Picker("表示形式", selection: $storedLayoutMode) {
                 ForEach(GuideLayoutMode.allCases) { mode in
-                    Label(mode.title, systemImage: mode.systemImage)
-                        .tag(mode.rawValue)
+                    Label(mode.title, systemImage: mode.systemImage).tag(mode.rawValue)
                 }
             }
             .pickerStyle(.inline)
             .disabled(usesAccessibleList)
             if usesAccessibleList {
-                Text("読み上げ中と特大文字のあいだはリスト表示のままにします")
+                Text("読み上げ中と特大文字ではリストで表示します")
+            }
+            if zoomControlState.isPresented {
+                Divider()
+                Text(zoomControlState.accessibilityValue)
+                Button { zoom(to: GuideZoom.nextStop(above: pointsPerMinute)) } label: {
+                    Label("番組表を拡大", systemImage: "plus.magnifyingglass")
+                }
+                .disabled(!zoomControlState.canZoomIn)
+                .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomIn)
+                .accessibilityValue(zoomControlState.accessibilityValue)
+                Button { zoom(to: GuideZoom.nextStop(below: pointsPerMinute)) } label: {
+                    Label("番組表を縮小", systemImage: "minus.magnifyingglass")
+                }
+                .disabled(!zoomControlState.canZoomOut)
+                .accessibilityIdentifier(GuideAccessibilityIdentifier.zoomOut)
+                .accessibilityValue(zoomControlState.accessibilityValue)
+                Button("標準の大きさに戻す") { zoom(to: GuideZoom.defaultPointsPerMinute) }
             }
         } label: {
-            Image(systemName: layoutMode.systemImage)
-                .frame(
-                    width: ProgramGuideMetrics.minimumTapTarget,
-                    height: ProgramGuideMetrics.minimumTapTarget
-                )
+            Text("表示")
+                .frame(minWidth: ProgramGuideMetrics.minimumTapTarget, minHeight: ProgramGuideMetrics.minimumTapTarget)
         }
         .accessibilityIdentifier(GuideAccessibilityIdentifier.layoutMode)
         .accessibilityLabel("表示形式")
         .accessibilityValue(layoutMode.title)
-        .accessibilityHint("番組表をリストと格子で切り替えます")
+        .accessibilityHint("リストと番組表の切り替え、番組表の拡大縮小")
     }
 
-    /// 予約済みの通知を見て解除するための入り口。
-    private var notificationListButton: some View {
-        Button { isShowingNotificationList = true } label: {
-            Image(systemName: "bell")
-                .frame(
-                    width: ProgramGuideMetrics.minimumTapTarget,
-                    height: ProgramGuideMetrics.minimumTapTarget
-                )
+    private var moreActionsMenu: some View {
+        Menu {
+            Button { Task { await viewModel.load() } } label: {
+                Label(viewModel.isLoading ? "更新中" : "番組表を更新", systemImage: "arrow.clockwise")
+            }
+            .disabled(viewModel.isLoading)
+            Button { isShowingNotificationList = true } label: {
+                Label("通知の予約一覧", systemImage: "bell")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .frame(width: ProgramGuideMetrics.minimumTapTarget, height: ProgramGuideMetrics.minimumTapTarget)
         }
-        .accessibilityLabel("通知の予約一覧")
-        .accessibilityHint("予約した放送開始通知を確認して解除します")
+        .accessibilityLabel("番組表のその他の操作")
+        .accessibilityHint("更新と通知の予約一覧")
     }
 
     private func normalizeStoredPointsPerMinute() {
@@ -495,32 +475,25 @@ struct ProgramGuideView: View {
     }
 
     private func zoom(to value: CGFloat) {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
             storedPointsPerMinute = GuideZoomPreference.normalizedStoredValue(Double(value))
         }
     }
 
     private func toggleChannel(_ channelID: String) {
-        var hidden = hiddenChannelIDs
-        if hidden.contains(channelID) {
-            hidden.remove(channelID)
-        } else {
-            hidden.insert(channelID)
-        }
+        let hidden = GuideChannelFilter.toggling(
+            channelID,
+            hiddenIDs: hiddenChannelIDs,
+            channelIDs: Set(viewModel.guide.map { $0.channel.id })
+        )
         hiddenChannelIDsText = hidden.sorted().joined(separator: "\n")
     }
 
-    /// Jumps to the live edge, switching to today first when the user is
-    /// looking at another day.
+    /// Switching days creates a new list/grid; its initial position also resolves the live edge.
     private func jumpToNow() {
-        let now = Date()
-        let today = GuideBroadcastAxis.dates(in: viewModel.guide)
-            .first { GuideBroadcastAxis.isSameDay($0, now) }
-        if let today, !GuideBroadcastAxis.isSameDay(today, selectedDate) {
-            selectedDate = today
-        } else {
-            scrollToNowToken += 1
-        }
+        guard let today = GuideDayNavigation.currentDate(in: GuideBroadcastAxis.dates(in: viewModel.guide)) else { return }
+        if !GuideBroadcastAxis.isSameDay(today, selectedDate) { selectedDate = today }
+        scrollToNowToken += 1
     }
 
     private func selectProgram(
@@ -569,6 +542,7 @@ private struct ProgramGuideDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var requestedPlayback = false
+    @State private var currentDate = Date()
     @State private var catchUpState: GuideCatchUpState = .idle
     @State private var catchUpPlayback: TVerProgram?
     @State private var selectedLeadTime: ProgramNotificationLeadTime
@@ -597,7 +571,7 @@ private struct ProgramGuideDetailSheet: View {
     }
 
     private var route: GuidePlaybackRoute {
-        GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state)
+        GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state, now: currentDate)
     }
 
     private var canPlay: Bool { route == .live }
@@ -661,11 +635,8 @@ private struct ProgramGuideDetailSheet: View {
                         if selection.program.title != selection.program.seriesTitle {
                             Text(selection.program.title).font(.headline).foregroundStyle(.secondary)
                         }
-                        Label(selection.program.timeLabel, systemImage: "clock")
+                        Label("\(GuideBroadcastAxis.fullDayLabel(for: GuideBroadcastAxis.dayStart(containing: selection.program.startAt))) \(GuideBroadcastAxis.timeRangeLabel(for: selection.program))", systemImage: "clock")
                             .font(.subheadline).foregroundStyle(.secondary)
-                        Text(selection.program.description.isEmpty ? "この番組の詳しい説明はありません。" : selection.program.description)
-                            .font(.body)
-                            .foregroundStyle(selection.program.description.isEmpty ? .secondary : .primary)
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(
@@ -736,6 +707,15 @@ private struct ProgramGuideDetailSheet: View {
                         .accessibilityElement(children: .contain)
                     }
 
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("番組内容").font(.headline).accessibilityAddTraits(.isHeader)
+                        Text(selection.program.description.isEmpty ? "この番組の詳しい説明はありません。" : selection.program.description)
+                            .font(.body)
+                            .foregroundStyle(selection.program.description.isEmpty ? .secondary : .primary)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
                     ShareLink(item: shareItem.url, subject: Text(shareItem.subject), message: Text(shareItem.message)) {
                         Label("番組を共有", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity, minHeight: 44)
@@ -767,6 +747,9 @@ private struct ProgramGuideDetailSheet: View {
                 }
             }
         }
+        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { date in
+            currentDate = date
+        }
         .sheet(item: $catchUpPlayback) { program in
             // 視聴画面は自前のバーを持たないので、シートで出すときはここで包む。
             NavigationStack {
@@ -780,6 +763,7 @@ private struct ProgramGuideDetailSheet: View {
         .onAppear {
             // ここを結んでおかないと、小窓の「元の画面に戻る」が AVKit へ false を
             // 返し、小窓だけが消えて何も起きない。停止でも小窓が生き残る。
+            currentDate = Date()
             playbackController.bindPictureInPicture(pictureInPicture)
         }
         .onDisappear {
@@ -796,7 +780,7 @@ private struct ProgramGuideDetailSheet: View {
     }
 
     private var isFutureProgram: Bool {
-        !selection.program.isPause && selection.program.startAt > Date()
+        !selection.program.isPause && selection.program.startAt > currentDate
     }
 
     private var availableLeadTimes: [ProgramNotificationLeadTime] {
@@ -805,7 +789,7 @@ private struct ProgramGuideDetailSheet: View {
             .tenMinutes,
             .fiveMinutes,
             .atStart,
-        ].filter { selection.program.startAt.addingTimeInterval(-$0.rawValue) > Date() }
+        ].filter { selection.program.startAt.addingTimeInterval(-$0.rawValue) > currentDate }
     }
 
     private var notificationControls: some View {
@@ -973,11 +957,13 @@ private struct ProgramGuideDetailSheet: View {
             route: route,
             program: selection.program,
             catchUpState: catchUpState,
-            isLivePlaybackRequested: requestedPlayback,
+            isLivePlaybackRequested: requestedPlayback && isCurrent,
             isLiveResolving: playbackController.state == .resolving,
             isLivePlaying: playbackController.isPlaying,
-            hasLivePlayerItem: playbackController.player.currentItem != nil
+            hasLivePlayerItem: isCurrent && playbackController.player.currentItem != nil,
+            now: currentDate
         )
+        .reflectingAvailability(selection.availability, route: route, catchUpState: catchUpState)
     }
 
     private var playButtonHint: String {
@@ -1004,9 +990,10 @@ private struct ProgramGuideDetailSheet: View {
     }
 
     private func handlePlayAction() {
-        switch route {
+        // Recheck the boundary at the tap, not just at the last UI clock tick.
+        switch GuidePlaybackRouter.route(for: selection.program, channelState: selection.channel.state, now: Date()) {
         case .live:
-            if requestedPlayback, playbackController.player.currentItem != nil {
+            if requestedPlayback, isCurrent, playbackController.player.currentItem != nil {
                 playbackController.togglePlayback()
             } else {
                 DiagnosticLogStore.shared.record(
@@ -1109,6 +1096,45 @@ struct GuidePlaybackButtonState: Equatable, Sendable {
     let systemImage: String
     let isEnabled: Bool
     let isSearching: Bool
+
+    /// Unknown availability is a search action, not a claim that an episode can be played.
+    func reflectingAvailability(
+        _ availability: CatchUpAvailability,
+        route: GuidePlaybackRoute,
+        catchUpState: GuideCatchUpState
+    ) -> GuidePlaybackButtonState {
+        guard route == .catchUp else { return self }
+        switch catchUpState {
+        case .searching, .found:
+            return self
+        case .notFound, .failed:
+            return GuidePlaybackButtonState(
+                title: "見逃し配信をもう一度探す",
+                systemImage: "arrow.clockwise",
+                isEnabled: true,
+                isSearching: false
+            )
+        case .idle:
+            switch availability {
+            case .available:
+                return self
+            case .unavailable:
+                return GuidePlaybackButtonState(
+                    title: "見逃し配信なし",
+                    systemImage: "play.slash",
+                    isEnabled: false,
+                    isSearching: false
+                )
+            case .unknown, .checking, .future, .liveNow:
+                return GuidePlaybackButtonState(
+                    title: "見逃し配信を探す",
+                    systemImage: "magnifyingglass",
+                    isEnabled: true,
+                    isSearching: false
+                )
+            }
+        }
+    }
 
     static func make(
         route: GuidePlaybackRoute,
