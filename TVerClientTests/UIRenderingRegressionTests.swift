@@ -264,6 +264,42 @@ final class UIRenderingRegressionTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(rect.height + 0.000_001, 44)
                 XCTAssertTrue(rootView.bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect), "Overflow: \(rect)")
             }
+            // Keep the control-marker count contract above unchanged. These
+            // separate, passive probes measure actual intrinsic Text bounds.
+            let probes = descendants(of: rootView, matching: PlayerFooterLayoutProbeView.self)
+            let times = probes.filter { $0.element == .elapsedTime || $0.element == .remainingTime }
+            let closes = probes.filter { $0.element == .fullScreenClose }
+            XCTAssertEqual(times.count, 2)
+            if name.contains("fullscreen") { XCTAssertEqual(closes.count, 1) }
+            let targets = controls.map { $0 as UIView } + scrubbers.map { $0 as UIView } + closes.map { $0 as UIView }
+            let controlRects = targets.map { $0.convert($0.bounds, to: rootView) }
+            for close in closes {
+                XCTAssertFalse(close.isUserInteractionEnabled)
+                let rect = close.convert(close.bounds, to: rootView)
+                XCTAssertGreaterThanOrEqual(rect.width + 0.000_001, 44)
+                XCTAssertGreaterThanOrEqual(rect.height + 0.000_001, 44)
+                XCTAssertTrue(rootView.bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect))
+            }
+            for time in times {
+                XCTAssertFalse(time.isUserInteractionEnabled)
+                let rect = time.convert(time.bounds, to: rootView)
+                XCTAssertGreaterThan(rect.width, 0)
+                XCTAssertGreaterThan(rect.height, 0)
+                XCTAssertTrue(rootView.bounds.contains(rect), "Intrinsic time text clips: \(rect)")
+                if dynamicType == .accessibility5 { XCTAssertGreaterThan(rect.height, 44) }
+                for control in controlRects {
+                    let overlap = rect.intersection(control)
+                    XCTAssertTrue(overlap.isNull || overlap.width <= 0.000_001 || overlap.height <= 0.000_001,
+                                  "Time text overlaps a control: \(rect), \(control)")
+                }
+            }
+            for (index, rect) in controlRects.enumerated() {
+                for other in controlRects.dropFirst(index + 1) {
+                    let overlap = rect.intersection(other)
+                    XCTAssertTrue(overlap.isNull || overlap.width <= 0.000_001 || overlap.height <= 0.000_001,
+                                  "Player controls overlap: \(rect), \(other)")
+                }
+            }
         }
 
         let format = UIGraphicsImageRendererFormat()
