@@ -49,11 +49,12 @@ final class PlayerBackgroundTapView: UIView {
         isOpaque = false
         isAccessibilityElement = false
         accessibilityIdentifier = Self.accessibilityIdentifier
-        // 単発タップをダブルタップの失敗待ちにしない。待たせるとコントロールの
-        // 表示が指を離してから 300ms ほど遅れ、標準プレイヤーの即応と違う。
-        // ダブルタップが成立したときの打ち消しは PlayerStage 側が受け持つ。
+        // Keep both taps on this plane until UIKit decides the gesture. An
+        // immediate first-tap toggle disables this view and can strand the
+        // double recognizer before its second touch arrives.
         addGestureRecognizer(singleTapRecognizer)
         addGestureRecognizer(doubleTapRecognizer)
+        singleTapRecognizer.require(toFail: doubleTapRecognizer)
     }
 
     required init?(coder: NSCoder) {
@@ -152,13 +153,7 @@ struct PlayerStage: View {
     var showsContinuityNotice: Bool = true
     var onToggleFullScreen: (() -> Void)?
 
-    /// UIKit のダブルタップ判定（およそ 0.3 秒）を包む窓。
-    private static let doubleTapCompensationWindow: TimeInterval = 0.6
-
     @State private var showsSpinner = false
-    /// 単発タップで先に適用したトグルの回数と、その時刻。
-    @State private var immediateToggleCount = 0
-    @State private var lastImmediateToggleAt: Date?
     @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -247,33 +242,15 @@ struct PlayerStage: View {
         }
     }
 
-    /// 単発タップは判定を待たずにその場でトグルする。標準プレイヤーは指を
-    /// 離した瞬間にコントロールが出るので、ダブルタップの失敗待ちで遅らせない。
+    /// UIKit delivers a single only after the double recognizer has failed.
     private func handleBackgroundSingleTap() {
-        if !isWithinDoubleTapWindow { immediateToggleCount = 0 }
-        immediateToggleCount += 1
-        lastImmediateToggleAt = Date()
         model.toggleControls()
     }
 
-    /// ダブルタップ判定が成立し得る間だけ、単発タップの打ち消しを有効にする。
-    private var isWithinDoubleTapWindow: Bool {
-        guard let lastImmediateToggleAt else { return false }
-        return Date().timeIntervalSince(lastImmediateToggleAt) < Self.doubleTapCompensationWindow
-    }
-
-    /// A double tap on the left or right half skips, and repeated taps stack
-    /// up (10, 20, 30 ...) the way the system player does. A double tap falls
-    /// back to the normal chrome toggle until a finite seek range is ready.
-    ///
-    /// 直前の単発タップで適用したトグルはここで打ち消す。UIKit が単発を
-    /// 何回配送したかに依らず、ダブルタップの前後で表示状態が勝手に
-    /// 反転しないようにするため。
+    /// A double tap skips when seeking is available, otherwise toggles once.
+    /// No speculative single was applied, so do not undo a previous independent
+    /// single gesture merely because it occurred within a wall-clock window.
     private func handleBackgroundDoubleTap(at location: CGPoint, width: CGFloat) {
-        let appliedToggles = isWithinDoubleTapWindow ? immediateToggleCount : 0
-        immediateToggleCount = 0
-        lastImmediateToggleAt = nil
-        if !appliedToggles.isMultiple(of: 2) { model.toggleControls() }
         switch PlayerStageBackgroundTapAction.resolve(
             x: location.x,
             width: width,

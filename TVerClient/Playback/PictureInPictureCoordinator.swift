@@ -187,6 +187,15 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     private(set) var lastFailure: PictureInPictureFailure?
 
     var restoresUserInterface: (() -> Void)?
+    /// Separate from the surface's layer callback, which may disappear first.
+    var playbackRetentionDidChange: (() -> Void)?
+
+    /// Reuse the authoritative predicate, including real driver activity and
+    /// bounded automatic/cancelled-start intent; public state alone is not enough.
+    var requiresPlaybackRetention: Bool {
+        guard let attachedLayer else { return false }
+        return shouldRetainPlayerLayer(attachedLayer)
+    }
 
     private let isSupported: () -> Bool
     private let driverFactory: DriverFactory
@@ -392,6 +401,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
     }
 
     func refreshAvailability() {
+        defer { playbackRetentionDidChange?() }
         guard isSupported(), !driverCreationFailed else {
             setAvailability(.unsupported)
             return
@@ -746,6 +756,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         setLastFailure(nil)
         setState(.inactive)
         setAvailability(isSupported() ? .unavailable : .unsupported)
+        playbackRetentionDidChange?()
     }
 
     private func tearDownDriver(stopRegardlessOfReportedState: Bool = false) {
@@ -880,6 +891,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
 
     private func notifyPlayerLayerRetentionChanged() {
         attachedLayerRetentionDidChange?()
+        playbackRetentionDidChange?()
     }
 
     // MARK: - Controlled observable publication
@@ -924,6 +936,7 @@ final class PictureInPictureCoordinator: NSObject, @preconcurrency ObservableObj
         lifecycleMutationGeneration &+= 1
         mutation()
         lifecycleMutationDepth -= 1
+        if lifecycleMutationDepth == 0 { playbackRetentionDidChange?() }
         guard lifecycleMutationDepth == 0, needsDeferredLifecyclePublication else { return }
         scheduleDeferredLifecyclePublication()
     }
