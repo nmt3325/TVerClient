@@ -146,7 +146,56 @@ final class UIRenderingRegressionTests: XCTestCase {
             }), fixture: fixture, size: phone
         )
         XCTAssertEqual(fixture.player.state, .idle, "Unavailable metadata must not start playback")
-        XCTAssertEqual(snapshots.count, 9)
+        // Dark appearance and the largest accessibility size use the same
+        // production views, not a second layout implementation.
+        let narrowPhone = CGSize(width: 320, height: 812)
+        try await record("schedule-list-375-dark",
+                         view: AnyView(ScheduleView(viewModel: scheduleModel, playbackController: fixture.player, libraryStore: fixture.library)),
+                         fixture: fixture, size: phone, colorScheme: .dark)
+        try await record("schedule-list-320-accessibility5",
+                         view: AnyView(ScheduleView(viewModel: scheduleModel, playbackController: fixture.player, libraryStore: fixture.library)),
+                         fixture: fixture, size: narrowPhone, dynamicType: .accessibility5)
+        try await record("shared-row-presence-320-accessibility5",
+                         view: AnyView(sharedComponents), fixture: fixture,
+                         size: narrowPhone, dynamicType: .accessibility5)
+        try await record("shared-row-presence-320-accessibility-dark",
+                         view: AnyView(sharedComponents), fixture: fixture,
+                         size: CGSize(width: 320, height: 640), dynamicType: .accessibility3, colorScheme: .dark)
+        fixture.defaults.set(GuideLayoutMode.list.rawValue, forKey: "guide.layoutMode")
+        try await record("guide-list-375-dark",
+                         view: AnyView(ProgramGuideView(viewModel: guideModel, playbackController: fixture.player,
+                                                       libraryStore: fixture.library,
+                                                       notificationScheduler: ProgramNotificationScheduler(center: UIRenderingNotificationCenter()),
+                                                       catchUpService: fixture.service)),
+                         fixture: fixture, size: phone, colorScheme: .dark)
+        fixture.defaults.set(GuideLayoutMode.grid.rawValue, forKey: "guide.layoutMode")
+        try await record("guide-320-accessibility5-list-fallback",
+                         view: AnyView(ProgramGuideView(viewModel: guideModel, playbackController: fixture.player,
+                                                       libraryStore: fixture.library,
+                                                       notificationScheduler: ProgramNotificationScheduler(center: UIRenderingNotificationCenter()),
+                                                       catchUpService: fixture.service)),
+                         fixture: fixture, size: narrowPhone, dynamicType: .accessibility5)
+        try await record("library-saved-375-dark",
+                         view: AnyView(LibraryView(libraryStore: fixture.library, playbackController: fixture.player)),
+                         fixture: fixture, size: phone, colorScheme: .dark)
+        try await record("library-saved-320-accessibility5",
+                         view: AnyView(LibraryView(libraryStore: fixture.library, playbackController: fixture.player)),
+                         fixture: fixture, size: narrowPhone, dynamicType: .accessibility5)
+        await fixture.player.play(fixture.service.schedule[0].programs[1])
+        XCTAssertEqual(fixture.player.state, .failed(.noPlayableStream))
+        let fullScreen = PlayerStage(playbackController: fixture.player,
+                                     pictureInPicture: fixture.pictureInPicture, model: fixture.chrome,
+                                     title: "旅先で見つけた新しい日常と人々の長い物語",
+                                     accessibilityLabel: "全画面動画プレイヤー",
+                                     isFullScreen: true, rendersVideoLayer: false, onToggleFullScreen: {})
+        try await record("player-failed-fullscreen-640-dark", view: AnyView(fullScreen),
+                         fixture: fixture, size: CGSize(width: 640, height: 240), colorScheme: .dark,
+                         verticalSizeClass: .compact, validatesPlayerBounds: true)
+        try await record("player-failed-fullscreen-640-accessibility5", view: AnyView(fullScreen),
+                         fixture: fixture, size: CGSize(width: 640, height: 240), dynamicType: .accessibility5,
+                         colorScheme: .dark, verticalSizeClass: .compact, validatesPlayerBounds: true)
+        fixture.player.stop()
+        XCTAssertEqual(snapshots.count, 19)
 
         let data = try JSONEncoder().encode(snapshots)
         try data.write(to: fixture.outputDirectory.appendingPathComponent("ui-rendering-manifest.json"), options: .atomic)
@@ -162,17 +211,19 @@ final class UIRenderingRegressionTests: XCTestCase {
 
     private func record(
         _ name: String, view: AnyView, fixture: UIRenderingFixture, size: CGSize,
-        dynamicType: DynamicTypeSize = .large, validatesPlayerBounds: Bool = false
+        dynamicType: DynamicTypeSize = .large, colorScheme: ColorScheme = .light,
+        verticalSizeClass: UserInterfaceSizeClass = .regular,
+        validatesPlayerBounds: Bool = false
     ) async throws {
         let root = AnyView(view
             .environmentObject(fixture.downloads)
             .environmentObject(fixture.subscriptions)
             .environmentObject(fixture.availability)
             .environmentObject(fixture.tabReselection)
-            .environment(\.colorScheme, .light)
+            .environment(\.colorScheme, colorScheme)
             .environment(\.dynamicTypeSize, dynamicType)
             .environment(\.horizontalSizeClass, .compact)
-            .environment(\.verticalSizeClass, .regular)
+            .environment(\.verticalSizeClass, verticalSizeClass)
             .environment(\.locale, Locale(identifier: "ja_JP"))
             .transaction { transaction in
                 transaction.animation = nil
@@ -180,7 +231,7 @@ final class UIRenderingRegressionTests: XCTestCase {
             }
             .defaultAppStorage(fixture.defaults)
             .frame(width: size.width, height: size.height))
-        let harness = UIRenderingHost(root: root, size: size)
+        let harness = UIRenderingHost(root: root, size: size, colorScheme: colorScheme)
         fixture.mountedHost = harness
         await Task.yield()
         try await Task.sleep(nanoseconds: 250_000_000)
@@ -248,12 +299,12 @@ private final class UIRenderingHost {
     private var window: UIWindow?
     var rootView: UIView? { host?.view }
 
-    init(root: AnyView, size: CGSize) {
+    init(root: AnyView, size: CGSize, colorScheme: ColorScheme = .light) {
         let host = UIHostingController(rootView: root)
         let window = UIWindow(frame: CGRect(origin: .zero, size: size))
         self.host = host
         self.window = window
-        window.overrideUserInterfaceStyle = .light
+        window.overrideUserInterfaceStyle = colorScheme == .dark ? .dark : .light
         host.view.backgroundColor = .systemBackground
         host.view.frame = window.bounds
         // Match HostedStageHarness: do not become rootViewController, make key,
