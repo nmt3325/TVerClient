@@ -551,6 +551,7 @@ struct LivePlaybackView: View {
     private var stopToolbar: some ToolbarContent {
         ToolbarItem(placement: ToolbarCompat.trailing) {
             Button {
+                guard isCurrent else { return }
                 playbackController.stop()
                 dismiss()
             } label: {
@@ -610,7 +611,10 @@ struct LivePlaybackView: View {
             .padding(.vertical, DS.Spacing.s)
         } else if isCurrent, let presentation = playbackController.errorPresentation {
             PlaybackFailureView(presentation: presentation, officialURL: channel.webURL) {
-                Task { await playbackController.playLive(channel) }
+                Task {
+                    guard isCurrent else { return }
+                    await PlayerPrimaryAction.resolve(using: playbackController).perform(using: playbackController)
+                }
             }
         } else if isCurrent, playbackController.state == .resolving {
             ProgressView("公式配信URLを確認中")

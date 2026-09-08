@@ -101,9 +101,9 @@ final class ShellUIRegressionTests: XCTestCase {
         let calls = await resolver.calls
         XCTAssertEqual(calls, 1, "returning to the live screen must not resolve the stream again")
         host.close()
+        controller.stop()
         request.cancel()
         await request.value
-        controller.stop()
     }
 
     func testOpeningUnavailableChannelDoesNotInterruptExistingPlayback() async throws {
@@ -122,9 +122,101 @@ final class ShellUIRegressionTests: XCTestCase {
         let calls = await resolver.calls
         XCTAssertEqual(calls, 1)
         host.close()
+        controller.stop()
         request.cancel()
         await request.value
+    }
+
+    func testLeavingLiveScreenDuringResolutionDoesNotCancelPlayback() async throws {
+        let resolver = SuspendedLiveResolver()
+        let controller = PlaybackController(liveResolver: resolver)
+        let channel = Self.channel(id: "slow-live")
+        let caller = Task { await controller.playLive(channel) }
+        for _ in 0..<500 {
+            if await resolver.calls > 0 { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        caller.cancel() // SwiftUI cancels the view task when navigating back.
+        try await settle()
+        XCTAssertEqual(controller.state, .resolving)
+        XCTAssertTrue(controller.isLoaded(channel))
+        let cancelledBeforeStop = await resolver.cancellations
+        XCTAssertEqual(cancelledBeforeStop, 0)
         controller.stop()
+        await caller.value
+        let cancelledAfterStop = await resolver.cancellations
+        XCTAssertEqual(cancelledAfterStop, 1)
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func testNewLiveSelectionCancelsOldResolutionWithoutFailingTheNewOne() async throws {
+        let resolver = SuspendedLiveResolver()
+        let controller = PlaybackController(liveResolver: resolver)
+        let first = Task { await controller.playLive(Self.channel(id: "old")) }
+        for _ in 0..<500 {
+            if await resolver.calls > 0 { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        let second = Task { await controller.playLive(Self.channel(id: "new")) }
+        for _ in 0..<500 {
+            if await resolver.calls >= 2 { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        await first.value
+        XCTAssertEqual(controller.currentLiveChannel?.id, "new")
+        XCTAssertEqual(controller.state, .resolving)
+        XCTAssertNil(controller.error)
+        let cancelled = await resolver.cancellations
+        XCTAssertEqual(cancelled, 1)
+        controller.stop()
+        await second.value
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func testReopeningLiveAudioFailureKeepsTheRetainedItem() async throws {
+        let resolver = SuspendedLiveResolver()
+        let controller = PlaybackController(liveResolver: resolver, audioSession: ShellFailingAudioSession())
+        let channel = Self.channel(id: "audio")
+        let caller = Task { await controller.playLive(channel) }
+        for _ in 0..<500 {
+            if await resolver.calls > 0 { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        controller.resume()
+        XCTAssertNotNil(controller.error)
+        XCTAssertTrue(controller.isLoaded(channel))
+        let host = ShellViewHarness(root: AnyView(LivePlaybackView(channel: channel, playbackController: controller)))
+        try await settle()
+        XCTAssertTrue(controller.player.currentItem === item)
+        let calls = await resolver.calls
+        XCTAssertEqual(calls, 1)
+        XCTAssertNotNil(controller.error)
+        host.close()
+        controller.stop()
+        await caller.value
+    }
+
+    func testVODResolutionRemainsLoadedAfterItsViewTaskIsCancelled() async throws {
+        let resolver = SuspendedVODResolver()
+        let controller = PlaybackController(resolver: resolver)
+        let program = TVerProgram(id: "slow-vod", seriesID: nil, title: "テスト", seriesTitle: "テスト",
+                                  description: "", broadcastLabel: "", availableUntil: nil, thumbnailURL: nil)
+        let caller = Task { await controller.play(program) }
+        for _ in 0..<500 {
+            if await resolver.calls > 0 { break }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertTrue(controller.isLoaded(program))
+        caller.cancel()
+        try await settle()
+        XCTAssertEqual(controller.state, .resolving)
+        XCTAssertTrue(controller.isLoaded(program))
+        controller.stop()
+        await caller.value
+        XCTAssertFalse(controller.isLoaded(program))
+        XCTAssertEqual(controller.state, .idle)
     }
 
     private func settle() async throws {
@@ -140,10 +232,32 @@ final class ShellUIRegressionTests: XCTestCase {
 
 private actor SuspendedLiveResolver: TVerLiveStreamResolving {
     private(set) var calls = 0
+    private(set) var cancellations = 0
     func resolveLiveStream(for channel: TVerLiveChannel) async throws -> URL {
+        calls += 1
+        do {
+            try await Task.sleep(nanoseconds: 40_000_000_000)
+        } catch {
+            cancellations += 1
+            throw error
+        }
+        throw TVerClientError.noPlayableStream
+    }
+}
+
+private actor SuspendedVODResolver: TVerStreamResolving {
+    private(set) var calls = 0
+    func resolveStream(for program: TVerProgram) async throws -> URL {
         calls += 1
         try await Task.sleep(nanoseconds: 40_000_000_000)
         throw TVerClientError.noPlayableStream
+    }
+}
+
+private final class ShellFailingAudioSession: PlaybackAudioSessioning {
+    func setCategory(_ category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions) throws {}
+    func setActive(_ active: Bool, options: AVAudioSession.SetActiveOptions) throws {
+        if active { throw TVerClientError.playback("テスト用の音声セッションエラー") }
     }
 }
 

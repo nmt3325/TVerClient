@@ -71,6 +71,9 @@ final class PlaybackController: ObservableObject {
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
     private var requestGeneration = 0
+    /// Playback belongs to the controller, not to a pushed screen's cancellable
+    /// SwiftUI task. Leaving the screen must not turn a slow resolution into an error.
+    private var playbackRequestTask: Task<Void, Never>?
     /// Tracks our successful activation so repeated stop calls do not issue
     /// duplicate process-wide AVAudioSession deactivations.
     private var audioSessionIsActive = false
@@ -106,6 +109,7 @@ final class PlaybackController: ObservableObject {
     }
 
     deinit {
+        playbackRequestTask?.cancel()
         itemStatusObservation?.invalidate()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         let observers: [NSObjectProtocol?] = [endObserver, failedObserver, interruptionObserver, routeChangeObserver]
@@ -145,14 +149,18 @@ final class PlaybackController: ObservableObject {
     /// 再生し直してしまうのを防ぐための判定。
     func isLoaded(_ channel: TVerLiveChannel) -> Bool {
         guard currentLiveChannel?.id == channel.id else { return false }
-        if case .failed = state { return false }
-        return state == .resolving || player.currentItem != nil
+        return hasLoadedItemOrPendingRequest
     }
 
     func isLoaded(_ program: TVerProgram) -> Bool {
-        guard currentProgram?.id == program.id, player.currentItem != nil else { return false }
-        if case .failed = state { return false }
-        return true
+        guard currentProgram?.id == program.id else { return false }
+        return hasLoadedItemOrPendingRequest
+    }
+
+    private var hasLoadedItemOrPendingRequest: Bool {
+        // An audio-session failure can retain a valid item. Reopening must not
+        // discard that item or its position; the explicit recovery action resumes it.
+        player.currentItem != nil || (state == .resolving && playbackRequestTask != nil)
     }
 
     /// 画面が持っている Picture in Picture を預かる。`stop()` は必ずこれも畳む。
@@ -179,37 +187,56 @@ final class PlaybackController: ObservableObject {
     }
 
     func play(_ program: TVerProgram) async {
+        guard !Task.isCancelled else { return }
         beginRequest(program: program, liveChannel: nil)
         let generation = requestGeneration
-        do {
-            // A downloaded episode must play from disk, never from the network.
-            if let offlineURL = OfflineAssetRegistry.assetURL(for: program.id) {
-                recordPlaybackCheckpoint("Offline asset resolved")
-                try await start(url: offlineURL, generation: generation)
-                return
+        let request = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishRequestTask(generation: generation) }
+            do {
+                // A downloaded episode must play from disk, never from the network.
+                if let offlineURL = OfflineAssetRegistry.assetURL(for: program.id) {
+                    self.recordPlaybackCheckpoint("Offline asset resolved")
+                    try await self.start(url: offlineURL, generation: generation)
+                    return
+                }
+                let url = try await self.resolver.resolveStream(for: program)
+                self.recordPlaybackCheckpoint("VOD stream resolved")
+                try await self.start(url: url, generation: generation)
+            } catch {
+                self.finishWithError(error, generation: generation)
             }
-            let url = try await resolver.resolveStream(for: program)
-            recordPlaybackCheckpoint("VOD stream resolved")
-            try await start(url: url, generation: generation)
-        } catch {
-            finishWithError(error, generation: generation)
         }
+        playbackRequestTask = request
+        await request.value
     }
 
     func playLive(_ channel: TVerLiveChannel) async {
+        guard !Task.isCancelled else { return }
         beginRequest(program: nil, liveChannel: channel)
         let generation = requestGeneration
-        guard channel.isPlayable else {
-            finishWithError(TVerClientError.noPlayableStream, generation: generation)
-            return
+        let request = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishRequestTask(generation: generation) }
+            guard channel.isPlayable else {
+                self.finishWithError(TVerClientError.noPlayableStream, generation: generation)
+                return
+            }
+            do {
+                let url = try await self.liveResolver.resolveLiveStream(for: channel)
+                self.recordPlaybackCheckpoint("Live stream resolved")
+                try await self.start(url: url, generation: generation)
+            } catch {
+                self.finishWithError(error, generation: generation)
+            }
         }
-        do {
-            let url = try await liveResolver.resolveLiveStream(for: channel)
-            recordPlaybackCheckpoint("Live stream resolved")
-            try await start(url: url, generation: generation)
-        } catch {
-            finishWithError(error, generation: generation)
-        }
+        playbackRequestTask = request
+        await request.value
+    }
+
+    private func finishRequestTask(generation: Int) {
+        guard generation == requestGeneration else { return }
+        playbackRequestTask = nil
     }
 
     func resume() {
@@ -270,6 +297,8 @@ final class PlaybackController: ObservableObject {
 
     /// 再生に紐づく資源をまとめて手放す。`stop()` と失敗経路が共有する。
     private func releasePlaybackResources() {
+        playbackRequestTask?.cancel()
+        playbackRequestTask = nil
         wantsPlayback = false
         shouldResumeAfterInterruption = false
         pictureInPicture?.stop()
@@ -524,6 +553,8 @@ final class PlaybackController: ObservableObject {
 
     private func beginRequest(program: TVerProgram?, liveChannel: TVerLiveChannel?) {
         requestGeneration += 1
+        playbackRequestTask?.cancel()
+        playbackRequestTask = nil
         DiagnosticLogStore.shared.record(
             .info,
             category: "playback",
@@ -553,8 +584,14 @@ final class PlaybackController: ObservableObject {
         player.replaceCurrentItem(with: item)
         refreshMediaSelection(for: item)
         recordPlaybackCheckpoint("Player item attached")
-        startPlayback()
-        transition(to: .resolving)
+        if wantsPlayback {
+            startPlayback()
+            transition(to: .resolving)
+        } else {
+            // A pause requested while resolving must still win when the URL arrives.
+            player.pause()
+            transition(to: .paused)
+        }
     }
 
     /// `rate` is only honoured once playback has started, so the selected
@@ -587,7 +624,7 @@ final class PlaybackController: ObservableObject {
                 case .failed:
                     self.applyPlaybackFailure(item.error ?? TVerClientError.playback("再生項目を読み込めませんでした。"))
                 case .unknown:
-                    self.transition(to: .resolving)
+                    self.transition(to: self.wantsPlayback ? .resolving : .paused)
                 @unknown default:
                     self.applyPlaybackFailure(TVerClientError.playback("不明な再生エラーが発生しました。"))
                 }
