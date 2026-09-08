@@ -174,7 +174,10 @@ final class UIRenderingRegressionTests: XCTestCase {
             .environment(\.horizontalSizeClass, .compact)
             .environment(\.verticalSizeClass, .regular)
             .environment(\.locale, Locale(identifier: "ja_JP"))
-            .environment(\.accessibilityReduceMotion, true)
+            .transaction { transaction in
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
             .defaultAppStorage(fixture.defaults)
             .frame(width: size.width, height: size.height))
         let harness = UIRenderingHost(root: root, size: size)
