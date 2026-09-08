@@ -100,6 +100,18 @@ struct ProgramGuideInitialPosition {
     }
 }
 
+/// Visible identity belongs to every row, not only to a section header that
+/// scrollTo(..., anchor: .top) can legitimately move off-screen.
+struct ProgramGuideListRowMetadata: Equatable {
+    let stationName: String
+    let timeRange: String
+
+    init(channel: TVerLiveChannel, program: TVerLiveProgram) {
+        stationName = channel.name
+        timeRange = GuideBroadcastAxis.timeRangeLabel(for: program)
+    }
+}
+
 /// 番組表のリスト表示。標準の List で番組を読み、引っぱって更新する。
 @MainActor
 struct ProgramGuideProgramList: View {
@@ -170,6 +182,7 @@ struct ProgramGuideProgramList: View {
             now: now
         )
         let badge = GuideAvailabilityPresentation.badgeKind(isOnAir: isOnAir, availability: availability)
+        let metadata = ProgramGuideListRowMetadata(channel: channel, program: program)
         Button {
             onSelect(channel, program, availability)
         } label: {
@@ -179,13 +192,20 @@ struct ProgramGuideProgramList: View {
                     .foregroundStyle(.tertiary)
             } label: {
                 VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    // Keep the full station name near the time even when the
+                    // section header is off-screen. A separate line also fits AX5.
+                    Text(metadata.stationName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: DS.Spacing.s) {
-                            timeLabel(for: program)
+                            timeLabel(metadata.timeRange)
                             if let badge { MediaBadge(badge) }
                         }
                         VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                            timeLabel(for: program)
+                            timeLabel(metadata.timeRange)
                             if let badge { MediaBadge(badge) }
                         }
                     }
@@ -231,8 +251,8 @@ struct ProgramGuideProgramList: View {
         .accessibilityAddTraits(isOnAir ? .isSelected : [])
     }
 
-    private func timeLabel(for program: TVerLiveProgram) -> some View {
-        Text(GuideBroadcastAxis.timeRangeLabel(for: program))
+    private func timeLabel(_ timeRange: String) -> some View {
+        Text(timeRange)
             .font(.subheadline.monospacedDigit().weight(.medium))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
