@@ -52,6 +52,17 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         }
     }
 
+    /// Exercise a smaller safe rectangle independently of the simulator's built-in notch.
+    func testFullScreenMaximumTextFitsTighterSafeAreaBeforeAndAfterUpdates() async throws {
+        for failing in [false, true] {
+            try await checkLayout(
+                fullScreen: true, dynamicType: .accessibility5, failing: failing,
+                additionalInsets: UIEdgeInsets(top: 24, left: 44, bottom: 32, right: 12),
+                insetUpdates: [UIEdgeInsets(top: 24, left: 12, bottom: 36, right: 44), .zero]
+            )
+        }
+    }
+
     private var landscapeInsets: UIEdgeInsets {
         UIEdgeInsets(top: 12, left: 44, bottom: 21, right: 12)
     }
