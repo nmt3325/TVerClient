@@ -199,6 +199,8 @@ struct PlayerStage: View {
     /// 中断の告知を映像の上に出すかどうか。縦向きの埋め込みプレイヤーは
     /// 映像が小さいので、下の番組情報側に出したほうが読める。
     var showsContinuityNotice: Bool = true
+    /// A value wrapper keeps existing trailing closures bound to full-screen.
+    var recoveryAction: PlayerRecoveryAction? = nil
     var onToggleFullScreen: (() -> Void)?
 
     @State private var showsSpinner = false
@@ -253,6 +255,7 @@ struct PlayerStage: View {
                     isFullScreen: isFullScreen,
                     showsContinuityNotice: showsContinuityNotice,
                     safeAreaInsets: proxy.safeAreaInsets,
+                    recoveryAction: recoveryAction,
                     onToggleFullScreen: onToggleFullScreen,
                     onBackgroundSingleTap: { handleBackgroundSingleTap() },
                     onBackgroundDoubleTap: { location in

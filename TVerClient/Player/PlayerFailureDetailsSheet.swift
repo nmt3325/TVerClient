@@ -32,6 +32,10 @@ struct PlayerFailureDetailsSheet: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!action.isEnabled)
+                    .background(PlayerControlHitTarget(
+                        identifier: PlayerControlHitTargetView.failureSheetRetryIdentifier,
+                        isEnabled: action.isEnabled, action: retry
+                    ))
                     if let officialURL {
                         Link(destination: officialURL) {
                             Label("TVer公式ページで開く", systemImage: "safari")
