@@ -129,6 +129,14 @@ final class PlayerChromeModel: ObservableObject {
         showControls()
     }
 
+    /// A real background touch must invalidate the old fade-out deadline
+    /// before UIKit decides between single and double tap. Do not reveal
+    /// hidden chrome here: that would disable the plane receiving the touch.
+    func registerBackgroundTouchBegan() {
+        guard areControlsVisible else { return }
+        scheduleAutoHide()
+    }
+
     func toggleVideoGravity() {
         videoGravity = isVideoFilling ? .resizeAspect : .resizeAspectFill
         registerInteraction()
