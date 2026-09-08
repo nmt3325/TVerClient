@@ -312,7 +312,7 @@ struct LibraryView: View {
                     Task { @MainActor in
                         await Task.yield()
                         // このalertはLibraryの操作を所有する。再拒否もglobal側に残す。
-                        failure.request.perform(on: downloadCenter, program: failure.program, allowingCellular: true)
+                        _ = failure.performCellularRetry(on: downloadCenter)
                     }
                 }
             }

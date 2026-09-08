@@ -85,11 +85,13 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
     }
 
     @MainActor
-    func testResumeCellularApprovalUsesResumeAndKeepsExistingProgress() async throws {
+    func testAlreadyCellularCapableResumeApprovalKeepsExistingProgress() async throws {
         let bed = try LibraryRejectionTestBed()
         defer { bed.cleanUp() }
         let program = rejectionProgram("paused")
+        bed.center.wifiOnly = false // このタスクは作成時からcellularを許可している。
         await bed.startAndPause(program, progress: 0.65)
+        bed.center.wifiOnly = true
         bed.network.value = .cellular
 
         let failure = try XCTUnwrap(DownloadButton.Request.resume.performConsumingRejection(on: bed.center, program: program))
@@ -381,19 +383,23 @@ private final class LibraryRejectionDriver: OfflineDownloadDriving {
     var resumedIDs: [String] = []
     var cancelledIDs: [String] = []
     var cellularPermissions: [Bool] = []
+    var taskPolicies: [String: DownloadTaskCellularPolicy] = [:]
 
     func start(programID: String, assetURL: URL, title: String, allowsCellularAccess: Bool) {
         taskIDs.insert(programID)
         startedIDs.append(programID)
         cellularPermissions.append(allowsCellularAccess)
+        taskPolicies[programID] = allowsCellularAccess ? .allowed : .wifiOnly
     }
     func pause(programID: String) {}
     func resume(programID: String) { resumedIDs.append(programID) }
     func cancel(programID: String) {
         taskIDs.remove(programID)
+        taskPolicies[programID] = nil
         cancelledIDs.append(programID)
     }
     func hasTask(programID: String) -> Bool { taskIDs.contains(programID) }
+    func cellularPolicy(programID: String) -> DownloadTaskCellularPolicy { taskPolicies[programID] ?? .unknown }
 }
 
 private struct LibraryRejectionResolver: TVerStreamResolving {

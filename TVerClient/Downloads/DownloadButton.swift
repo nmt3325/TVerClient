@@ -65,14 +65,16 @@ struct DownloadButton: View {
             program: TVerProgram,
             allowingCellular: Bool = false
         ) -> RequestFailure? {
-            guard perform(on: center, program: program, allowingCellular: allowingCellular),
-                  let rejection = center.lastRejection,
-                  rejection.programID == program.id else { return nil }
+            guard perform(on: center, program: program, allowingCellular: allowingCellular) else { return nil }
+            return Self.consumeRejection(on: center, program: program, after: self)
+        }
+
+        @MainActor
+        static func consumeRejection(on center: DownloadCenter, program: TVerProgram, after request: Request) -> RequestFailure? {
+            guard let rejection = center.lastRejection, rejection.programID == program.id else { return nil }
             center.clearRejection()
-            // resume()中にタスク消失が分かった場合は、以後の同意をやり直しとして明示する。
-            let recovery = Self.recoveryRequest(
-                for: center.state(for: program.id), isInterrupted: center.isInterrupted(program.id)
-            ) ?? self
+            // タスク消失は次の操作をrestartとして説明するが、ここで実行はしない。
+            let recovery: Request = request == .resume && center.isInterrupted(program.id) ? .restart : request
             return RequestFailure(rejection: rejection, program: program, request: recovery)
         }
     }
@@ -99,7 +101,7 @@ struct DownloadButton: View {
             } else {
                 parts.append("番組はそのまま残っています。視聴画面で利用可能な再生方法を確認してください。")
             }
-            if request == .restart || request == .retry {
+            if request == .restart || request == .retry || rejection.requiresRestartOnCellular {
                 parts.append("やり直すと途中までのデータを削除し、最初からダウンロードします。")
             }
             if canRetryOnCellular {
@@ -114,6 +116,7 @@ struct DownloadButton: View {
         }
 
         var cellularRetryLabel: String {
+            if rejection.requiresRestartOnCellular { return "今回だけモバイル通信で最初からやり直す" }
             switch request {
             case .start: return "今回だけモバイル通信でダウンロード"
             case .resume: return "今回だけモバイル通信で再開"
@@ -121,10 +124,24 @@ struct DownloadButton: View {
             }
         }
 
+        /// 呼出元はcellularRetryLabelとmessageを提示して、削除を含む場合も同意を取る。
+        /// Library向けの非消費経路。拒否はその画面の単独consumerに残す。
+        @MainActor
+        func performCellularRetry(on center: DownloadCenter) -> Bool {
+            guard canRetryOnCellular else { return false }
+            if rejection.requiresRestartOnCellular {
+                return center.restartAfterCellularConsent(program)
+            }
+            return request.perform(on: center, program: program, allowingCellular: true)
+        }
+
         @MainActor
         func retryOnCellular(on center: DownloadCenter) -> RequestFailure? {
-            guard canRetryOnCellular else { return nil }
-            return request.performConsumingRejection(on: center, program: program, allowingCellular: true)
+            guard performCellularRetry(on: center) else { return nil }
+            return Request.consumeRejection(
+                on: center, program: program,
+                after: rejection.requiresRestartOnCellular ? .restart : request
+            )
         }
     }
 
