@@ -59,14 +59,21 @@ struct PlayerOverlayControls: View {
     var onBackgroundDoubleTap: (CGPoint) -> Void = { _ in }
 
     var body: some View {
-        ZStack {
-            PlayerScrim()
-            PlayerBackgroundTapSurface(
-                onSingleTap: onBackgroundSingleTap,
-                onDoubleTap: onBackgroundDoubleTap
+        GeometryReader { proxy in
+            let layout = PlayerControlLayout(
+                availableWidth: proxy.size.width - chromeInsets.leading - chromeInsets.trailing,
+                availableHeight: proxy.size.height - chromeInsets.top - chromeInsets.bottom,
+                isFullScreen: isFullScreen
             )
-            .accessibilityHidden(true)
-            controlStack
+            ZStack {
+                PlayerScrim()
+                PlayerBackgroundTapSurface(
+                    onSingleTap: onBackgroundSingleTap,
+                    onDoubleTap: onBackgroundDoubleTap
+                )
+                .accessibilityHidden(true)
+                controlStack(layout: layout)
+            }
         }
         .tint(.white)
         .foregroundStyle(.white)
@@ -81,16 +88,23 @@ struct PlayerOverlayControls: View {
         }
     }
 
-    private var controlStack: some View {
+    private func controlStack(layout: PlayerControlLayout) -> some View {
         VStack(spacing: 0) {
-            topBar
+            topBar(separatesTitle: layout.separatesTitle)
                 .accessibilitySortPriority(4)
-            Spacer(minLength: DS.Spacing.s)
-            continuityBanner
-                .accessibilitySortPriority(3)
-            transportRow
-                .accessibilitySortPriority(2)
-            Spacer(minLength: DS.Spacing.s)
+            Spacer(minLength: layout.compactTransport ? 0 : DS.Spacing.s)
+            // 停止理由と回復ボタンがあるときは、無意味な再生ボタンを重ねない。
+            if showsContinuityNotice, playbackController.continuityNotice != nil {
+                continuityBanner
+                    .accessibilitySortPriority(3)
+            } else if playbackController.errorPresentation != nil {
+                failureRecoveryRow
+                    .accessibilitySortPriority(3)
+            } else {
+                transportRow(layout: layout)
+                    .accessibilitySortPriority(2)
+            }
+            Spacer(minLength: layout.compactTransport ? 0 : DS.Spacing.s)
             bottomBar
                 .accessibilitySortPriority(1)
         }
@@ -113,29 +127,32 @@ struct PlayerOverlayControls: View {
 
     // MARK: - Top
 
-    private var topBar: some View {
-        HStack(alignment: .top, spacing: DS.Spacing.xs) {
-            if isFullScreen {
-                PlayerIconButton(
-                    systemImage: "chevron.down",
-                    label: "全画面を閉じる",
-                    identifier: PlaybackAccessibilityIdentifier.fullScreenExit
-                ) { onToggleFullScreen?() }
-                titleStack
+    private func topBar(separatesTitle: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: DS.Spacing.xs) {
+                if isFullScreen {
+                    PlayerIconButton(
+                        systemImage: "chevron.down",
+                        label: "全画面を閉じる",
+                        identifier: PlaybackAccessibilityIdentifier.fullScreenExit
+                    ) { onToggleFullScreen?() }
+                    if !separatesTitle { titleStack }
+                }
+                Spacer(minLength: 0)
+                if isFullScreen {
+                    PlayerIconButton(
+                        systemImage: model.videoGravitySystemImage,
+                        label: model.videoGravityTitle,
+                        identifier: PlaybackAccessibilityIdentifier.fullScreenGravity
+                    ) { model.toggleVideoGravity() }
+                }
+                AirPlayRouteButton()
+                    .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
+                    .accessibilityLabel("AirPlay")
+                pictureInPictureButton
+                settingsMenu
             }
-            Spacer(minLength: 0)
-            if isFullScreen {
-                PlayerIconButton(
-                    systemImage: model.videoGravitySystemImage,
-                    label: model.videoGravityTitle,
-                    identifier: PlaybackAccessibilityIdentifier.fullScreenGravity
-                ) { model.toggleVideoGravity() }
-            }
-            AirPlayRouteButton()
-                .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
-                .accessibilityLabel("AirPlay")
-            pictureInPictureButton
-            settingsMenu
+            if separatesTitle { titleStack }
         }
     }
 
@@ -198,13 +215,20 @@ struct PlayerOverlayControls: View {
                 }
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: DS.Size.minimumTapTarget, height: DS.Size.minimumTapTarget)
-                .contentShape(Circle())
+            HStack(spacing: DS.Spacing.xs) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                if !isFullScreen {
+                    Text("設定")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .foregroundStyle(.white)
+            .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+            .contentShape(Rectangle())
         }
-        .accessibilityLabel("再生設定")
+        .accessibilityLabel("再生設定：速度・字幕・音声")
+        .accessibilityHint("再生速度や利用可能な字幕・音声を選べます")
         .simultaneousGesture(TapGesture().onEnded { model.registerInteraction() })
     }
 
@@ -260,41 +284,72 @@ struct PlayerOverlayControls: View {
 
     // MARK: - Center
 
-    private var transportRow: some View {
-        HStack(spacing: DS.Spacing.xl) {
-            PlayerIconButton(
-                systemImage: "gobackward.10",
-                label: "10秒戻す",
-                glyphSize: 24,
-                diameter: 52,
-                isEnabled: supportsSeeking
-            ) {
-                model.registerInteraction()
-                playbackController.seek(by: -10)
+    private var primaryAction: PlayerPrimaryAction {
+        PlayerPrimaryAction.resolve(using: playbackController)
+    }
+
+    private func activatePrimaryAction() {
+        model.registerInteraction()
+        let action = primaryAction
+        Task { await action.perform(using: playbackController) }
+    }
+
+    private var failureRecoveryRow: some View {
+        HStack(spacing: DS.Spacing.s) {
+            Text(playbackController.errorPresentation?.title ?? "再生できませんでした")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: activatePrimaryAction) {
+                Label(primaryAction.title, systemImage: primaryAction.systemImage)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: DS.Size.minimumTapTarget)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!primaryAction.isEnabled)
+            .accessibilityHint("現在の番組の再生をもう一度試します")
+        }
+        .padding(.horizontal, DS.Spacing.s)
+        .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: DS.Radius.medium))
+    }
+
+    private func transportRow(layout: PlayerControlLayout) -> some View {
+        HStack(spacing: layout.transportSpacing) {
+            if supportsSeeking {
+                PlayerIconButton(
+                    systemImage: "gobackward.10",
+                    label: "10秒戻す",
+                    glyphSize: 24,
+                    diameter: layout.skipDiameter,
+                    isEnabled: playbackController.canSeek
+                ) {
+                    model.registerInteraction()
+                    playbackController.seek(by: -10)
+                }
             }
             PlayerIconButton(
-                systemImage: playbackController.isPlaying ? "pause.fill" : "play.fill",
-                label: playbackController.isPlaying ? "一時停止" : "再生",
+                systemImage: primaryAction.systemImage,
+                label: primaryAction.title,
                 identifier: isFullScreen ? PlaybackAccessibilityIdentifier.fullScreenPlayPause : nil,
-                glyphSize: 30,
-                diameter: 64,
-                isProminent: true
-            ) {
-                model.registerInteraction()
-                playbackController.togglePlayback()
-            }
+                glyphSize: layout.compactTransport ? 24 : 30,
+                diameter: layout.playDiameter,
+                isProminent: true,
+                isEnabled: primaryAction.isEnabled
+            ) { activatePrimaryAction() }
             .background(
                 PlayerControlHitTarget(identifier: PlayerControlHitTargetView.playPauseIdentifier)
             )
-            PlayerIconButton(
-                systemImage: "goforward.10",
-                label: "10秒送る",
-                glyphSize: 24,
-                diameter: 52,
-                isEnabled: supportsSeeking
-            ) {
-                model.registerInteraction()
-                playbackController.seek(by: 10)
+            if supportsSeeking {
+                PlayerIconButton(
+                    systemImage: "goforward.10",
+                    label: "10秒送る",
+                    glyphSize: 24,
+                    diameter: layout.skipDiameter,
+                    isEnabled: playbackController.canSeek
+                ) {
+                    model.registerInteraction()
+                    playbackController.seek(by: 10)
+                }
             }
         }
     }
@@ -359,7 +414,7 @@ struct PlayerOverlayControls: View {
                 )
             )
         }
-        .font(.caption2.monospacedDigit())
+        .font(.subheadline.monospacedDigit())
         .foregroundStyle(.white.opacity(0.8))
         // 残り時間は「あと何分見られるか」の判断に必要なので、読み上げから
         // 外さない。数字の羅列は聴いて分からないので、日本語に開いた文にする。

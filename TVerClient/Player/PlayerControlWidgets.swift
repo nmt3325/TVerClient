@@ -78,21 +78,17 @@ struct SkipRippleOverlay: View {
 /// Top and bottom gradients that keep white controls readable over any frame.
 struct PlayerScrim: View {
     var body: some View {
-        VStack(spacing: 0) {
-            LinearGradient(
-                colors: [Color.black.opacity(0.65), Color.black.opacity(0)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 110)
-            Spacer(minLength: 0)
-            LinearGradient(
-                colors: [Color.black.opacity(0), Color.black.opacity(0.75)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 150)
-        }
+        // 固定の110+150ptを縦積みすると、16:9の小型ステージをはみ出す。
+        // 一枚の相対グラデーションなら高さを奪わず、中央の操作も読める。
+        LinearGradient(
+            stops: [
+                .init(color: .black.opacity(0.7), location: 0),
+                .init(color: .black.opacity(0.25), location: 0.45),
+                .init(color: .black.opacity(0.8), location: 1),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
         .allowsHitTesting(false)
     }
 }

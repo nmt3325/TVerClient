@@ -19,6 +19,8 @@ struct PlaybackView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var isFullScreenPresented = false
+    @State private var confirmsUnsubscribe = false
+    @ScaledMetric(relativeTo: .subheadline) private var minimumStageHeight: CGFloat = 180
 
     init(
         program: TVerProgram,
@@ -56,36 +58,35 @@ struct PlaybackView: View {
         .navigationTitle("視聴")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: ToolbarCompat.leading) {
-                DownloadButton(program: program)
-            }
+            // 戻る操作は NavigationStack に任せる。画面を離れることと停止を
+            // 同じ場所に並べず、番組への追加操作だけを一つのメニューにまとめる。
             ToolbarItem(placement: ToolbarCompat.trailing) {
-                // 「閉じる」だけだと停止と読み違えられる。止める操作と画面を
-                // 畳む操作を、名前のとおりに別々に置く。
-                HStack(spacing: DS.Spacing.xs) {
+                Menu {
+                    ShareLink(
+                        item: shareItem.url,
+                        subject: Text(shareItem.subject),
+                        message: Text(shareItem.message)
+                    ) { Label("番組を共有", systemImage: "square.and.arrow.up") }
+                    Button { openURL(program.webURL) } label: {
+                        Label("TVer公式ページで開く", systemImage: "safari")
+                    }
+                    Divider()
                     Button {
+                        guard isCurrent else { return }
                         playbackController.stop()
                         dismiss()
                     } label: {
-                        Image(systemName: "stop.fill")
-                            .frame(
-                                minWidth: DS.Size.minimumTapTarget,
-                                minHeight: DS.Size.minimumTapTarget
-                            )
+                        Label("再生を停止して閉じる", systemImage: "stop.fill")
                     }
-                    .accessibilityLabel("再生を停止して閉じる")
-
-                    Button("最小化") { dismiss() }
-                        .frame(
-                            minWidth: DS.Size.minimumTapTarget,
-                            minHeight: DS.Size.minimumTapTarget
-                        )
-                        .accessibilityLabel("最小化")
-                        .accessibilityHint("再生は続きます。画面下のバーから停止できます")
+                    .disabled(!isCurrent)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
                 }
+                .accessibilityLabel("番組の操作")
+                .accessibilityHint("共有、公式ページ、再生の停止")
             }
         }
-        .preferredColorScheme(.dark)
         .onAppear {
             // 停止したときに Picture in Picture の小窓だけが生き残らないよう、
             // この画面が持っている調整役を再生側へ預ける。
@@ -135,19 +136,21 @@ struct PlaybackView: View {
         )
     }
 
-    /// 縦向きは 16:9。ただし画面の6割強を超えない。横向きは全面。
+    /// 通常は16:9。大きい文字では時間表示の余白を確保するが、
+    /// 番組情報も読めるよう画面の6割強を上限にする。横向きは全面。
     private func stageHeight(in size: CGSize) -> CGFloat {
         guard !isCompactHeight else { return size.height }
-        return min((size.width * 9 / 16).rounded(), (size.height * 0.62).rounded())
+        return min(max((size.width * 9 / 16).rounded(), minimumStageHeight), (size.height * 0.62).rounded())
     }
 
     private var details: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.Spacing.l) {
+                // 回復の操作を説明文や購読設定の下へ埋めない。
+                statusSection
                 header
                 actionRow
                 seriesSubscriptionRow
-                statusSection
                 if !relatedPrograms.isEmpty { relatedSection }
             }
             .padding(DS.Spacing.l)
@@ -163,7 +166,9 @@ struct PlaybackView: View {
             Text(program.seriesTitle)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            HStack(spacing: DS.Spacing.m) {
+                .fixedSize(horizontal: false, vertical: true)
+            // 長い放送日時と配信期限を競合させず、大きい文字でも全文を読める。
+            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
                 Label(program.broadcastLabel, systemImage: "clock")
                 if let availableUntil = program.availableUntil, !availableUntil.isEmpty {
                     Label(availableUntil, systemImage: "calendar.badge.clock")
@@ -171,6 +176,7 @@ struct PlaybackView: View {
             }
             .font(DS.Typography.rowDetail)
             .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
             if !program.description.isEmpty {
                 Text(program.description)
                     .font(.subheadline)
@@ -182,37 +188,51 @@ struct PlaybackView: View {
     }
 
     private var actionRow: some View {
-        HStack(spacing: DS.Spacing.s) {
+        VStack(alignment: .leading, spacing: DS.Spacing.s) {
+            HStack(spacing: DS.Spacing.s) {
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    Text("この話のダウンロード")
+                        .font(.subheadline.weight(.semibold))
+                    Text(downloadStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                DownloadButton(program: program)
+            }
+            .padding(.horizontal, DS.Spacing.m)
+            .padding(.vertical, DS.Spacing.xs)
+            .background(DS.Palette.surface, in: RoundedRectangle(cornerRadius: DS.Radius.medium))
+
             Button { libraryStore.toggleFavorite(program) } label: {
                 Label(
-                    isFavorite ? "お気に入り済み" : "お気に入り",
+                    isFavorite ? "お気に入り済み" : "お気に入りに追加",
                     systemImage: isFavorite ? "heart.fill" : "heart"
                 )
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget)
             }
             .buttonStyle(.bordered)
             .tint(isFavorite ? .red : .accentColor)
             .accessibilityLabel(isFavorite ? "お気に入りから削除" : "お気に入りに追加")
-
-            ShareLink(
-                item: shareItem.url,
-                subject: Text(shareItem.subject),
-                message: Text(shareItem.message)
-            ) {
-                Image(systemName: "square.and.arrow.up")
-                    .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("共有")
-
-            Button { openURL(program.webURL) } label: {
-                Image(systemName: "safari")
-                    .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("TVer公式ページで開く")
         }
         .controlSize(.large)
+    }
+
+    private var downloadStatus: String {
+        switch downloadCenter.state(for: program.id) {
+        case .notDownloaded: return "保存するとオフラインでも視聴できます"
+        case .queued: return "ダウンロード待ち"
+        case let .downloading(progress):
+            return "ダウンロード中・\(Int((DownloadCenter.clamp(progress) * 100).rounded()))%"
+        case .paused:
+            return downloadCenter.isInterrupted(program.id)
+                ? "一時停止中・続きから再開できないため、再ダウンロードが必要です"
+                : "一時停止中・右のボタンから再開できます"
+        case .failed: return "保存できませんでした・右のボタンから再試行できます"
+        case .downloaded: return "保存済み・オフラインで視聴できます"
+        }
     }
 
     @ViewBuilder
@@ -225,7 +245,7 @@ struct PlaybackView: View {
             VStack(alignment: .leading, spacing: DS.Spacing.xs) {
                 Button {
                     if isSubscribed {
-                        seriesSubscriptions.unsubscribe(seriesID: seriesID)
+                        confirmsUnsubscribe = true
                     } else {
                         Task { await seriesSubscriptions.subscribe(to: program) }
                     }
@@ -246,6 +266,18 @@ struct PlaybackView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(isSubscribed ? DS.Palette.catchUp : .accentColor)
+                .confirmationDialog(
+                    "新着の自動ダウンロードを停止しますか？",
+                    isPresented: $confirmsUnsubscribe,
+                    titleVisibility: .visible
+                ) {
+                    Button("自動ダウンロードを停止", role: .destructive) {
+                        seriesSubscriptions.unsubscribe(seriesID: seriesID)
+                    }
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("このシリーズの新着は自動保存されなくなります。保存済み・ダウンロード中の番組は削除されません。")
+                }
                 .accessibilityLabel(
                     "\(program.seriesTitle)の新着自動ダウンロードを\(isSubscribed ? "オフ" : "オン")にする"
                 )
@@ -293,7 +325,11 @@ struct PlaybackView: View {
         if isCurrent, let presentation = playbackController.errorPresentation {
             PlaybackFailureView(presentation: presentation, officialURL: program.webURL) {
                 libraryStore.recordRecentlyViewed(program)
-                Task { await playbackController.play(program) }
+                Task {
+                    guard isCurrent else { return }
+                    let action = PlayerPrimaryAction.resolve(using: playbackController)
+                    await action.perform(using: playbackController)
+                }
             }
         } else if isCurrent, let notice = playbackController.continuityNotice {
             // 縦向きの映像は小さく、重ねると再生コントロールを埋めてしまう。
