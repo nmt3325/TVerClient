@@ -249,7 +249,9 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(second.resumeCount, 0)
         driver.cancel(programID: "A")
         XCTAssertEqual(first.cancelCount, 1)
-        XCTAssertEqual(second.cancelCount, 0)
+        // A-D1: zero cancellation codified an uncontrolled native transfer. Explicit cancel covers both identities.
+        XCTAssertEqual(second.cancelCount, 1)
+        XCTAssertEqual(second.resumeCount, 0)
     }
 
     @MainActor
@@ -565,6 +567,165 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: bURL.appendingPathComponent("segment.ts")), bytes)
         XCTAssertTrue(bed.center.wifiOnly)
         XCTAssertTrue(bed.backend.created.isEmpty)
+    }
+
+    @MainActor
+    func testAllDuplicateIdentitiesAreStoppedAndCancelledAcrossSessionsAndStates() async {
+        for crossSession in [false, true] {
+            for duplicateState: URLSessionTask.State in [.running, .suspended] {
+                let backend = LifecycleBackend()
+                defer { backend.cleanUp() }
+                let winner = backend.legacy("A"), extra = backend.legacy("A", allowingCellular: crossSession)
+                winner.reportedState = .running; extra.reportedState = duplicateState
+                backend.enumerated[false] = crossSession ? [winner.handle] : [winner.handle, extra.handle, extra.handle]
+                if crossSession { backend.enumerated[true] = [extra.handle, extra.handle] }
+                let driver = AVAssetDownloadDriver(backend: backend)
+                let adopted = await driver.adoptRunningTasks(knownLocations: [:])
+                XCTAssertEqual(adopted, ["A"])
+                XCTAssertEqual(winner.suspendCount, 0)
+                XCTAssertEqual(extra.suspendCount, duplicateState == .running ? 1 : 0)
+                XCTAssertEqual(extra.reportedState, .suspended)
+                driver.pause(programID: "A")
+                driver.pause(programID: "A")
+                driver.resume(programID: "A")
+                for _ in 0..<2 { _ = await driver.adoptRunningTasks(knownLocations: [:]) }
+                XCTAssertEqual(winner.suspendCount, 1)
+                XCTAssertEqual(winner.resumeCount, 1)
+                XCTAssertEqual(extra.suspendCount, duplicateState == .running ? 1 : 0)
+                XCTAssertEqual(extra.resumeCount, 0)
+                XCTAssertEqual(driver.cellularPolicy(programID: "A"), .unknown)
+                driver.cancel(programID: "A")
+                driver.cancel(programID: "A")
+                let afterCancel = await driver.adoptRunningTasks(knownLocations: [:])
+                XCTAssertTrue(afterCancel.isEmpty)
+                XCTAssertEqual(winner.cancelCount, 1)
+                XCTAssertEqual(extra.cancelCount, 1)
+                XCTAssertFalse(driver.hasTask(programID: "A"))
+            }
+        }
+    }
+
+    @MainActor
+    func testCenterWifiRestrictionAndCancelOrDeleteReachEveryDuplicate() async throws {
+        for deleting in [false, true] {
+            var network: DownloadNetworkStatus = .wifi
+            let bed = try LifecycleCenterBed(networkStatus: { network })
+            defer { bed.cleanUp() }
+            let program = lifecycleProgram("A"), bytes = Data("retained-until-explicit-cancel".utf8)
+            let url = try bed.writeAsset("A", bytes: bytes)
+            bed.center.wifiOnly = false
+            let entry = DownloadPersistedRecord(program: program, phase: .downloading, progress: 0.4, bytes: 0, message: nil, bookmark: nil, relativePath: "A.movpkg", updatedAt: Date())
+            try JSONEncoder().encode([entry]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+            let winner = bed.backend.legacy(program.id), extra = bed.backend.legacy(program.id, allowingCellular: true)
+            winner.reportedState = .running; extra.reportedState = .running
+            bed.backend.enumerated[false] = [winner.handle]; bed.backend.enumerated[true] = [extra.handle]
+            bed.center.restore()
+            await bed.center.waitForPendingRestoration()
+            XCTAssertEqual(bed.center.state(for: program.id), .downloading(progress: 0.4))
+            network = .cellular
+            bed.center.wifiOnly = true
+            XCTAssertEqual(bed.center.state(for: program.id), .paused(progress: 0.4))
+            XCTAssertEqual(winner.reportedState, .suspended)
+            XCTAssertEqual(extra.reportedState, .suspended)
+            XCTAssertEqual(winner.suspendCount, 1)
+            XCTAssertEqual(extra.suspendCount, 1)
+            XCTAssertEqual(winner.resumeCount + extra.resumeCount, 0)
+            XCTAssertEqual(try Data(contentsOf: url.appendingPathComponent("segment.ts")), bytes)
+            XCTAssertEqual(bed.driver.cellularPolicy(programID: program.id), .unknown)
+            if deleting { bed.center.delete(program.id) } else { bed.center.cancel(program.id) }
+            XCTAssertEqual(winner.cancelCount, 1)
+            XCTAssertEqual(extra.cancelCount, 1)
+            XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+        }
+    }
+
+    @MainActor
+    func testLosingIdentityCannotChangeWinnerPolicyLocationOrEitherPackagesBytes() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let program = lifecycleProgram("A")
+        XCTAssertEqual(bed.center.start(program, allowingCellular: true), .started)
+        await bed.center.waitForPendingResolutions()
+        await bed.driver.waitForPendingPreparations()
+        let winner = try XCTUnwrap(bed.backend.created.first), delegate = try XCTUnwrap(bed.backend.delegate)
+        winner.reportedState = .running
+        let winnerBytes = Data("winning-complete-copy".utf8), extraBytes = Data("unselected-partial-copy".utf8)
+        let winnerURL = try bed.writeAsset("winner", bytes: winnerBytes), extraURL = try bed.writeAsset("extra", bytes: extraBytes)
+        delegate.receiveWillDownload(winner.session, task: winner.task, location: winnerURL)
+        await lifecycleCallbacks()
+        let extra = bed.backend.legacy(program.id)
+        extra.reportedState = .running
+        bed.backend.enumerated[false] = [extra.handle]; bed.backend.enumerated[true] = [winner.handle]
+        let adopted = await bed.driver.adoptRunningTasks(knownLocations: [program.id: extraURL])
+        XCTAssertEqual(adopted, [program.id])
+        XCTAssertEqual(extra.suspendCount, 1)
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: program.id), .allowed)
+        let before = bed.center.state(for: program.id)
+        delegate.receiveWillDownload(extra.session, task: extra.task, location: extraURL)
+        delegate.receiveProgress(extra.session, task: extra.task, fraction: 0.99)
+        extra.reportedState = .completed
+        delegate.urlSession(extra.session, task: extra.task, didCompleteWithError: URLError(.timedOut))
+        delegate.urlSession(extra.session, task: extra.task, didCompleteWithError: URLError(.cancelled))
+        delegate.urlSession(extra.session, task: extra.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.state(for: program.id), before)
+        XCTAssertTrue(bed.driver.hasTask(programID: program.id))
+        winner.reportedState = .completed
+        delegate.urlSession(winner.session, task: winner.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.offlineAssetURL(for: program.id), winnerURL)
+        XCTAssertEqual(bed.center.state(for: program.id), .downloaded(bytes: Int64(winnerBytes.count)))
+        XCTAssertEqual(try Data(contentsOf: winnerURL.appendingPathComponent("segment.ts")), winnerBytes)
+        XCTAssertEqual(try Data(contentsOf: extraURL.appendingPathComponent("segment.ts")), extraBytes)
+        XCTAssertEqual(extra.resumeCount + extra.cancelCount, 0, "Retaining a loser does not delete its package or restart it")
+    }
+
+    @MainActor
+    func testDuplicateFoundDuringNewPreparationIsStoppedWithoutReplacingTheNewAttempt() async throws {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        backend.holdPreparations = true
+        let driver = AVAssetDownloadDriver(backend: backend)
+        driver.start(programID: "A", assetURL: lifecycleURL, title: "new", allowsCellularAccess: true)
+        try await lifecycleWait { backend.pendingPreparations.count == 1 }
+        let extra = backend.legacy("A")
+        extra.reportedState = .running
+        backend.enumerated[false] = [extra.handle]
+        let adopted = await driver.adoptRunningTasks(knownLocations: [:])
+        XCTAssertTrue(adopted.isEmpty)
+        XCTAssertTrue(driver.hasTask(programID: "A"))
+        XCTAssertEqual(extra.suspendCount, 1)
+        backend.releasePreparation(0)
+        await driver.waitForPendingPreparations()
+        let winner = try XCTUnwrap(backend.created.first)
+        XCTAssertEqual(winner.resumeCount, 1)
+        XCTAssertEqual(winner.suspendCount + winner.cancelCount, 0)
+        XCTAssertEqual(driver.cellularPolicy(programID: "A"), .allowed)
+        driver.cancel(programID: "A")
+        XCTAssertEqual(winner.cancelCount, 1)
+        XCTAssertEqual(extra.cancelCount, 1)
+    }
+
+    @MainActor
+    func testCompletedWinnerDoesNotPromoteOrForgetRetainedDuplicates() async throws {
+        let backend = LifecycleBackend()
+        defer { backend.cleanUp() }
+        let winner = backend.legacy("A"), extra = backend.legacy("A", allowingCellular: true)
+        winner.reportedState = .running; extra.reportedState = .running
+        backend.enumerated[false] = [winner.handle]; backend.enumerated[true] = [extra.handle]
+        let driver = AVAssetDownloadDriver(backend: backend)
+        _ = await driver.adoptRunningTasks(knownLocations: ["A": URL(fileURLWithPath: "/winning-copy")])
+        let delegate = try XCTUnwrap(backend.delegate)
+        winner.reportedState = .completed
+        delegate.urlSession(winner.session, task: winner.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        let readopted = await driver.adoptRunningTasks(knownLocations: [:])
+        XCTAssertTrue(readopted.isEmpty)
+        XCTAssertFalse(driver.hasTask(programID: "A"))
+        driver.resume(programID: "A")
+        XCTAssertEqual(extra.resumeCount, 0)
+        driver.cancel(programID: "A")
+        XCTAssertEqual(extra.cancelCount, 1)
     }
 
 }

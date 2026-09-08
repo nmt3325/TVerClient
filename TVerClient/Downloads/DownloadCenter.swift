@@ -179,9 +179,34 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         var location: URL?
     }
 
+    /// Extra native identities are never presentation owners and are never resumed.
+    @MainActor
+    private final class RetainedTask {
+        let handle: AssetDownloadTaskHandle
+        private var suspensionRequested = false
+        private var cancellationRequested = false
+
+        init(_ handle: AssetDownloadTaskHandle) { self.handle = handle }
+
+        func stop() {
+            guard !cancellationRequested, handle.isViable else { return }
+            if handle.isSuspended { suspensionRequested = false; return }
+            guard !suspensionRequested else { return }
+            suspensionRequested = true
+            handle.suspend()
+        }
+
+        func cancel() {
+            guard !cancellationRequested else { return }
+            cancellationRequested = true
+            if handle.isViable { handle.cancel() }
+        }
+    }
+
     private let backend: AssetDownloadTaskBackend
     private let delegate = AssetDownloadDelegate()
     private var attempts: [String: Attempt] = [:]
+    private var retainedTasks: [String: [RetainedTask]] = [:]
     /// Keep even cancelled preparations owned until their await returns; cleanup is generation-specific.
     private var preparations: [UUID: Task<Void, Never>] = [:]
     private var mutationVersion: UInt64 = 0
@@ -256,6 +281,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     func pause(programID: String) {
         touch(programID)
         pausedIDs.insert(programID)
+        for task in retainedTasks[programID] ?? [] { task.stop() }
         guard let attempt = attempts[programID], !attempt.paused else { return }
         attempt.paused = true
         attempt.handle?.suspend()
@@ -278,9 +304,13 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         cancelledIDs.insert(programID)
         pausedIDs.remove(programID)
         lastCancellation[programID] = mutationVersion
-        guard let old = attempts.removeValue(forKey: programID) else { return }
-        preparations[old.generation]?.cancel()
-        old.handle?.cancel()
+        if let old = attempts.removeValue(forKey: programID) {
+            preparations[old.generation]?.cancel()
+            if let handle = old.handle { retain(handle, for: programID).cancel() }
+        }
+        // Keep cancellation receipts until native completion/terminal enumeration, so repeated
+        // cancellation and a lagging allTasks snapshot do not send duplicate control operations.
+        for task in retainedTasks[programID] ?? [] { task.cancel() }
     }
 
     func waitForPendingPreparations() async {
@@ -296,21 +326,33 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
             let existing = await backend.allTasks(allowsCellularAccess: allowingCellular, delegate: delegate)
             guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
             for handle in existing {
-                guard let programID = handle.programID, !programID.isEmpty, handle.isViable else { continue }
+                guard let programID = handle.programID, !programID.isEmpty else { continue }
+                guard handle.isViable else {
+                    discardRetained(programID, identity: handle.identity)
+                    continue
+                }
                 if cancelledIDs.contains(programID)
                     || ((lastCancellation[programID] ?? 0) > startedAtVersion
                         && attempts[programID]?.handle?.identity != handle.identity) {
                     // Cancellation while enumeration was awaiting must stop the late legacy task too.
-                    handle.cancel()
+                    retain(handle, for: programID).cancel()
                     continue
                 }
-                guard !retiredIDs.contains(programID),
-                      (lastMutation[programID] ?? 0) <= startedAtVersion || pausedIDs.contains(programID) else { continue }
                 if let owned = attempts[programID] {
                     if owned.handle?.identity == handle.identity {
-                        adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
+                        if (lastMutation[programID] ?? 0) <= startedAtVersion || pausedIDs.contains(programID) {
+                            adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
+                        }
+                    } else {
+                        retain(handle, for: programID).stop()
                     }
-                    continue // Never overwrite a new/preparing attempt or another session's task.
+                    continue // Keep the winner; retain and stop every distinct losing identity.
+                }
+                if retainedTasks[programID]?.contains(where: { $0.handle.identity == handle.identity }) == true
+                    || retiredIDs.contains(programID)
+                    || ((lastMutation[programID] ?? 0) > startedAtVersion && !pausedIDs.contains(programID)) {
+                    retain(handle, for: programID).stop()
+                    continue // A retained loser must not become the next presentation owner.
                 }
                 let attempt = Attempt()
                 attempt.handle = handle
@@ -335,6 +377,23 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         })
     }
 
+    private func retain(_ handle: AssetDownloadTaskHandle, for programID: String) -> RetainedTask {
+        if let existing = retainedTasks[programID]?.first(where: { $0.handle.identity == handle.identity }) {
+            return existing
+        }
+        let task = RetainedTask(handle)
+        retainedTasks[programID, default: []].append(task)
+        return task
+    }
+
+    @discardableResult
+    private func discardRetained(_ programID: String, identity: AssetDownloadTaskIdentity) -> Bool {
+        guard let index = retainedTasks[programID]?.firstIndex(where: { $0.handle.identity == identity }) else { return false }
+        retainedTasks[programID]?.remove(at: index)
+        if retainedTasks[programID]?.isEmpty == true { retainedTasks[programID] = nil }
+        return true
+    }
+
     private func touch(_ programID: String) {
         mutationVersion &+= 1
         lastMutation[programID] = mutationVersion
@@ -355,6 +414,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     }
 
     private func complete(programID: String, identity: AssetDownloadTaskIdentity, outcome: AssetDownloadOutcome) {
+        if discardRetained(programID, identity: identity) { return }
         guard let attempt = current(programID, identity: identity) else { return }
         let location = attempt.location
         attempts[programID] = nil
