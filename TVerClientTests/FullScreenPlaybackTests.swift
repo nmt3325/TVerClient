@@ -582,8 +582,8 @@ final class FullScreenPlaybackTests: XCTestCase {
         line: UInt = #line
     ) {
         let frame = target.convert(target.bounds, to: rootView)
-        XCTAssertGreaterThanOrEqual(frame.width, 44, file: file, line: line)
-        XCTAssertGreaterThanOrEqual(frame.height, 44, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.width + 0.000_001, 44, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.height + 0.000_001, 44, file: file, line: line)
         XCTAssertTrue(rootView.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame), "Control frame must be in the stage: \(frame)", file: file, line: line)
         // Use the identified control's real frame, never a guessed screen point.
         // All five samples are inside even the circular play button's shape.

@@ -6,6 +6,7 @@ import XCTest
 
 @MainActor
 final class PlayerUsabilityRegressionTests: XCTestCase {
+    // 1e-6pt tolerance below is only for UIView coordinate-conversion roundoff.
     func testSmallInlineStageUsesCompactButAccessibleTransport() {
         let layout = PlayerControlLayout(availableWidth: 296, availableHeight: 164, isFullScreen: false)
         XCTAssertTrue(layout.compactTransport)
@@ -135,8 +136,8 @@ final class PlayerUsabilityRegressionTests: XCTestCase {
         XCTAssertEqual(scrubbers.count, 1)
         for target in playTargets.map({ $0 as UIView }) + scrubbers.map({ $0 as UIView }) {
             let frame = target.convert(target.bounds, to: host.view)
-            XCTAssertGreaterThanOrEqual(frame.width, 44)
-            XCTAssertGreaterThanOrEqual(frame.height, 44)
+            XCTAssertGreaterThanOrEqual(frame.width + 0.000_001, 44)
+            XCTAssertGreaterThanOrEqual(frame.height + 0.000_001, 44)
             XCTAssertTrue(host.view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame), "Target overflow: \(frame)")
         }
         if let play = playTargets.first, let scrubber = scrubbers.first {
@@ -242,8 +243,8 @@ final class PlayerUsabilityRegressionTests: XCTestCase {
             XCTAssertFalse(markers.contains { $0.accessibilityIdentifier == PlayerControlHitTargetView.playPauseIdentifier }, "Recovery replaces the nonfunctional transport")
             for target in [retry, details].compactMap({ $0 }) {
                 let frame = target.convert(target.bounds, to: host.view)
-                XCTAssertGreaterThanOrEqual(frame.width, 44)
-                XCTAssertGreaterThanOrEqual(frame.height, 44)
+                XCTAssertGreaterThanOrEqual(frame.width + 0.000_001, 44)
+                XCTAssertGreaterThanOrEqual(frame.height + 0.000_001, 44)
                 XCTAssertTrue(host.view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame))
                 let hit = host.view.hitTest(CGPoint(x: frame.midX, y: frame.midY), with: nil)
                 XCTAssertNotNil(hit)

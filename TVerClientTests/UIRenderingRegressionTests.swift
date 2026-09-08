@@ -202,8 +202,8 @@ final class UIRenderingRegressionTests: XCTestCase {
             XCTAssertEqual(scrubbers.count, 1)
             for target in controls.map({ $0 as UIView }) + scrubbers.map({ $0 as UIView }) {
                 let rect = target.convert(target.bounds, to: rootView)
-                XCTAssertGreaterThanOrEqual(rect.width, 44)
-                XCTAssertGreaterThanOrEqual(rect.height, 44)
+                XCTAssertGreaterThanOrEqual(rect.width + 0.000_001, 44)
+                XCTAssertGreaterThanOrEqual(rect.height + 0.000_001, 44)
                 XCTAssertTrue(rootView.bounds.insetBy(dx: -0.5, dy: -0.5).contains(rect), "Overflow: \(rect)")
             }
         }
