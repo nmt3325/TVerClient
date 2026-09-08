@@ -44,6 +44,7 @@
 		3776BE3F6CF16FBD141367AA /* GuideZoomMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AF358E6AB96795910F623F /* GuideZoomMetricsTests.swift */; };
 		38B789DDEBCB9A4932C92419 /* CatchUpAvailabilityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DC38A0D30696A4EFFDD322 /* CatchUpAvailabilityStore.swift */; };
 		38E208A5AE5D467BF2FE8C9E /* ProgramSearchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B7FEF1C55CD936A6F922845 /* ProgramSearchViewModel.swift */; };
+		3C70AFA14A748B88E85BDE51 /* PlayerFooterLayoutSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 460D79A5327213FAAC93E072 /* PlayerFooterLayoutSupport.swift */; };
 		4251784FB5890D70F6E6B082 /* BroadcastDay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B69516D497DB49B912869C4 /* BroadcastDay.swift */; };
 		452127793FA3FEAD6429E09D /* PlaybackContinuity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 340AA1623EB4C7213C2D4E4C /* PlaybackContinuity.swift */; };
 		45C7DE46716A521CF053F271 /* OfflineCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71A054DB35A68D475EE5D46 /* OfflineCacheTests.swift */; };
@@ -233,6 +234,7 @@
 		3F14608926E90EE8E6F606B8 /* PlaybackChromeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackChromeTests.swift; sourceTree = "<group>"; };
 		3F5651BD81C8AF80D39818FE /* ProgramLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgramLibraryStore.swift; sourceTree = "<group>"; };
 		40CEA04EF0EEB9A49C163E92 /* CachedProgramImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedProgramImage.swift; sourceTree = "<group>"; };
+		460D79A5327213FAAC93E072 /* PlayerFooterLayoutSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerFooterLayoutSupport.swift; sourceTree = "<group>"; };
 		469FE0BC4DEFC5E2545BC699 /* LoadFreshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadFreshness.swift; sourceTree = "<group>"; };
 		4968A840A1B8D7986195EA36 /* OfflineCacheGuideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCacheGuideTests.swift; sourceTree = "<group>"; };
 		498CB0C470BF48032A2B22D6 /* CatchUpLookupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpLookupTests.swift; sourceTree = "<group>"; };
@@ -380,6 +382,7 @@
 				E5938AADC6A33F8E583EABEB /* PlayerControlPresentation.swift */,
 				8C6B78D9A9609C5325A5E8C7 /* PlayerControlWidgets.swift */,
 				948ECFED6B922FDA66EDF273 /* PlayerFailureDetailsSheet.swift */,
+				460D79A5327213FAAC93E072 /* PlayerFooterLayoutSupport.swift */,
 				E36B8EBEBBAA6324F279CB0F /* PlayerOverlayControls.swift */,
 				08FA3A65199276180F26C72B /* PlayerStage.swift */,
 			);
@@ -878,6 +881,7 @@
 				B76558B1316216B78D27FD44 /* PlayerControlPresentation.swift in Sources */,
 				B42ADAA45541059D35313395 /* PlayerControlWidgets.swift in Sources */,
 				261D45B72F4FD1EE2F85F184 /* PlayerFailureDetailsSheet.swift in Sources */,
+				3C70AFA14A748B88E85BDE51 /* PlayerFooterLayoutSupport.swift in Sources */,
 				0C09E8151A45E665FE8CC551 /* PlayerLayerView.swift in Sources */,
 				728E0478B7614DC9B51DA281 /* PlayerOverlayControls.swift in Sources */,
 				190EA9AE07CE291EA167CF3A /* PlayerStage.swift in Sources */,
