@@ -5,8 +5,8 @@ import XCTest
 @testable import TVerClient
 
 /// Opt-in review artifacts, not pixel-baseline tests. Run only with
-/// RECORD_UI_SNAPSHOTS=1 in the test process environment (SIMCTL_CHILD_ prefix
-/// may be needed when launching the runner via simctl). No network is used.
+/// TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 when invoking xcodebuild (it forwards
+/// RECORD_UI_SNAPSHOTS=1 to the test process). No network is used.
 @MainActor
 final class UIRenderingRegressionTests: XCTestCase {
     private struct SnapshotRecord: Codable {
@@ -191,7 +191,11 @@ final class UIRenderingRegressionTests: XCTestCase {
         if validatesPlayerBounds {
             let controls = descendants(of: rootView, matching: PlayerControlHitTargetView.self)
             let scrubbers = descendants(of: rootView, matching: PlaybackScrubberInteractionView.self)
-            XCTAssertEqual(controls.count, 1)
+            let expectedIdentifiers: Set<String> = fixture.player.errorPresentation == nil
+                ? [PlayerControlHitTargetView.playPauseIdentifier]
+                : [PlayerControlHitTargetView.failureRetryIdentifier, PlayerControlHitTargetView.failureDetailsIdentifier]
+            XCTAssertEqual(Set(controls.compactMap(\.accessibilityIdentifier)), expectedIdentifiers)
+            XCTAssertEqual(controls.count, expectedIdentifiers.count)
             XCTAssertEqual(scrubbers.count, 1)
             for target in controls.map({ $0 as UIView }) + scrubbers.map({ $0 as UIView }) {
                 let rect = target.convert(target.bounds, to: rootView)
