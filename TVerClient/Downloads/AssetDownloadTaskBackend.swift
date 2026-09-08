@@ -115,3 +115,102 @@ final class NativeAssetDownloadTaskBackend: AssetDownloadTaskBackend {
         return created
     }
 }
+
+/// The lock covers every access to owners/window/receipts. Nothing under it calls actor or user code.
+/// Native callbacks either capture a current attempt generation or enter the current bounded window;
+/// they can never be reclassified as an early callback by a later MainActor delivery.
+final class AssetDownloadCallbackGate: @unchecked Sendable {
+    struct Owner {
+        let programID: String
+        let identity: AssetDownloadTaskIdentity
+        let generation: UUID
+    }
+
+    struct Receipt {
+        let programID: String
+        let identity: AssetDownloadTaskIdentity
+        var location: URL?
+        var outcome: AssetDownloadOutcome?
+        var ambiguous = false
+        var excluded = false
+    }
+
+    private let lock = NSLock()
+    private var owners: [String: Owner] = [:]
+    private var window: UUID?
+    private var targets: Set<String> = []
+    private var receipts: [Receipt] = []
+    private var excluded: [AssetDownloadTaskIdentity] = []
+
+    func register(_ programID: String, identity: AssetDownloadTaskIdentity, generation: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        owners[programID] = Owner(programID: programID, identity: identity, generation: generation)
+    }
+
+    func unregister(_ programID: String, generation: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if let owner = owners[programID], owner.generation == generation {
+            excludeLocked(owner.identity)
+            owners[programID] = nil
+        }
+    }
+
+    func ownerGeneration(_ programID: String, identity: AssetDownloadTaskIdentity) -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        guard let owner = owners[programID], owner.identity == identity else { return nil }
+        return owner.generation
+    }
+
+    func open(_ generation: UUID, targets: Set<String>, excluding: [AssetDownloadTaskIdentity] = []) {
+        lock.lock(); defer { lock.unlock() }
+        window = generation
+        self.targets = targets
+        receipts = []
+        excluded = excluding
+    }
+
+    func exclude(_ identity: AssetDownloadTaskIdentity) {
+        lock.lock(); defer { lock.unlock() }
+        excludeLocked(identity)
+    }
+
+    private func excludeLocked(_ identity: AssetDownloadTaskIdentity) {
+        guard window != nil else { return }
+        if !excluded.contains(identity) { excluded.append(identity) }
+        for index in receipts.indices where receipts[index].identity == identity { receipts[index].excluded = true }
+    }
+
+    func capture(_ programID: String, identity: AssetDownloadTaskIdentity,
+                 location: URL? = nil, outcome: AssetDownloadOutcome? = nil) -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        if let owner = owners[programID], owner.identity == identity { return owner.generation }
+        guard window != nil, targets.contains(programID) else { return nil }
+        if let index = receipts.firstIndex(where: { $0.programID == programID && $0.identity == identity }) {
+            if let location {
+                if let previous = receipts[index].location, previous != location { receipts[index].ambiguous = true }
+                else { receipts[index].location = location }
+            }
+            if let outcome {
+                if let previous = receipts[index].outcome, previous != outcome { receipts[index].ambiguous = true }
+                else { receipts[index].outcome = outcome }
+            }
+        } else {
+            receipts.append(Receipt(programID: programID, identity: identity, location: location, outcome: outcome,
+                                    excluded: excluded.contains(identity)))
+        }
+        return nil
+    }
+
+    /// Promotion and closing are atomic with receipt capture: there is no close-to-owner callback gap.
+    func close(_ generation: UUID, installing: [Owner] = []) -> [Receipt] {
+        lock.lock(); defer { lock.unlock() }
+        guard window == generation else { return [] }
+        for owner in installing { owners[owner.programID] = owner }
+        let result = receipts
+        window = nil
+        targets = []
+        receipts = []
+        excluded = []
+        return result
+    }
+}
