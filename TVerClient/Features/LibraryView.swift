@@ -26,6 +26,7 @@ struct LibraryView: View {
     @State private var category: Category = .saved
     @State private var editMode: EditMode = .inactive
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     /// 分類は空でも選べる。保存済みが0件でも、履歴や停止した転送を見失わない。
     enum Category: String, CaseIterable, Identifiable {
@@ -338,20 +339,7 @@ struct LibraryView: View {
                 }
             }
         } label: {
-            HStack(spacing: DS.Spacing.s) {
-                Text(category.title)
-                    .font(.headline)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("\(visibleRowIDs.count)件")
-                    .font(.subheadline)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.footnote.weight(.semibold))
-            }
-            .frame(maxWidth: .infinity, minHeight: DS.Size.minimumTapTarget, alignment: .leading)
-            .contentShape(Rectangle())
+            LibraryCategoryMenuLabel(title: category.title, count: visibleRowIDs.count)
         }
         .padding(.horizontal, DS.Spacing.m)
         .background(.bar)
@@ -634,6 +622,15 @@ struct LibraryView: View {
 
     // MARK: - Sections
 
+    /// The pinned picker already names this category; do not repeat it at accessibility sizes.
+    @ViewBuilder
+    private func sectionHeading(for section: Category) -> some View {
+        let layout = LibraryPresentationLayout(dynamicTypeSize: dynamicTypeSize)
+        if layout.showsSectionHeading(section, selected: category) {
+            Text(section.title)
+        }
+    }
+
     @ViewBuilder
     private var seriesSubscriptionsSection: some View {
         if !seriesSubscriptions.subscriptions.isEmpty {
@@ -653,7 +650,7 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text("新着の自動ダウンロード")
+                sectionHeading(for: .subscriptions)
             } footer: {
                 Text(seriesSubscriptionsFooter)
             }
@@ -732,7 +729,7 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text(Category.transfers.title)
+                sectionHeading(for: .transfers)
             } footer: {
                 Text("\(inFlight.count)件。完了すると「\(Vocabulary.Library.downloads)」に移ります。")
             }
@@ -754,7 +751,7 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text(Vocabulary.Library.downloads)
+                sectionHeading(for: .saved)
             } footer: {
                 Text("\(saved.count)件・\(DownloadStorageBar.formatted(downloadCenter.storage.usedBytes))")
             }
@@ -779,7 +776,7 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text(Vocabulary.Library.favorites)
+                sectionHeading(for: .favorites)
             } footer: {
                 Text("\(libraryStore.favoritePrograms.count)件")
             }
@@ -804,7 +801,7 @@ struct LibraryView: View {
                         }
                 }
             } header: {
-                Text(Vocabulary.Library.history)
+                sectionHeading(for: .recents)
             } footer: {
                 Text("\(libraryStore.recentPrograms.count)件")
             }
@@ -819,11 +816,12 @@ struct LibraryView: View {
             // 選択中は再生やダウンロードを起動しない。
             mediaRow(for: program, state: state)
         } else {
-            HStack(spacing: DS.Spacing.xs) {
+            LibraryRowContainer {
                 NavigationLink(value: program) {
                     mediaRow(for: program, state: state)
                 }
                 .accessibilityHint("視聴画面を開きます。戻るとこの分類の一覧に戻ります")
+            } accessory: {
                 // NavigationLinkのラベル内に操作ボタンを入れない。
                 DownloadButton(program: program)
             }
