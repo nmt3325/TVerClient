@@ -1057,6 +1057,129 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertNil(gate.capture("A", identity: newer.handle.identity, outcome: .succeeded))
     }
 
+
+    @MainActor
+    func testSecondEnumerationWaitCancelAndDeleteReachPendingNativeTaskImmediately() async throws {
+        for delete in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            let pending = try await lifecycleHeldSecondEnumeration(bed)
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+            XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+            if delete { bed.center.delete("A") } else { bed.center.cancel("A") }
+            XCTAssertNotNil(bed.backend.pendingEnumeration)
+            XCTAssertEqual(pending.task.cancelCount, 1, "Cancel must precede the unrelated cellular enumeration's return")
+            XCTAssertEqual(pending.task.resumeCount, 0)
+            XCTAssertEqual(bed.center.state(for: "A"), .notDownloaded)
+            if delete { bed.center.delete("A") } else { bed.center.cancel("A") }
+            // A lagging state/list must not cause a second cancel receipt after the await.
+            pending.task.reportedState = .running
+            bed.backend.releaseEnumeration([pending.task.handle, pending.task.handle])
+            await bed.center.waitForPendingRestoration()
+            XCTAssertEqual(pending.task.cancelCount, 1)
+            XCTAssertEqual(pending.task.resumeCount + pending.task.suspendCount, 0)
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        }
+    }
+
+    @MainActor
+    func testCancelledPendingTaskSurvivesEmptyRestorationReplacementWithoutResurrection() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let pending = try await lifecycleHeldSecondEnumeration(bed)
+        let previous = Task { @MainActor in await bed.center.waitForPendingRestoration() }
+        await lifecycleCallbacks()
+        bed.center.cancel("A")
+        XCTAssertEqual(pending.task.cancelCount, 1, "Assert before releasing the second enumeration")
+        bed.center.restore() // Cancelled A is no longer in metadata; the new restoration has no candidates.
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(pending.task.cancelCount, 1)
+        bed.backend.releaseEnumeration([])
+        await previous.value
+        pending.delegate.receiveWillDownload(pending.task.session, task: pending.task.task, location: pending.url)
+        pending.delegate.urlSession(pending.task.session, task: pending.task.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(pending.task.cancelCount, 1)
+        XCTAssertEqual(pending.task.resumeCount + pending.task.suspendCount, 0)
+        XCTAssertEqual(bed.center.state(for: "A"), .notDownloaded)
+        XCTAssertNil(bed.center.offlineAssetURL(for: "A"))
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+    }
+
+    @MainActor
+    func testOldPendingCleanupCannotStopTheNewCurrentOwnerOfTheSameNativeIdentity() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let pending = try await lifecycleHeldSecondEnumeration(bed)
+        let previous = Task { @MainActor in await bed.center.waitForPendingRestoration() }
+        await lifecycleCallbacks()
+        bed.center.restore() // Same native identity is found and accepted by the newer window.
+        await bed.center.waitForPendingRestoration()
+        XCTAssertTrue(bed.driver.hasTask(programID: "A"))
+        bed.driver.resume(programID: "A")
+        pending.task.reportedState = .running
+        let suspends = pending.task.suspendCount, resumes = pending.task.resumeCount, cancels = pending.task.cancelCount
+        bed.backend.releaseEnumeration([pending.task.handle])
+        await previous.value
+        XCTAssertTrue(bed.driver.hasTask(programID: "A"))
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+        XCTAssertEqual(pending.task.suspendCount, suspends)
+        XCTAssertEqual(pending.task.resumeCount, resumes)
+        XCTAssertEqual(pending.task.cancelCount, cancels)
+        pending.task.reportedState = .completed
+        pending.delegate.urlSession(pending.task.session, task: pending.task.task, didCompleteWithError: nil)
+        await lifecycleCallbacks()
+        XCTAssertEqual(bed.center.offlineAssetURL(for: "A"), pending.url)
+        XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+    }
+
+    @MainActor
+    func testOldPendingCleanupCannotStopTheSameIdentityInANewerHeldWindow() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let pending = try await lifecycleHeldSecondEnumeration(bed)
+        let previous = Task { @MainActor in await bed.center.waitForPendingRestoration() }
+        await lifecycleCallbacks()
+        let oldEnumeration = try XCTUnwrap(bed.backend.pendingEnumeration)
+        bed.backend.pendingEnumeration = nil // Keep the old continuation; give the fixture slot to the new window.
+        bed.backend.holdEnumerationForCellular = true
+        bed.center.restore()
+        try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+        oldEnumeration.resume(returning: [])
+        await previous.value
+        XCTAssertEqual(pending.task.suspendCount + pending.task.cancelCount + pending.task.resumeCount, 0)
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+        bed.center.cancel("A")
+        XCTAssertEqual(pending.task.cancelCount, 1, "The new held window must still own the control receipt")
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(pending.task.cancelCount, 1)
+        XCTAssertEqual(pending.task.resumeCount, 0)
+    }
+
+    @MainActor
+    func testPendingPauseIntentIsImmediateAndDoesNotGrantResumeOrDuplicateSuspension() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let pending = try await lifecycleHeldSecondEnumeration(bed)
+        bed.driver.pause(programID: "A")
+        XCTAssertEqual(pending.task.suspendCount, 1)
+        pending.task.reportedState = .running // Simulate delayed native state reporting, not an actual resume.
+        bed.driver.pause(programID: "A")
+        bed.driver.resume(programID: "A")
+        XCTAssertEqual(pending.task.suspendCount, 1)
+        XCTAssertEqual(pending.task.resumeCount, 0)
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+        bed.center.cancel("A")
+        XCTAssertEqual(pending.task.cancelCount, 1)
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertEqual(pending.task.cancelCount, 1)
+        XCTAssertEqual(pending.task.suspendCount, 1)
+        XCTAssertEqual(pending.task.resumeCount, 0)
+    }
+
 }
 
 private var lifecycleURL: URL { URL(string: "https://example.invalid/lifecycle-no-network.m3u8")! }
@@ -1292,4 +1415,24 @@ private func lifecycleHeldRestore(_ bed: LifecycleCenterBed, knownLocation: Bool
     // Unknown-location packages are created only after restore's disk scan, as with a new native willDownload.
     let url = try bed.writeAsset("A", bytes: bytes)
     return LifecycleHeldRestoration(task: task, delegate: delegate, url: url, bytes: bytes)
+}
+
+/// A-E1 setup uses only the existing production Center/Driver and backend seam, so the same
+/// assertions can be applied to the pre-fix implementation as a negative control.
+@MainActor
+private func lifecycleHeldSecondEnumeration(_ bed: LifecycleCenterBed) async throws -> LifecycleHeldRestoration {
+    let bytes = Data("pending-second-enumeration-package".utf8)
+    let url = try bed.writeAsset("A", bytes: bytes)
+    let record = DownloadPersistedRecord(program: lifecycleProgram("A"), phase: .downloading, progress: 0.4, bytes: 0,
+                                         message: nil, bookmark: nil, relativePath: "A.movpkg", updatedAt: Date())
+    try JSONEncoder().encode([record]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+    let task = bed.backend.legacy("A")
+    task.reportedState = .running
+    bed.backend.enumerated[false] = [task.handle, task.handle]
+    bed.backend.holdEnumerationForCellular = true
+    bed.center.restore()
+    try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+    XCTAssertEqual(task.task.state, .suspended, "The SDK task is never resumed by this fixture")
+    XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+    return LifecycleHeldRestoration(task: task, delegate: try XCTUnwrap(bed.backend.delegate), url: url, bytes: bytes)
 }

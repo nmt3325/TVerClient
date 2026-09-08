@@ -197,7 +197,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         var location: URL?
     }
 
-    /// Extra native identities are never presentation owners and are never resumed.
+    /// Shared pending/retained control receipt. Only Attempt owns presentation; this receipt never resumes.
     @MainActor
     private final class RetainedTask {
         let handle: AssetDownloadTaskHandle
@@ -226,6 +226,9 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
     private let callbackGate = AssetDownloadCallbackGate()
     private var attempts: [String: Attempt] = [:]
     private var retainedTasks: [String: [RetainedTask]] = [:]
+    /// Discovered handles are controllable before presentation ownership is decided. Windows share
+    /// the same native control receipt, but pending presence grants neither hasTask nor permission.
+    private var pendingTasks: [UUID: [String: [RetainedTask]]] = [:]
     /// Keep even cancelled preparations owned until their await returns; cleanup is generation-specific.
     private var preparations: [UUID: Task<Void, Never>] = [:]
     private var mutationVersion: UInt64 = 0
@@ -314,6 +317,9 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         touch(programID)
         pausedIDs.insert(programID)
         for task in retainedTasks[programID] ?? [] { task.stop() }
+        for task in pendingControls(programID) where attempts[programID]?.handle?.identity != task.handle.identity {
+            task.stop()
+        }
         guard let attempt = attempts[programID], !attempt.paused else { return }
         attempt.paused = true
         attempt.handle?.suspend()
@@ -344,6 +350,10 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         // Keep cancellation receipts until native completion/terminal enumeration, so repeated
         // cancellation and a lagging allTasks snapshot do not send duplicate control operations.
         for task in retainedTasks[programID] ?? [] { task.cancel() }
+        for task in pendingControls(programID) {
+            callbackGate.exclude(task.handle.identity)
+            task.cancel()
+        }
     }
 
     func waitForPendingPreparations() async {
@@ -378,6 +388,7 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                     if let handle = attempt.handle { retain(handle, for: programID).stop() }
                 }
             }
+            finishPending(generation, startedAtVersion: startedAtVersion)
         }
 
         func accept(_ existing: [AssetDownloadTaskHandle]) {
@@ -427,7 +438,11 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
                     callbackGate.register(programID, identity: handle.identity, generation: attempt.generation)
                 }
                 // Apply only to the accepted identity, before allowing any delegate progress through.
-                if mustPause && !handle.isSuspended { handle.suspend() }
+                if mustPause && !handle.isSuspended {
+                    if let pending = pendingControls(programID).first(where: { $0.handle.identity == handle.identity }) {
+                        pending.stop()
+                    } else { handle.suspend() }
+                }
                 guard attempts[programID] === attempt else { continue }
                 touch(programID)
                 adopted[programID] = (handle.identity, lastMutation[programID] ?? 0)
@@ -441,9 +456,14 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
             } onCancel: {
                 _ = gate.close(generation)
             }
+            if restoration != nil {
+                // Track even a late result before the stale-window return: cleanup can then control
+                // it, while exact current/new-window identities remain protected.
+                trackPending(existing, generation: generation, startedAtVersion: startedAtVersion)
+                enumerated += existing
+            }
             guard !Task.isCancelled, adoptionGeneration == generation else { return [] }
-            if restoration != nil { enumerated += existing }
-            else { accept(existing) }
+            if restoration == nil { accept(existing) }
         }
         if let restoration {
             // Scoped restoration chooses owners only after both session snapshots are available.
@@ -517,12 +537,58 @@ final class AVAssetDownloadDriver: OfflineDownloadDriving {
         }
     }
 
+    private func pendingControls(_ programID: String) -> [RetainedTask] {
+        pendingTasks.values.flatMap { $0[programID] ?? [] }
+    }
+
+    private func trackPending(_ handles: [AssetDownloadTaskHandle], generation: UUID, startedAtVersion: UInt64) {
+        for handle in handles {
+            guard let programID = handle.programID, !programID.isEmpty, handle.isViable else { continue }
+            let control = retainedTasks[programID]?.first(where: { $0.handle.identity == handle.identity })
+                ?? pendingControls(programID).first(where: { $0.handle.identity == handle.identity })
+                ?? RetainedTask(handle)
+            if pendingTasks[generation]?[programID]?.contains(where: { $0 === control }) != true {
+                pendingTasks[generation, default: [:]][programID, default: []].append(control)
+            }
+            guard !protectedFromPendingCleanup(handle, programID: programID, generation: generation) else { continue }
+            if cancelledIDs.contains(programID) || (lastCancellation[programID] ?? 0) > startedAtVersion {
+                callbackGate.exclude(handle.identity)
+                control.cancel()
+            } else if pausedIDs.contains(programID) {
+                control.stop() // Pausing a candidate is not a losing-identity exclusion.
+            }
+        }
+    }
+
+    private func protectedFromPendingCleanup(_ handle: AssetDownloadTaskHandle, programID: String, generation: UUID) -> Bool {
+        if attempts[programID]?.handle?.identity == handle.identity { return true }
+        return adoptionGeneration != generation
+            && pendingTasks[adoptionGeneration]?[programID]?.contains(where: { $0.handle.identity == handle.identity }) == true
+    }
+
+    private func finishPending(_ generation: UUID, startedAtVersion: UInt64) {
+        defer { pendingTasks[generation] = nil }
+        for (programID, controls) in pendingTasks[generation] ?? [:] {
+            for control in controls {
+                let handle = control.handle
+                guard !protectedFromPendingCleanup(handle, programID: programID, generation: generation),
+                      handle.isViable else { continue }
+                // Only abandoned/losing handles enter retainedTasks (and become excluded). Reuse
+                // their receipt so cancel/pause already sent during the await cannot be sent twice.
+                let retained = retain(handle, for: programID)
+                if cancelledIDs.contains(programID) || (lastCancellation[programID] ?? 0) > startedAtVersion {
+                    retained.cancel()
+                } else { retained.stop() }
+            }
+        }
+    }
+
     private func retain(_ handle: AssetDownloadTaskHandle, for programID: String) -> RetainedTask {
         callbackGate.exclude(handle.identity)
         if let existing = retainedTasks[programID]?.first(where: { $0.handle.identity == handle.identity }) {
             return existing
         }
-        let task = RetainedTask(handle)
+        let task = pendingControls(programID).first(where: { $0.handle.identity == handle.identity }) ?? RetainedTask(handle)
         retainedTasks[programID, default: []].append(task)
         return task
     }
