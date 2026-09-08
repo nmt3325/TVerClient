@@ -30,3 +30,18 @@ All source paths above are relative to TVerClient/. Tests are relative to TVerCl
 - Integrator gate after each merge: regenerate project as needed, lint/parse, compile, targeted tests. Final gate: full simulator XCTest suite, simulator UI inspection with deterministic data, release device build where feasible, independent read-only review, and clean remote main verification.
 - Test failures must be preserved and investigated; do not weaken assertions merely to obtain green status.
 - Runtime environment ownership, command/session IDs, cursors and log paths are recorded outside the repository. Each task alone writes its own JSON report with status, base/head SHA, commits, changed files, checks/exit codes/logs, findings, known limits and contract-change requests.
+
+## Follow-up recovery and validation
+
+Restore the unintegrated, reviewed layout and gesture changes against published checkpoint `f4077b8`. Restored changes must be reviewed and executed again; an old parsing result is not a new test result. The following narrower ownership supersedes the original implementation assignments until the integrator explicitly assigns the next fix.
+
+| Recovery task | Owned files | Acceptance |
+| --- | --- | --- |
+| library | Features/LibraryView.swift, its dedicated library-layout helper, and focused library-layout tests | Preserve navigation/action separation and download safeguards; restore full-width accessibility category labels, distinct count styling, and adaptive outer rows |
+| guide | Guide/ProgramGuideGrid.swift, Guide/ProgramGuideProgramList.swift, GuideUsabilityRegressionTests.swift | Keep station identity visible after current-row navigation; keep the now marker out of program text, including translucent cards |
+| player | Player/PlayerStage.swift, Player/PlayerChromeModel.swift, PlayerGestureContinuityTests.swift | Real touch receipt refreshes only visible chrome; cancelled old hide tasks cannot disable a pending gesture's plane |
+| integrator | All other files, snapshot hosting, project generation and shared recovery API changes | Restore the corrected snapshot constraints, inspect actual pixels, execute integrated tests, and verify remote main |
+
+Only the integrator manages Git worktrees, heavy builds, Simulator, integration and pushes. Use separate recovery commits and checkpoint recovered source on a remote work branch before long validation; publish tested batches to main without a PR or force push. Never publish private instructions, runtime ledgers, raw service captures or internal operational identifiers.
+
+The independent follow-up also identified remaining notice-restart safety, driver cancellation/callback ownership, and embedded guide recovery-routing paths. Assign those files explicitly after recovery. Preserve failing evidence and use production-connected regression tests. Static rendering and callback-driven tests do not establish physical touch delivery or real-device PiP behavior.
