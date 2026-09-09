@@ -289,8 +289,12 @@ final class FullScreenPlaybackTests: XCTestCase {
     func testHostedStationaryScrubKeepsChromeVisibleUntilRelease() async throws {
         let url = try makeHostedStageAudioFile()
         defer { try? FileManager.default.removeItem(at: url) }
-        let item = AVPlayerItem(url: url)
-        let controller = PlaybackController(player: AVPlayer(playerItem: item))
+        let player = AVPlayer()
+        player.isMuted = true
+        let controller = PlaybackController(
+            resolver: StationaryScrubResolver(url: url), player: player,
+            audioSession: StationaryScrubAudioSession(), notificationCenter: NotificationCenter()
+        )
         let clock = HeldScrubAutoHideClock()
         let model = PlayerChromeModel(waitForAutoHide: { delay in await clock.wait(delay) })
         defer {
@@ -298,9 +302,30 @@ final class FullScreenPlaybackTests: XCTestCase {
             model.cancelAutoHide()
             clock.releaseAll()
         }
+        let program = TVerProgram(
+            id: "stationary-scrub-\(UUID().uuidString)", seriesID: nil,
+            title: "静止スクラブ", seriesTitle: "再生操作の回帰", description: "",
+            broadcastLabel: "テスト放送", availableUntil: nil, thumbnailURL: nil
+        )
+        // Like the footer fixture, prepare through the controller so its item
+        // status observer publishes duration even while the player is paused.
+        // An already-attached item bypasses this status observer, and a paused
+        // player is not guaranteed to deliver a later timing callback.
+        await controller.play(program)
+        controller.pause()
+        let item = try XCTUnwrap(controller.player.currentItem)
+        XCTAssertTrue(controller.isItemStatusObserverInstalled)
         await waitUntil("the stationary-scrub fixture has a finite duration") {
             item.status == .readyToPlay && controller.canSeek
         }
+        print("STATIONARY_SCRUB_FIXTURE itemStatus=\(item.status.rawValue) nativeDuration=\(item.duration.seconds) "
+              + "publishedDuration=\(String(describing: controller.duration)) canSeek=\(controller.canSeek) "
+              + "itemObserver=\(controller.isItemStatusObserverInstalled) rate=\(player.rate)")
+        let duration = try XCTUnwrap(controller.duration)
+        XCTAssertEqual(item.duration.seconds, 1, accuracy: 0.01)
+        XCTAssertEqual(duration, item.duration.seconds, accuracy: 0.01)
+        XCTAssertEqual(controller.state, .paused)
+        XCTAssertFalse(controller.isPlaying)
         let stage = PlayerStage(
             playbackController: controller,
             pictureInPicture: PictureInPictureCoordinator(isSupported: { false }),
@@ -318,8 +343,9 @@ final class FullScreenPlaybackTests: XCTestCase {
             await harness.tearDown(model: model)
             return
         }
-        // Permit the countdown without starting audio. These are the production
-        // callback and model paths, not synthesized UITouches or AV playback.
+        // Preparation has finished and playback is paused. Permit the countdown
+        // through the production callback/model paths, not synthesized UITouches
+        // or a wall-clock interval of active playback.
         model.isAutoHideSuspended = false
         await waitUntil("the original hide deadline is waiting") { clock.delays.count == 1 }
         let location = CGPoint(x: interaction.bounds.width / 4, y: interaction.bounds.midY)
@@ -698,6 +724,21 @@ final class FullScreenPlaybackTests: XCTestCase {
         }
         XCTAssertTrue(condition(), message)
     }
+}
+
+private struct StationaryScrubResolver: TVerStreamResolving {
+    let url: URL
+
+    func resolveStream(for program: TVerProgram) async throws -> URL {
+        try Task.checkCancellation()
+        return url
+    }
+}
+
+private final class StationaryScrubAudioSession: PlaybackAudioSessioning {
+    func setCategory(_ category: AVAudioSession.Category, mode: AVAudioSession.Mode,
+                     options: AVAudioSession.CategoryOptions) throws {}
+    func setActive(_ active: Bool, options: AVAudioSession.SetActiveOptions) throws {}
 }
 
 /// Ignores cancellation until released, so a queued old deadline is exercised
