@@ -4,8 +4,9 @@ import SwiftUI
 import UIKit
 import XCTest
 
-/// Native, production-connected geometry regressions, not screenshots or
-/// synthetic touch tests. The time probes sit behind the real fixed-size Text.
+/// Native, production-connected geometry regressions, not synthetic touch tests.
+/// The probes sit behind the real fixed-size Text; optional images supplement
+/// but never replace the independent geometry assertions.
 @MainActor
 final class PlayerFooterLayoutRegressionTests: XCTestCase {
     func testInline320By180KeepsPausedAndRetryFootersInsideTheSurface() async throws {
@@ -63,6 +64,20 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         }
     }
 
+    func testFullScreenHourLongTimesFitNearHorizontalWidthBoundary() async throws {
+        for width in [CGFloat(528), 560, 640] {
+            try await checkLayout(
+                fullScreen: true,
+                dynamicType: .accessibility5,
+                failing: false,
+                sizeOverride: CGSize(width: width, height: 240),
+                durationSeconds: 10_800,
+                seekTime: 5_400,
+                expectedClockTexts: (elapsed: "1:30:00", remaining: "-1:30:00")
+            )
+        }
+    }
+
     private var landscapeInsets: UIEdgeInsets {
         UIEdgeInsets(top: 12, left: 44, bottom: 21, right: 12)
     }
@@ -71,9 +86,13 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         fullScreen: Bool, dynamicType: DynamicTypeSize, failing: Bool,
         additionalInsets: UIEdgeInsets = .zero,
         insetUpdates: [UIEdgeInsets] = [],
+        sizeOverride: CGSize? = nil,
+        durationSeconds: Int = 120,
+        seekTime: TimeInterval = 75,
+        expectedClockTexts: (elapsed: String, remaining: String)? = nil,
         file: StaticString = #filePath, line: UInt = #line
     ) async throws {
-        let fixture = try FooterLayoutFixture(failing: failing)
+        let fixture = try FooterLayoutFixture(failing: failing, durationSeconds: durationSeconds)
         // A thrown fixture/readiness/layout failure must also unmount this host.
         do {
             await fixture.controller.play(fixture.program)
@@ -86,14 +105,33 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                     fixture.controller.player.currentItem?.status == .readyToPlay
                         && fixture.controller.canSeek
                 }
-                fixture.controller.seek(to: 75)
+                fixture.controller.seek(to: seekTime)
                 try await waitUntil("local seek completes") { !fixture.controller.isSeeking }
                 XCTAssertEqual(fixture.controller.state, .paused, file: file, line: line)
                 XCTAssertGreaterThan(fixture.controller.currentTime, 0, file: file, line: line)
             }
             XCTAssertTrue(PlayerPrimaryAction.resolve(using: fixture.controller).isEnabled, file: file, line: line)
 
-            let size = fullScreen ? CGSize(width: 640, height: 240) : CGSize(width: 320, height: 180)
+            if let expectedClockTexts, !failing {
+                let duration = try XCTUnwrap(fixture.controller.duration, file: file, line: line)
+                let item = try XCTUnwrap(fixture.controller.player.currentItem, file: file, line: line)
+                let nativeTime = fixture.controller.player.currentTime().seconds
+                // Controller-published time alone can be optimistic. Verify the
+                // actual AVPlayerItem duration and completed native seek too.
+                XCTAssertEqual(item.duration.seconds, TimeInterval(durationSeconds), accuracy: 0.01,
+                               "Native WAV duration must match the fixture", file: file, line: line)
+                XCTAssertEqual(nativeTime, seekTime, accuracy: 0.05,
+                               "The real AVPlayer must finish the requested seek", file: file, line: line)
+                XCTAssertEqual(duration, TimeInterval(durationSeconds), accuracy: 0.01, file: file, line: line)
+                XCTAssertEqual(fixture.controller.currentTime, seekTime, accuracy: 0.05, file: file, line: line)
+                XCTAssertEqual(ScrubberMath.formattedTime(fixture.controller.currentTime),
+                               expectedClockTexts.elapsed, file: file, line: line)
+                XCTAssertEqual(ScrubberMath.remainingText(elapsed: fixture.controller.currentTime, duration: duration),
+                               expectedClockTexts.remaining, file: file, line: line)
+                print("PLAYER_FOOTER_NATIVE_PLAYBACK elapsed=\(nativeTime) duration=\(item.duration.seconds)")
+            }
+            print("PLAYER_FOOTER_CLOCK elapsed=\(ScrubberMath.formattedTime(fixture.controller.currentTime)) remaining=\(ScrubberMath.remainingText(elapsed: fixture.controller.currentTime, duration: fixture.controller.duration ?? 0)) duration=\(fixture.controller.duration ?? 0)")
+            let size = sizeOverride ?? (fullScreen ? CGSize(width: 640, height: 240) : CGSize(width: 320, height: 180))
             let view: AnyView
             if fullScreen {
                 // Deliberately use the real screen, including its safe-area
@@ -131,7 +169,8 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
             }
             print("PLAYER_FOOTER size=\(size) type=\(dynamicType) failed=\(failing) additionalSafe=\(additionalInsets)")
             try assertLayout(host, size: size, fullScreen: fullScreen, dynamicType: dynamicType,
-                             failing: failing, additionalInsets: additionalInsets, file: file, line: line)
+                             failing: failing, additionalInsets: additionalInsets,
+                             checksNativeSafeArea: expectedClockTexts != nil, file: file, line: line)
             if fullScreen {
                 let root = try XCTUnwrap(host.rootView)
                 let layers = descendants(of: root, matching: PlayerLayerContainerView.self)
@@ -209,6 +248,11 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                     previousElapsedBottom = elapsedBottom
                 }
             }
+            // Optional PNG/capture failures must not skip geometry or native
+            // playback-identity checks, which have already completed above.
+            if sizeOverride != nil, ProcessInfo.processInfo.environment["RECORD_PLAYER_FOOTER_SNAPSHOTS"] == "1" {
+                try recordSnapshot(host, size: size)
+            }
             await fixture.tearDown()
         } catch {
             await fixture.tearDown()
@@ -270,6 +314,7 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         }
         let times = elapsed + remaining
         let timeRects = times.map { $0.convert($0.bounds, to: root) }
+        print("PLAYER_FOOTER_FRAMES size=\(size) safe=\(root.safeAreaLayoutGuide.layoutFrame) controls=\(targetRects) times=\(timeRects)")
         for rect in timeRects {
             XCTAssertGreaterThan(rect.width, 0, file: file, line: line)
             XCTAssertGreaterThan(rect.height, 0, file: file, line: line)
@@ -306,6 +351,33 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
                               file: file, line: line)
             }
         }
+    }
+
+    private func recordSnapshot(_ host: FooterLayoutHost, size: CGSize) throws {
+        let root = try XCTUnwrap(host.rootView)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        var didDrawHierarchy = false
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            didDrawHierarchy = root.drawHierarchy(in: root.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(didDrawHierarchy, "The native hierarchy must finish drawing the diagnostic image")
+        XCTAssertEqual(image.size, size, "Snapshot capture must not enlarge the tested surface")
+        let name = "player-hour-ax5-\(Int(size.width))x\(Int(size.height))"
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PlayerFooterDiagnostic", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(name).png")
+        try XCTUnwrap(image.pngData()).write(to: url, options: .atomic)
+        print("PLAYER_FOOTER_IMAGE \(url.path)")
     }
 
     private func descendants<T: UIView>(of view: UIView, matching type: T.Type) -> [T] {
@@ -408,11 +480,11 @@ private final class FooterLayoutFixture {
     private let audioURL: URL
     private var isTornDown = false
 
-    init(failing: Bool) throws {
+    init(failing: Bool, durationSeconds: Int = 120) throws {
         let identifier = UUID().uuidString
         suiteName = "player-footer-layout.\(identifier)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        audioURL = try Self.makeLocalAudio(identifier: identifier)
+        audioURL = try Self.makeLocalAudio(identifier: identifier, durationSeconds: durationSeconds)
         program = TVerProgram(id: "footer-\(identifier)", seriesID: nil,
                               title: "旅先で見つけた新しい日常と長いタイトル",
                               seriesTitle: "レイアウト回帰", description: "", broadcastLabel: "テスト放送",
@@ -440,10 +512,10 @@ private final class FooterLayoutFixture {
         // and remote-command targets. Do not clear shared registries/logs.
     }
 
-    private static func makeLocalAudio(identifier: String) throws -> URL {
-        // Two minutes of silent PCM, with a real duration and nonzero seek.
+    private static func makeLocalAudio(identifier: String, durationSeconds: Int) throws -> URL {
+        // Silent PCM with a real duration; ordinary fixtures remain two minutes.
         // Byte-wise encoding avoids pointers or runtime/private API tricks.
-        let dataSize = 120 * 8_000 * 2
+        let dataSize = durationSeconds * 8_000 * 2
         var data = Data()
         func ascii(_ value: String) { data.append(contentsOf: value.utf8) }
         func integer<T: FixedWidthInteger>(_ value: T) {
@@ -457,6 +529,7 @@ private final class FooterLayoutFixture {
         ascii("data"); integer(UInt32(dataSize)); data.append(Data(count: dataSize))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("footer-\(identifier).wav")
         try data.write(to: url, options: .atomic)
+        print("PLAYER_FOOTER_AUDIO seconds=\(durationSeconds) bytes=\(data.count)")
         return url
     }
 }
