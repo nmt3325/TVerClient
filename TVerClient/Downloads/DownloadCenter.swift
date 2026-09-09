@@ -1293,6 +1293,11 @@ final class DownloadCenter: ObservableObject {
     /// 以前は実体の見つからない記録を黙って捨て、中断分は一律に「一時停止中」として
     /// 二度と動かない行にしていた。消えたことを告げ、やり直せる状態まで戻す。
     func restore() {
+        // A pending restore persists its provisional .paused presentation. Only an unchanged
+        // snapshot from that unfinished restore may carry its original auto-resume intent forward.
+        let pendingRestorationSnapshots: [DownloadRecord] = restorationTask == nil ? [] : records.filter {
+            pendingAutoResumeIDs.contains($0.id) && interruptedIDs.contains($0.id)
+        }
         restorationTask?.cancel()
         restorationTask = nil
         restorationGeneration = UUID()
@@ -1349,7 +1354,9 @@ final class DownloadCenter: ObservableObject {
             case .downloading:
                 restored.append(restoreInterrupted(entry, autoResume: true))
             case .paused:
-                restored.append(restoreInterrupted(entry, autoResume: false))
+                let record = restoreInterrupted(entry, autoResume: false)
+                if pendingRestorationSnapshots.contains(record) { pendingAutoResumeIDs.insert(record.id) }
+                restored.append(record)
             case .failed:
                 restored.append(DownloadRecord(
                     program: entry.program,

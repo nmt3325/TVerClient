@@ -1266,6 +1266,44 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(bed.backend.created.count, 1)
     }
 
+    @MainActor
+    func testRepeatedRestorationPreservesAutoResumeOnlyForAnUnchangedPendingSnapshot() async throws {
+        for changeSnapshot in [false, true] {
+            let bed = try LifecycleCenterBed()
+            defer { bed.cleanUp() }
+            let pending = try await lifecycleHeldSecondEnumeration(bed)
+            let previous = Task { @MainActor in await bed.center.waitForPendingRestoration() }
+            await lifecycleCallbacks()
+            let oldEnumeration = try XCTUnwrap(bed.backend.pendingEnumeration)
+            bed.backend.pendingEnumeration = nil
+            if changeSnapshot {
+                let old = try XCTUnwrap(bed.center.records.first)
+                let paused = DownloadPersistedRecord(program: old.program, phase: .paused, progress: 0.4, bytes: 0,
+                                                     message: nil, bookmark: nil, relativePath: "A.movpkg",
+                                                     updatedAt: old.updatedAt.addingTimeInterval(1))
+                try JSONEncoder().encode([paused]).write(to: bed.directory.appendingPathComponent("metadata.json"))
+            }
+            bed.backend.holdEnumerationForCellular = true
+            bed.center.restore()
+            try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+            XCTAssertEqual(pending.task.suspendCount, changeSnapshot ? 1 : 0,
+                           "Only a matching unfinished snapshot carries its prior automatic intent")
+            XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+            XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+            XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+            bed.backend.releaseEnumeration([])
+            await bed.center.waitForPendingRestoration()
+            XCTAssertFalse(bed.center.isInterrupted("A"))
+            XCTAssertEqual(bed.center.state(for: "A"), changeSnapshot ? .paused(progress: 0.4) : .downloading(progress: 0.4))
+            oldEnumeration.resume(returning: [pending.task.handle])
+            await previous.value
+            XCTAssertEqual(pending.task.suspendCount, changeSnapshot ? 1 : 0,
+                           "Older cleanup cannot control the current owner of this same identity")
+            XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+            XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+        }
+    }
+
 }
 
 private var lifecycleURL: URL { URL(string: "https://example.invalid/lifecycle-no-network.m3u8")! }
