@@ -672,7 +672,7 @@ struct LibraryView: View {
     private var seriesSubscriptionsFooter: String {
         var parts = ["\(seriesSubscriptions.subscriptions.count)シリーズ"]
         if case let .completed(summary) = seriesSubscriptions.refreshState {
-            parts.append(summary.message)
+            parts.append("前回の新着確認結果: \(summary.message)")
         }
         parts.append(
             "公開時刻を確認できる、購読開始後の新着だけを自動保存します。"
