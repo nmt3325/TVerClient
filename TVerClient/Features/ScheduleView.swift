@@ -174,7 +174,10 @@ enum ScheduleExpiry {
                       resolved.month == parsed.month,
                       resolved.day == parsed.day
                 else { return nil }
-                return calendar.date(byAdding: .minute, value: time.hour * 60 + time.minute, to: day)
+                // Preserve wall-clock semantics for injected calendars, including DST.
+                components.hour = time.hour
+                components.minute = time.minute
+                return calendar.date(from: components)
             }
         return candidates.min { abs($0.timeIntervalSince(now)) < abs($1.timeIntervalSince(now)) }
     }

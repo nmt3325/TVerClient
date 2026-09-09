@@ -132,6 +132,30 @@ final class ScheduleExpiryTests: XCTestCase {
         XCTAssertEqual(ScheduleExpiry.deadlineLabel(for: program, now: now), label)
     }
 
+    func testCalendarOverridePreservesWallClockTimeAcrossDST() throws {
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let examples: [(label: String, month: Int, day: Int, deadlineDay: Int, hour: Int, minute: Int)] = [
+            ("3月8日 12:00まで", 3, 8, 8, 12, 0),
+            ("11月1日 12:00まで", 11, 1, 1, 12, 0),
+            ("3月7日 28:30まで", 3, 7, 8, 4, 30),
+        ]
+        for example in examples {
+            let now = try XCTUnwrap(localCalendar.date(from: DateComponents(
+                year: 2026, month: example.month, day: example.day, hour: 10
+            )))
+            let expected = try XCTUnwrap(localCalendar.date(from: DateComponents(
+                year: 2026, month: example.month, day: example.deadlineDay,
+                hour: example.hour, minute: example.minute
+            )))
+            XCTAssertEqual(
+                ScheduleExpiry.deadline(from: example.label, now: now, calendar: localCalendar),
+                expected,
+                example.label
+            )
+        }
+    }
+
     private func date(
         _ year: Int,
         _ month: Int,
