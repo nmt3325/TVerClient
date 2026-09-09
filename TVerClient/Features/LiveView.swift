@@ -67,21 +67,27 @@ final class LiveViewModel: ObservableObject {
 
     /// 引き下げ更新。エリア別キャッシュを跨いで取り直す。
     func refresh() async {
+        // 切替中の取得を更新操作で取り消すと、AreaStore が失敗と解釈して
+        // 選択だけを巻き戻してしまう。進行中ならその取得の完了を待つ。
+        if let running = loadTask {
+            _ = await running.value
+            return
+        }
         _ = await load(area: currentArea, forceRefresh: true)
     }
 
-    /// 取得を1本ずつに直列化する。
+    /// 取得を1本ずつに直列化し、待機中に置き換わった要求は開始しない。
     ///
-    /// 以前は実行中なら false を返していたが、呼び出し側（エリア切替）は false を
-    /// 一律に取得失敗と読むため、何も失敗していないのに選択が巻き戻り、誤った
-    /// 警告まで出ていた。走っている取得を畳んでから始めれば、戻り値は本当の成否だけを表す。
+    /// 古い取得を await する前に次の Task を登録する。待機の後で登録すると、
+    /// 複数の呼び出しが同じ古い Task を待ち、両方が取り消されずに開始できてしまう。
     private func load(area: TVerArea?, forceRefresh: Bool) async -> Bool {
         let running = loadTask
         running?.cancel()
-        _ = await running?.value
 
         let task = Task { @MainActor in
-            await self.performLoad(area: area, forceRefresh: forceRefresh)
+            _ = await running?.value
+            guard !Task.isCancelled else { return false }
+            return await self.performLoad(area: area, forceRefresh: forceRefresh)
         }
         loadTask = task
         let succeeded = await task.value
@@ -117,6 +123,9 @@ final class LiveViewModel: ObservableObject {
             return true
         } catch {
             if Task.isCancelled { return false }
+            // 切替が失敗したら AreaStore と同じく、残っている一覧のエリアへ戻す。
+            // 初回失敗には一覧がないため、再試行先は要求されたエリアのままにする。
+            if hasLoaded { currentArea = loadedArea }
             let normalized = TVerClientError.normalized(from: error)
             let presentation = normalized.presentation
             errorMessage = normalized.errorDescription ?? error.localizedDescription
