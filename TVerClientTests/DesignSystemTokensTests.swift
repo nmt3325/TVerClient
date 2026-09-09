@@ -109,6 +109,13 @@ final class DesignSystemTokensTests: XCTestCase {
                 // At 3x, the 2pt vertical padding has six pixels. Sample
                 // the flat capsule fill, below its 1pt low-emphasis border.
                 let background = Self.pixelLuminance(pixels, width: width, x: width / 2, y: 4)
+                // Verify the fixture really rendered both appearances, rather
+                // than silently checking the same scheme twice.
+                if scheme == .light {
+                    XCTAssertGreaterThan(background, 0.5, "Expected a light badge background")
+                } else {
+                    XCTAssertLessThan(background, 0.25, "Expected a dark badge background")
+                }
                 var legibleTextPixels = 0
                 // The right half contains only the repeated text, not the
                 // leading symbol. Exclude padding and the capsule border.
