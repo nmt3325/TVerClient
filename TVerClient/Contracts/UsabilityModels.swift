@@ -17,8 +17,14 @@ struct ProgramShareItem: Identifiable, Hashable, Sendable {
     init(channel: TVerLiveChannel) {
         id = "live-\(channel.id)"
         url = channel.webURL
-        subject = channel.currentProgram?.seriesTitle ?? channel.name
-        let programName = channel.currentProgram?.title ?? "リアルタイム配信"
+        // Live metadata may exist without a usable title. Optional fallback
+        // alone would leave an empty share subject or empty Japanese quotes.
+        let seriesTitle = channel.currentProgram?.seriesTitle
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let episodeTitle = channel.currentProgram?.title
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        subject = seriesTitle.isEmpty ? channel.name : seriesTitle
+        let programName = [episodeTitle, seriesTitle].first { !$0.isEmpty } ?? "リアルタイム配信"
         message = "\(channel.name)「\(programName)」をTVerで見る"
     }
 }

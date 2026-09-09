@@ -139,6 +139,44 @@ final class UsabilityTests: XCTestCase {
         XCTAssertTrue(share.message.contains("最終話"))
     }
 
+    func testLiveShareWithoutMetadataUsesStationAndLiveFallback() {
+        let share = ProgramShareItem(channel: makeLiveChannel())
+        XCTAssertEqual(share.url.absoluteString, "https://tver.jp/live/ntv")
+        XCTAssertEqual(share.subject, "テスト放送局")
+        XCTAssertEqual(share.message, "テスト放送局「リアルタイム配信」をTVerで見る")
+    }
+
+    func testLiveShareWithEmptyOrWhitespaceMetadataHasReadableFallbacks() {
+        for blank in ["", " \n\t", "　"] {
+            let share = ProgramShareItem(channel: makeLiveChannel(title: blank, seriesTitle: blank))
+            XCTAssertEqual(share.subject, "テスト放送局")
+            XCTAssertEqual(share.message, "テスト放送局「リアルタイム配信」をTVerで見る")
+        }
+    }
+
+    func testLiveShareUsesSeriesWhenEpisodeTitleIsBlank() {
+        let share = ProgramShareItem(channel: makeLiveChannel(title: " \n", seriesTitle: " ニュース \n"))
+        XCTAssertEqual(share.subject, "ニュース")
+        XCTAssertEqual(share.message, "テスト放送局「ニュース」をTVerで見る")
+    }
+
+    func testLiveSharePreservesDistinctSeriesAndEpisodeTitles() {
+        let share = ProgramShareItem(channel: makeLiveChannel(title: "第3話", seriesTitle: "連続ドラマ"))
+        XCTAssertEqual(share.subject, "連続ドラマ")
+        XCTAssertEqual(share.message, "テスト放送局「第3話」をTVerで見る")
+    }
+
+    private func makeLiveChannel(title: String? = nil, seriesTitle: String = "") -> TVerLiveChannel {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let program = title.map {
+            TVerLiveProgram(id: "share-slot", title: $0, seriesTitle: seriesTitle, description: "",
+                            startAt: start, endAt: start.addingTimeInterval(3_600),
+                            thumbnailURL: nil, isPause: false)
+        }
+        return TVerLiveChannel(id: "ntv", name: "テスト放送局", iconURL: nil,
+                               projectID: "fixture", mediaID: "fixture", apiKey: "fixture", currentProgram: program, state: .onAir)
+    }
+
     func testErrorPresentationDistinguishesRetryability() {
         let network = TVerClientError.network("オフラインです").presentation
         XCTAssertEqual(network.category, .network)
