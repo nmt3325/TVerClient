@@ -84,6 +84,40 @@ final class LiveTVTests: XCTestCase {
         XCTAssertEqual(channel.currentProgram?.title, "配信休止")
     }
 
+    func testLiveOfficialActionPresentationStateMatrix() {
+        let failure = TVerClientError.noPlayableStream.presentation
+        let scenarios: [(state: TVerLiveState, isCurrent: Bool, hasFailure: Bool,
+                         showsFailure: Bool, showsStandalone: Bool)] = [
+            (.onAir, false, false, false, true),
+            (.onAir, false, true, false, true),
+            (.onAir, true, false, false, true),
+            (.onAir, true, true, true, false),
+            (.paused, false, false, false, true),
+            (.paused, false, true, false, true),
+            (.paused, true, false, false, true),
+            (.paused, true, true, false, true),
+            (.unavailable, false, false, false, true),
+            (.unavailable, false, true, false, true),
+            (.unavailable, true, false, false, true),
+            (.unavailable, true, true, false, true)
+        ]
+
+        for scenario in scenarios {
+            let channel = Self.channel(state: scenario.state)
+            let presentation = LiveOfficialActionPresentation(
+                isPlayable: channel.isPlayable,
+                isCurrent: scenario.isCurrent,
+                failure: scenario.hasFailure ? failure : nil
+            )
+            let context = "\(scenario.state.rawValue), current=\(scenario.isCurrent), failure=\(scenario.hasFailure)"
+            XCTAssertEqual(presentation.failurePresentation, scenario.showsFailure ? failure : nil, context)
+            XCTAssertEqual(presentation.showsStandaloneOfficialAction, scenario.showsStandalone, context)
+            let officialActionCount = (presentation.failurePresentation == nil ? 0 : 1)
+                + (presentation.showsStandaloneOfficialAction ? 1 : 0)
+            XCTAssertEqual(officialActionCount, 1, "Exactly one official action in details: \(context)")
+        }
+    }
+
     func testLiveResolverUsesOfficialPlaybackThenSSAIFLow() async throws {
         var order: [String] = []
         var observedSessionBody: Data?
@@ -267,11 +301,11 @@ final class LiveTVTests: XCTestCase {
         LiveStreamResolver(session: session, dateProvider: { Date(timeIntervalSince1970: 1_788_001_620) })
     }
 
-    private static func channel() -> TVerLiveChannel {
+    private static func channel(state: TVerLiveState = .onAir) -> TVerLiveChannel {
         TVerLiveChannel(
             id: "ntv", name: "日テレ", iconURL: nil,
             projectID: "tver-simul-ntv", mediaID: "ref:simul-ntv", apiKey: "ntv",
-            currentProgram: nil, state: .onAir
+            currentProgram: nil, state: state
         )
     }
 
