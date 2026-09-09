@@ -329,21 +329,25 @@ struct LibraryView: View {
         }
     }
 
+    private func categoryEntryCount(_ value: Category) -> Int {
+        value == .favorites ? libraryStore.favoriteProgramIDs.count : rowIDs(in: value).count
+    }
+
     /// 常設の分類切り替え。狭い画面でも5つのラベルを押し込んで縮小しない。
     private var categoryPicker: some View {
         Menu {
             Picker("表示する分類", selection: $category) {
                 ForEach(Category.allCases) { item in
-                    Label("\(item.title)（\(rowIDs(in: item).count)）", systemImage: item.systemImage)
+                    Label("\(item.title)（\(categoryEntryCount(item))）", systemImage: item.systemImage)
                         .tag(item)
                 }
             }
         } label: {
-            LibraryCategoryMenuLabel(title: category.title, count: visibleRowIDs.count)
+            LibraryCategoryMenuLabel(title: category.title, count: categoryEntryCount(category))
         }
         .padding(.horizontal, DS.Spacing.m)
         .background(.bar)
-        .accessibilityLabel("分類: \(category.title)、\(visibleRowIDs.count)件")
+        .accessibilityLabel("分類: \(category.title)、\(categoryEntryCount(category))件")
         .accessibilityHint("ダウンロード済み、進行状況、マイリスト、履歴、自動ダウンロードを切り替えます")
         .accessibilityIdentifier("library.category")
     }
@@ -377,8 +381,11 @@ struct LibraryView: View {
         if visibleRowIDs.isEmpty {
             Section {
                 ContentStatusView(.empty(
-                    title: category.emptyTitle,
-                    message: category.emptyMessage,
+                    title: category == .favorites && !libraryStore.favoriteProgramIDs.isEmpty
+                        ? "マイリストの番組情報がありません" : category.emptyTitle,
+                    message: category == .favorites && !libraryStore.favoriteProgramIDs.isEmpty
+                        ? "\(libraryStore.favoriteProgramIDs.count)件の登録は残っていますが、保存された番組情報が不足しているため一覧を表示できません。番組は「見逃し」や検索から確認できます。"
+                        : category.emptyMessage,
                     systemImage: category.systemImage
                 ))
                 .accessibilityIdentifier("library.empty.\(category.rawValue)")
@@ -790,7 +797,9 @@ struct LibraryView: View {
             } header: {
                 sectionHeading(for: .favorites)
             } footer: {
-                Text("\(libraryStore.favoritePrograms.count)件")
+                Text(libraryStore.favoriteProgramIDs.count == libraryStore.favoritePrograms.count
+                    ? "\(libraryStore.favoritePrograms.count)件"
+                    : "\(libraryStore.favoriteProgramIDs.count)件登録・番組情報\(libraryStore.favoritePrograms.count)件")
             }
         }
     }
