@@ -470,21 +470,21 @@ final class SeriesSubscriptionStore: ObservableObject {
         for (seriesID, generation) in intents {
             guard isCurrentGeneration(generation, for: seriesID) else { continue }
             summary.checkedSeriesCount += 1
-            activities[seriesID] = .checking
+            // Retrying persisted transfers is not a new series discovery. Keep
+            // any failed or in-flight discovery visible until its own response.
             process(
                 programs: [],
                 for: seriesID,
                 downloads: downloads,
-                summary: &summary
+                summary: &summary,
+                recordsFreshDiscovery: false
             )
-            activities[seriesID] = .subscribed
         }
         summary.deferredEpisodeCount = subscriptions.reduce(0) { count, subscription in
             count + subscription.deferredPrograms.count
         }
-        if refreshTask == nil {
-            refreshState = .completed(summary)
-        }
+        // A cache-only retry (including a no-op) must not replace the latest
+        // discovery result with a fresh-looking or "no subscriptions" summary.
         return summary
     }
 
@@ -576,7 +576,8 @@ final class SeriesSubscriptionStore: ObservableObject {
         programs: [TVerProgram],
         for seriesID: String,
         downloads: OfflineDownloadEnqueuing,
-        summary: inout SeriesRefreshSummary
+        summary: inout SeriesRefreshSummary,
+        recordsFreshDiscovery: Bool = true
     ) {
         guard let index = index(of: seriesID) else { return }
         var subscription = subscriptions[index]
@@ -659,7 +660,9 @@ final class SeriesSubscriptionStore: ObservableObject {
         }
 
         subscription.deferredPrograms = deferredByID.values.sorted { $0.id < $1.id }
-        subscription.lastCheckedAt = checkedAt
+        if recordsFreshDiscovery {
+            subscription.lastCheckedAt = checkedAt
+        }
         if subscription.seriesTitle.isEmpty,
            let title = programs.lazy.map(\.seriesTitle).first(where: { !$0.isEmpty })
         {

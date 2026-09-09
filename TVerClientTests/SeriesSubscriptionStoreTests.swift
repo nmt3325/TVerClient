@@ -704,6 +704,140 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         ))
     }
 
+    func testNoOpConnectivityRetryKeepsTheLatestDiscoverySummary() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: persistenceURL)
+        await store.subscribe(to: program("ep1"), downloads: downloads)
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let discovered = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        let requestCount = await service.snapshotRequests().count
+
+        _ = await store.networkStatusDidChange(.wifi, downloads: downloads)
+
+        XCTAssertEqual(store.refreshState, .completed(discovered))
+        XCTAssertEqual(store.subscriptions.count, 1)
+        let requestsAfterConnectivity = await service.snapshotRequests().count
+        XCTAssertEqual(requestsAfterConnectivity, requestCount, "a retry must not invent a new discovery")
+
+        let restored = makeStore(service: service, persistenceURL: persistenceURL)
+        restored.restore()
+        _ = await restored.networkStatusDidChange(.wifi, downloads: downloads)
+        XCTAssertEqual(restored.refreshState, .idle, "restored subscriptions are not an empty fresh poll")
+    }
+
+    func testDeferredConnectivityRetryPreservesDiscoveryFailureAndFreshness() async throws {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let clock = TestClock(date: fixedNow)
+        let store = SeriesSubscriptionStore(
+            service: service, persistenceURL: persistenceURL, now: { clock.date }, cooldown: 600
+        )
+        await store.subscribe(to: program("ep1"), downloads: downloads)
+        downloads.enqueue(.blockedByCellular, for: "ep2")
+        await service.enqueue(.success([program("ep1"), newProgram("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        let lastDiscoveredAt = try XCTUnwrap(store.subscription(for: "series-1")?.lastCheckedAt)
+
+        clock.date = fixedNow.addingTimeInterval(60)
+        await service.enqueue(.failure("offline discovery"), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        clock.date = fixedNow.addingTimeInterval(120)
+        await service.enqueue(.failure("discovery still unavailable"), for: "series-1")
+        let recovery = await store.networkStatusDidChange(.wifi, downloads: downloads)
+
+        XCTAssertEqual(recovery?.failedSeriesCount, 1)
+        XCTAssertEqual(recovery?.startedEpisodeCount, 1, "persisted transfers can retry independently")
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "ep2"])
+        XCTAssertEqual(store.activity(for: "series-1"), .failed(message: "discovery still unavailable"))
+        XCTAssertEqual(store.subscription(for: "series-1")?.lastCheckedAt, lastDiscoveredAt)
+        guard case let .completed(discovery) = store.refreshState else {
+            return XCTFail("the failed discovery result should remain visible")
+        }
+        XCTAssertEqual(discovery.failedSeriesCount, 1)
+        XCTAssertEqual(discovery.successfulSeriesCount, 0)
+
+        let restored = makeStore(service: service, persistenceURL: persistenceURL)
+        restored.restore()
+        XCTAssertEqual(restored.subscription(for: "series-1")?.lastCheckedAt, lastDiscoveredAt)
+
+        clock.date = fixedNow.addingTimeInterval(180)
+        await service.enqueue(.success([program("ep1"), newProgram("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(store.activity(for: "series-1"), .subscribed)
+        XCTAssertEqual(store.subscription(for: "series-1")?.lastCheckedAt, clock.date)
+    }
+
+    func testDeferredRetryCannotFinishAnInFlightDiscoveryActivity() async throws {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let clock = TestClock(date: fixedNow)
+        let store = SeriesSubscriptionStore(
+            service: service, persistenceURL: persistenceURL, now: { clock.date }, cooldown: 600
+        )
+        await store.subscribe(to: program("ep1"), downloads: downloads)
+        downloads.enqueue(.blockedByCellular, for: "ep2")
+        await service.enqueue(.success([program("ep1"), newProgram("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        let lastDiscoveredAt = try XCTUnwrap(store.subscription(for: "series-1")?.lastCheckedAt)
+
+        clock.date = fixedNow.addingTimeInterval(60)
+        await service.setRequestsSuspended(true)
+        await service.enqueue(.success([program("ep1"), newProgram("ep2")]), for: "series-1")
+        let discoveryTask = Task { @MainActor in
+            await store.refreshAll(downloads: downloads, forceRefresh: true)
+        }
+        await waitForSuspendedRequest(3, service: service)
+        let recovery = await store.networkStatusDidChange(.wifi, downloads: downloads)
+
+        XCTAssertEqual(recovery?.startedEpisodeCount, 1)
+        XCTAssertEqual(store.activity(for: "series-1"), .checking)
+        XCTAssertEqual(store.refreshState, .refreshing)
+        XCTAssertEqual(store.subscription(for: "series-1")?.lastCheckedAt, lastDiscoveredAt)
+
+        await service.resumeRequest(3)
+        _ = await discoveryTask.value
+        XCTAssertEqual(store.activity(for: "series-1"), .subscribed)
+        XCTAssertEqual(store.subscription(for: "series-1")?.lastCheckedAt, clock.date)
+    }
+
+    func testDeferredRetryStillExpiresProgramsUsingCurrentTimeWithoutRefreshingDiscovery() async throws {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let persistenceURL = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: persistenceURL.deletingLastPathComponent()) }
+        let clock = TestClock(date: fixedNow)
+        let store = SeriesSubscriptionStore(
+            service: service, persistenceURL: persistenceURL, now: { clock.date }, cooldown: 600
+        )
+        await store.subscribe(to: program("ep1"), downloads: downloads)
+        downloads.enqueue(.blockedByCellular, for: "ep2")
+        let expiresSoon = newProgram("ep2", availableUntilAt: fixedNow.addingTimeInterval(30))
+        await service.enqueue(.success([program("ep1"), expiresSoon]), for: "series-1")
+        let discovered = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        let lastDiscoveredAt = try XCTUnwrap(store.subscription(for: "series-1")?.lastCheckedAt)
+
+        clock.date = fixedNow.addingTimeInterval(60)
+        let recovery = await store.networkStatusDidChange(.wifi, downloads: downloads)
+
+        XCTAssertEqual(recovery?.expiredEpisodeCount, 1)
+        XCTAssertEqual(recovery?.startedEpisodeCount, 0)
+        XCTAssertEqual(downloads.startedIDs, ["ep2"])
+        XCTAssertEqual(store.subscription(for: "series-1")?.deferredCount, 0)
+        XCTAssertEqual(store.subscription(for: "series-1")?.lastCheckedAt, lastDiscoveredAt)
+        XCTAssertEqual(store.refreshState, .completed(discovered))
+    }
+
     private func waitForSuspendedRequest(
         _ requestNumber: Int,
         service: FakeSeriesService
