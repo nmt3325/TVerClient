@@ -151,6 +151,55 @@ final class ProgramNotificationSchedulerTests: XCTestCase {
         XCTAssertEqual(components.timeZone, calendar.timeZone)
     }
 
+    @MainActor
+    func testOlderReservationReloadCannotRestoreACancelledNotification() async {
+        let identifier = ProgramNotificationScheduler.identifier(channelID: "channel", programID: "program")
+        let pending = ProgramNotificationPendingRequest(identifier: identifier, fireDate: makeDate(day: 30, hour: 12))
+        let snapshotCaptured = expectation(description: "Older reload captured a pending notification")
+        let center = DelayedSnapshotNotificationCenter(pending: [pending], snapshotCaptured: snapshotCaptured)
+        let model = ProgramNotificationListModel(scheduler: ProgramNotificationScheduler(center: center))
+        await model.reload()
+        guard let reservation = model.reservations.first else {
+            XCTFail("Expected the seeded notification")
+            return
+        }
+        await center.suspendNextSnapshot()
+
+        let olderReload = Task { await model.reload() }
+        await fulfillment(of: [snapshotCaptured], timeout: 2)
+        await model.cancel(reservation)
+        XCTAssertTrue(model.reservations.isEmpty)
+        await center.resumeSnapshot()
+        await olderReload.value
+
+        XCTAssertTrue(model.reservations.isEmpty, "A delayed pre-cancellation snapshot must not restore the removed row")
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(model.statusMessage, "通知を解除しました。")
+        let pendingAfterCancellation = await center.pendingRequests()
+        XCTAssertTrue(pendingAfterCancellation.isEmpty)
+    }
+
+    @MainActor
+    func testCancelledReservationReloadDoesNotPublishItsSnapshot() async {
+        let identifier = ProgramNotificationScheduler.identifier(channelID: "channel", programID: "program")
+        let pending = ProgramNotificationPendingRequest(identifier: identifier, fireDate: makeDate(day: 30, hour: 12))
+        let snapshotCaptured = expectation(description: "Reload captured its snapshot")
+        let center = DelayedSnapshotNotificationCenter(pending: [pending], snapshotCaptured: snapshotCaptured)
+        let model = ProgramNotificationListModel(scheduler: ProgramNotificationScheduler(center: center))
+        await center.suspendNextSnapshot()
+
+        let reload = Task { await model.reload() }
+        await fulfillment(of: [snapshotCaptured], timeout: 2)
+        reload.cancel()
+        await center.resumeSnapshot()
+        await reload.value
+
+        XCTAssertTrue(model.reservations.isEmpty)
+        XCTAssertFalse(model.isLoading)
+        let stillPending = await center.pendingRequests()
+        XCTAssertEqual(stillPending, [pending], "Cancelling a list load must not cancel the notification itself")
+    }
+
     private func makeProgram(id: String, start: Date) -> TVerLiveProgram {
         TVerLiveProgram(
             id: id,
@@ -221,5 +270,59 @@ private actor MockProgramNotificationCenter: ProgramNotificationCenter {
 
     func requestCount() -> Int {
         requests.count
+    }
+}
+
+/// Returns one captured snapshot late, even if its caller was cancelled.
+/// All notifications stay in memory; this never uses the system center.
+private actor DelayedSnapshotNotificationCenter: ProgramNotificationCenter {
+    private var pending: [ProgramNotificationPendingRequest]
+    private let snapshotCaptured: XCTestExpectation
+    private var shouldSuspendNextSnapshot = false
+    private var snapshotContinuation: CheckedContinuation<Void, Never>?
+
+    init(pending: [ProgramNotificationPendingRequest], snapshotCaptured: XCTestExpectation) {
+        self.pending = pending
+        self.snapshotCaptured = snapshotCaptured
+    }
+
+    func authorizationState() async -> ProgramNotificationAuthorizationState { .authorized }
+
+    func requestAuthorization() async throws -> ProgramNotificationAuthorizationState { .authorized }
+
+    func add(_ request: ProgramNotificationRequest) async throws {
+        pending.removeAll { $0.identifier == request.identifier }
+        pending.append(ProgramNotificationPendingRequest(
+            identifier: request.identifier,
+            fireDate: request.fireDate,
+            title: request.title,
+            body: request.body,
+            userInfo: request.userInfo
+        ))
+    }
+
+    func removePendingRequests(withIdentifiers identifiers: [String]) async {
+        pending.removeAll { identifiers.contains($0.identifier) }
+    }
+
+    func pendingRequests() async -> [ProgramNotificationPendingRequest] {
+        let snapshot = pending
+        guard shouldSuspendNextSnapshot else { return snapshot }
+        shouldSuspendNextSnapshot = false
+        await withCheckedContinuation { continuation in
+            snapshotContinuation = continuation
+            snapshotCaptured.fulfill()
+        }
+        return snapshot
+    }
+
+    func suspendNextSnapshot() {
+        shouldSuspendNextSnapshot = true
+    }
+
+    func resumeSnapshot() {
+        shouldSuspendNextSnapshot = false
+        snapshotContinuation?.resume()
+        snapshotContinuation = nil
     }
 }

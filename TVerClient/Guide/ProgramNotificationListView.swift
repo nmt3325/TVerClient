@@ -12,15 +12,23 @@ final class ProgramNotificationListModel: ObservableObject {
     @Published private(set) var statusMessage: String?
 
     private let scheduler: ProgramNotificationScheduler
+    private var reloadID: UUID?
 
     init(scheduler: ProgramNotificationScheduler) {
         self.scheduler = scheduler
     }
 
     func reload() async {
+        let reloadID = UUID()
+        self.reloadID = reloadID
         isLoading = true
-        reservations = await scheduler.reservations()
+        let updatedReservations = await scheduler.reservations()
+        // An older snapshot must not restore a row removed by a newer reload.
+        guard self.reloadID == reloadID else { return }
+        self.reloadID = nil
         isLoading = false
+        guard !Task.isCancelled else { return }
+        reservations = updatedReservations
     }
 
     func cancel(_ reservation: ProgramNotificationReservation) async {

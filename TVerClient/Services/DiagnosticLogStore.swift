@@ -261,11 +261,13 @@ final class DiagnosticLogStore: ObservableObject {
         message: String,
         metadata: [String: String] = [:]
     ) {
-        let sanitizedMetadata = Dictionary(uniqueKeysWithValues: metadata.map { key, value in
+        // Different URLs or credentials in keys can sanitize to the same key.
+        // Logging must neither trap nor arbitrarily attribute one value to it.
+        let sanitizedMetadata = Dictionary(metadata.map { key, value in
             let sanitizedKey = Self.sanitize(key)
             let sanitizedValue = Self.isSensitiveMetadataKey(key) ? "<redacted>" : Self.sanitize(value)
             return (sanitizedKey, sanitizedValue)
-        })
+        }, uniquingKeysWith: { _, _ in "<redacted>" })
         entries.append(DiagnosticLogEntry(
             id: UUID(),
             timestamp: now(),
@@ -343,8 +345,15 @@ final class DiagnosticLogStore: ObservableObject {
 
     nonisolated static func sanitize(_ input: String) -> String {
         var output = input
+        // Header values can contain an authentication scheme or several cookie
+        // pairs. Redacting only the first word leaves the credentials behind.
         output = replacing(
-            pattern: #"(?i)\b(authorization|cookie|platform_token|platform_uid|x-streaks-api-key|api[_-]?key)\s*[:=]\s*[^\s,;]+"#,
+            pattern: #"(?i)\b(authorization|(?:set-)?cookie)[ \t]*[:=][ \t]*[^\r\n]*"#,
+            in: output,
+            with: "$1=<redacted>"
+        )
+        output = replacing(
+            pattern: #"(?i)\b(platform_token|platform_uid|x-streaks-api-key|api[_-]?key)\s*[:=]\s*[^\s,;]+"#,
             in: output,
             with: "$1=<redacted>"
         )
@@ -414,8 +423,10 @@ final class DiagnosticLogStore: ObservableObject {
     }
 
     private static func isSensitiveMetadataKey(_ key: String) -> Bool {
-        let normalized = key.lowercased().replacingOccurrences(of: "_", with: "-")
-        return ["authorization", "cookie", "platform-token", "platform-uid", "x-streaks-api-key", "api-key"]
+        let normalized = key.lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        return ["authorization", "cookie", "platformtoken", "platformuid", "xstreaksapikey", "apikey"]
             .contains { normalized.contains($0) }
     }
 
