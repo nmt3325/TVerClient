@@ -1180,6 +1180,92 @@ final class AssetDownloadDriverLifecycleTests: XCTestCase {
         XCTAssertEqual(pending.task.resumeCount, 0)
     }
 
+    @MainActor
+    func testPersistedPauseStopsDiscoveredTaskBeforeOtherSessionReturns() async throws {
+        let bed = try LifecycleCenterBed()
+        defer { bed.cleanUp() }
+        let pending = try await lifecycleHeldSecondEnumeration(bed, phase: .paused)
+        XCTAssertNotNil(bed.backend.pendingEnumeration)
+        XCTAssertEqual(pending.task.suspendCount, 1, "Persisted pause must not wait for the other session")
+        XCTAssertEqual(pending.task.reportedState, .suspended)
+        XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+        XCTAssertFalse(bed.driver.hasTask(programID: "A"), "A stop receipt is not presentation ownership")
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+        bed.center.resume("A")
+        XCTAssertNotNil(bed.center.lastRejection)
+        XCTAssertEqual(pending.task.resumeCount, 0, "Resume cannot pre-authorize an unadopted identity")
+        XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertFalse(bed.center.isInterrupted("A"))
+        XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+        XCTAssertEqual(pending.task.suspendCount, 1, "Final reconciliation must not suspend twice")
+        XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+        bed.center.resume("A")
+        XCTAssertEqual(pending.task.resumeCount, 1)
+        XCTAssertEqual(bed.center.state(for: "A"), .downloading(progress: 0.4))
+        XCTAssertTrue(bed.backend.created.isEmpty, "Explicit resume keeps the same native task and partial copy")
+        XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+    }
+
+    @MainActor
+    func testRestorationRestrictionStopsDiscoveredTaskBeforeOtherSessionReturns() async throws {
+        for path in [DownloadNetworkStatus.cellular, .unavailable] {
+            for wifiOnly in [true, false] {
+                let bed = try LifecycleCenterBed(networkStatus: { path })
+                defer { bed.cleanUp() }
+                bed.center.wifiOnly = wifiOnly
+                let pending = try await lifecycleHeldSecondEnumeration(bed)
+                XCTAssertNotNil(bed.backend.pendingEnumeration)
+                XCTAssertEqual(pending.task.suspendCount, 1, "Known restrictions apply before the second enumeration returns")
+                XCTAssertEqual(pending.task.reportedState, .suspended)
+                XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+                XCTAssertFalse(bed.driver.hasTask(programID: "A"))
+                XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .unknown)
+                XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+                XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+
+                bed.backend.releaseEnumeration([])
+                await bed.center.waitForPendingRestoration()
+                XCTAssertFalse(bed.center.isInterrupted("A"), "Ownership may recover without permission to resume")
+                XCTAssertEqual(bed.center.state(for: "A"), .paused(progress: 0.4))
+                XCTAssertEqual(pending.task.suspendCount, 1)
+                XCTAssertEqual(pending.task.resumeCount + pending.task.cancelCount, 0)
+                XCTAssertTrue(bed.center.notices.contains { $0.id == "download.resume.waiting.A" })
+                XCTAssertEqual(bed.center.wifiOnly, wifiOnly)
+                XCTAssertTrue(bed.backend.created.isEmpty)
+                XCTAssertEqual(try Data(contentsOf: pending.url.appendingPathComponent("segment.ts")), pending.bytes)
+            }
+        }
+    }
+
+    @MainActor
+    func testEligibleCellularOwnerIsNotPausedByAnUnrelatedRestorationWait() async throws {
+        let bed = try LifecycleCenterBed(networkStatus: { .cellular })
+        defer { bed.cleanUp() }
+        bed.center.wifiOnly = false
+        try await bed.begin(lifecycleProgram("A"))
+        let current = try XCTUnwrap(bed.backend.created.first)
+        current.reportedState = .running
+        bed.backend.enumerated[true] = [current.handle]
+        bed.backend.holdNextEnumeration = true
+        let resumes = current.resumeCount
+        bed.center.restore()
+        try await lifecycleWait { bed.backend.pendingEnumeration != nil }
+        XCTAssertEqual(current.suspendCount + current.cancelCount, 0)
+        XCTAssertEqual(current.resumeCount, resumes)
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .allowed)
+        bed.backend.releaseEnumeration([])
+        await bed.center.waitForPendingRestoration()
+        XCTAssertFalse(bed.center.isInterrupted("A"))
+        XCTAssertEqual(bed.center.state(for: "A"), .downloading(progress: 0))
+        XCTAssertEqual(current.suspendCount + current.cancelCount, 0)
+        XCTAssertEqual(current.resumeCount, resumes, "A running eligible owner needs no fabricated resume")
+        XCTAssertEqual(bed.driver.cellularPolicy(programID: "A"), .allowed)
+        XCTAssertEqual(bed.backend.created.count, 1)
+    }
+
 }
 
 private var lifecycleURL: URL { URL(string: "https://example.invalid/lifecycle-no-network.m3u8")! }
@@ -1420,10 +1506,11 @@ private func lifecycleHeldRestore(_ bed: LifecycleCenterBed, knownLocation: Bool
 /// A-E1 setup uses only the existing production Center/Driver and backend seam, so the same
 /// assertions can be applied to the pre-fix implementation as a negative control.
 @MainActor
-private func lifecycleHeldSecondEnumeration(_ bed: LifecycleCenterBed) async throws -> LifecycleHeldRestoration {
+private func lifecycleHeldSecondEnumeration(_ bed: LifecycleCenterBed,
+                                           phase: DownloadPersistedRecord.Phase = .downloading) async throws -> LifecycleHeldRestoration {
     let bytes = Data("pending-second-enumeration-package".utf8)
     let url = try bed.writeAsset("A", bytes: bytes)
-    let record = DownloadPersistedRecord(program: lifecycleProgram("A"), phase: .downloading, progress: 0.4, bytes: 0,
+    let record = DownloadPersistedRecord(program: lifecycleProgram("A"), phase: phase, progress: 0.4, bytes: 0,
                                          message: nil, bookmark: nil, relativePath: "A.movpkg", updatedAt: Date())
     try JSONEncoder().encode([record]).write(to: bed.directory.appendingPathComponent("metadata.json"))
     let task = bed.backend.legacy("A")

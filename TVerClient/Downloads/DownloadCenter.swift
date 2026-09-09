@@ -1415,6 +1415,16 @@ final class DownloadCenter: ObservableObject {
                   case .paused = snapshot.state else { return false }
             return true
         }
+        // Forward an existing stop/restriction before enumeration can suspend indefinitely.
+        // The driver can then stop each discovered identity without adopting it or granting consent.
+        // An already-running, eligible auto-resume must not acquire an artificial pause/resume cycle.
+        let path = networkStatus()
+        for snapshot in candidates where scope.isCurrent(snapshot) {
+            let mustWait = !pendingAutoResumeIDs.contains(snapshot.id)
+                || path == .unavailable
+                || (path == .cellular && (wifiOnly || driver.cellularPolicy(programID: snapshot.id) != .allowed))
+            if mustWait { driver.pause(programID: snapshot.id) }
+        }
         let adopted = await driver.adoptRunningTasks(knownLocations: assetURLs, restoration: scope)
         guard !Task.isCancelled, restorationGeneration == generation else { return }
 
