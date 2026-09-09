@@ -219,6 +219,43 @@ actor ProgramNotificationScheduler {
     static let identifierPrefix = "tver.program-start."
 
     private let center: any ProgramNotificationCenter
+    // Different views create different schedulers for the same system center.
+    // Share mutation ordering across instances, not merely each actor's awaits.
+    // Readers and producers outside this service do not acquire this turn.
+    private static let mutationGate = MutationGate()
+
+    private final class MutationGate: @unchecked Sendable {
+        // This lock protects only synchronous bookkeeping, never an await.
+        private let lock = NSLock()
+        private var occupied = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func acquire(_ continuation: CheckedContinuation<Void, Never>) {
+            lock.lock()
+            if occupied {
+                waiters.append(continuation)
+                lock.unlock()
+            } else {
+                occupied = true
+                lock.unlock()
+                continuation.resume()
+            }
+        }
+
+        func release() {
+            lock.lock()
+            let next: CheckedContinuation<Void, Never>?
+            if waiters.isEmpty {
+                occupied = false
+                next = nil
+            } else {
+                // Keep ownership reserved until this waiter resumes.
+                next = waiters.removeFirst()
+            }
+            lock.unlock()
+            next?.resume()
+        }
+    }
 
     init(center: any ProgramNotificationCenter = UserNotificationProgramNotificationCenter()) {
         self.center = center
@@ -239,7 +276,23 @@ actor ProgramNotificationScheduler {
         leadTime: ProgramNotificationLeadTime = .fiveMinutes,
         now: Date = Date()
     ) async throws -> ProgramNotificationRequest {
+        await acquireMutation()
+        defer { Self.mutationGate.release() }
+        return try await scheduleHoldingMutation(program: program, channel: channel, leadTime: leadTime, now: now)
+    }
+
+    /// The caller retains the mutation turn through compensation and cleanup.
+    /// A successful add is the commit point; later Task cancellation does not
+    /// pretend the accepted notification was removed. Explicit cancel is queued.
+    private func scheduleHoldingMutation(
+        program: TVerLiveProgram,
+        channel: TVerLiveChannel,
+        leadTime: ProgramNotificationLeadTime,
+        now: Date
+    ) async throws -> ProgramNotificationRequest {
+        try Task.checkCancellation()
         let state = await center.authorizationState()
+        try Task.checkCancellation()
         switch state {
         case .notDetermined:
             throw ProgramNotificationSchedulerError.authorizationRequired
@@ -264,11 +317,17 @@ actor ProgramNotificationScheduler {
                 "programID": program.id
             ]
         )
-        try await makeRoomForPendingRequest(
+        let evicted = try await makeRoomForPendingRequest(
             identifier: request.identifier,
             fireDate: fireDate
         )
-        try await center.add(request)
+        do {
+            try Task.checkCancellation()
+            try await center.add(request)
+        } catch {
+            let failure = await restore(evicted, after: error)
+            throw failure
+        }
         return request
     }
 
@@ -284,17 +343,19 @@ actor ProgramNotificationScheduler {
         leadTime: ProgramNotificationLeadTime = .fiveMinutes,
         now: Date = Date()
     ) async throws -> ProgramNotificationRequest {
-        // UNUserNotificationCenter replaces a pending request atomically when its identifier
-        // matches, but only when the new request is accepted. When it is not -- the programme
-        // moved into the past, or every slot is taken by a sooner programme -- the previous
-        // request would stay queued and fire for a start time this programme no longer has.
+        await acquireMutation()
+        defer { Self.mutationGate.release() }
+        // Do not call the public schedule/cancel entries while retaining a turn.
+        // The failed update's stale-ID cleanup must finish before a later mutation.
         do {
-            return try await schedule(program: program, channel: channel, leadTime: leadTime, now: now)
+            return try await scheduleHoldingMutation(program: program, channel: channel, leadTime: leadTime, now: now)
         } catch {
             // 取り直せなかったのに古い予約を残すと、実際の放送とずれた時刻に通知が鳴る。
             // 時刻切れでも許可切れでも上限超えでも危うさは同じなので、失敗した経路では必ず解除する。
             // 解除したこと自体は、呼び出し側が予約状態を見直して利用者に伝える。
-            await cancel(programID: program.id, channelID: channel.id)
+            await center.removePendingRequests(
+                withIdentifiers: [Self.identifier(channelID: channel.id, programID: program.id)]
+            )
             throw error
         }
     }
@@ -315,12 +376,16 @@ actor ProgramNotificationScheduler {
     }
 
     func cancel(identifier: String) async {
+        await acquireMutation()
+        defer { Self.mutationGate.release() }
         await center.removePendingRequests(withIdentifiers: [identifier])
     }
 
     /// 番組開始通知をすべて解除する。戻り値は解除した件数。
     @discardableResult
     func cancelAll() async -> Int {
+        await acquireMutation()
+        defer { Self.mutationGate.release() }
         let identifiers = await center.pendingRequests()
             .map(\.identifier)
             .filter { $0.hasPrefix(Self.identifierPrefix) }
@@ -330,27 +395,75 @@ actor ProgramNotificationScheduler {
     }
 
     func cancel(programID: String, channelID: String) async {
-        await center.removePendingRequests(
-            withIdentifiers: [Self.identifier(channelID: channelID, programID: programID)]
-        )
+        await cancel(identifier: Self.identifier(channelID: channelID, programID: programID))
     }
 
     func cancel(program: TVerLiveProgram, channel: TVerLiveChannel) async {
         await cancel(programID: program.id, channelID: channel.id)
     }
 
-    /// Keeps the soonest requests when the queue is full: the system drops
-    /// silently, so the eviction has to be explicit to stay predictable.
-    private func makeRoomForPendingRequest(identifier: String, fireDate: Date) async throws {
-        let others = await center.pendingRequests().filter { $0.identifier != identifier }
-        guard others.count >= Self.maximumPendingNotifications else { return }
+    /// Enqueue synchronously on this actor before suspension. Cancellation does
+    /// not abandon a waiter: every granted turn installs a release defer first.
+    private func acquireMutation() async {
+        await withCheckedContinuation { continuation in
+            Self.mutationGate.acquire(continuation)
+        }
+    }
 
-        let sorted = others.sorted { $0.fireDate < $1.fireDate }
-        let evictable = sorted.dropFirst(Self.maximumPendingNotifications - 1)
-        guard let soonestEvictable = evictable.first, fireDate < soonestEvictable.fireDate else {
+    /// Count every visible notification, but take slots only from our own kind.
+    /// Return full snapshots so a rejected add can compensate before releasing.
+    private func makeRoomForPendingRequest(
+        identifier: String,
+        fireDate: Date
+    ) async throws -> [ProgramNotificationPendingRequest] {
+        let others = await center.pendingRequests().filter { $0.identifier != identifier }
+        try Task.checkCancellation()
+        let needed = others.count - Self.maximumPendingNotifications + 1
+        guard needed > 0 else { return [] }
+
+        let candidates = others.filter { $0.identifier.hasPrefix(Self.identifierPrefix) }
+            .sorted {
+                if $0.fireDate != $1.fireDate { return $0.fireDate > $1.fireDate }
+                return $0.identifier < $1.identifier
+            }
+        let evicted = Array(candidates.prefix(needed))
+        guard evicted.count == needed, evicted.allSatisfy({ fireDate < $0.fireDate }) else {
             throw ProgramNotificationSchedulerError.pendingLimitReached
         }
-        await center.removePendingRequests(withIdentifiers: evictable.map(\.identifier))
+        await center.removePendingRequests(withIdentifiers: evicted.map(\.identifier))
+        return evicted
+    }
+
+    /// Do not short-circuit compensation on Task cancellation or a single
+    /// restoration failure. Keep the original error and every failed restore.
+    private func restore(_ evicted: [ProgramNotificationPendingRequest], after originalError: Error) async -> Error {
+        var restorationErrors: [NSError] = []
+        var unrestoredIdentifiers: [String] = []
+        for pending in evicted {
+            do {
+                try await center.add(ProgramNotificationRequest(
+                    identifier: pending.identifier,
+                    title: pending.title,
+                    body: pending.body,
+                    fireDate: pending.fireDate,
+                    userInfo: pending.userInfo
+                ))
+            } catch {
+                restorationErrors.append(error as NSError)
+                unrestoredIdentifiers.append(pending.identifier)
+            }
+        }
+        guard !restorationErrors.isEmpty else { return originalError }
+        return NSError(
+            domain: "ProgramNotificationScheduler.Restoration",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: "通知の予約に失敗し、既存の通知も復元できませんでした。予約一覧を確認してください。",
+                NSUnderlyingErrorKey: originalError as NSError,
+                "restorationErrors": restorationErrors,
+                "unrestoredIdentifiers": unrestoredIdentifiers
+            ]
+        )
     }
 
     nonisolated static func identifier(channelID: String, programID: String) -> String {
