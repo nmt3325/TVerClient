@@ -12,3 +12,15 @@ enum LivePresentationText {
         "\(total)局中\(playable)局が配信中"
     }
 }
+
+/// Chooses the official action in live details without changing playback intent.
+struct LiveOfficialActionPresentation {
+    let failurePresentation: TVerErrorPresentation?
+    let showsStandaloneOfficialAction: Bool
+
+    init(isPlayable: Bool, isCurrent: Bool, failure: TVerErrorPresentation?) {
+        let displayedFailure = isPlayable && isCurrent ? failure : nil
+        failurePresentation = displayedFailure
+        showsStandaloneOfficialAction = !(isCurrent && failure != nil)
+    }
+}

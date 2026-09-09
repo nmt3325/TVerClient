@@ -476,6 +476,13 @@ struct LivePlaybackView: View {
 
     private var shareItem: ProgramShareItem { ProgramShareItem(channel: channel) }
     private var isCurrent: Bool { playbackController.currentLiveChannel?.id == channel.id }
+    private var officialActionPresentation: LiveOfficialActionPresentation {
+        LiveOfficialActionPresentation(
+            isPlayable: channel.isPlayable,
+            isCurrent: isCurrent,
+            failure: playbackController.errorPresentation
+        )
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -555,7 +562,7 @@ struct LivePlaybackView: View {
                 ) {
                     Label("このライブ配信を共有", systemImage: "square.and.arrow.up")
                 }
-                if !(isCurrent && playbackController.errorPresentation != nil) {
+                if officialActionPresentation.showsStandaloneOfficialAction {
                     Button {
                         openURL(channel.webURL)
                     } label: {
@@ -629,7 +636,7 @@ struct LivePlaybackView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, DS.Spacing.s)
-        } else if isCurrent, let presentation = playbackController.errorPresentation {
+        } else if let presentation = officialActionPresentation.failurePresentation {
             PlaybackFailureView(presentation: presentation, officialURL: channel.webURL) {
                 Task {
                     guard isCurrent else { return }
