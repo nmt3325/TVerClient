@@ -286,6 +286,78 @@ final class FullScreenPlaybackTests: XCTestCase {
         await harness.tearDown(model: model)
     }
 
+    func testHostedStationaryScrubKeepsChromeVisibleUntilRelease() async throws {
+        let url = try makeHostedStageAudioFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let item = AVPlayerItem(url: url)
+        let controller = PlaybackController(player: AVPlayer(playerItem: item))
+        let clock = HeldScrubAutoHideClock()
+        let model = PlayerChromeModel(waitForAutoHide: { delay in await clock.wait(delay) })
+        defer {
+            controller.stop()
+            model.cancelAutoHide()
+            clock.releaseAll()
+        }
+        await waitUntil("the stationary-scrub fixture has a finite duration") {
+            item.status == .readyToPlay && controller.canSeek
+        }
+        let stage = PlayerStage(
+            playbackController: controller,
+            pictureInPicture: PictureInPictureCoordinator(isSupported: { false }),
+            model: model, title: "静止スクラブ", accessibilityLabel: "静止スクラブのテスト",
+            isFullScreen: true, rendersVideoLayer: false, onToggleFullScreen: {}
+        )
+        .frame(width: 640, height: 360)
+        let harness = HostedStageHarness(rootView: AnyView(stage), size: CGSize(width: 640, height: 360))
+        await waitUntil("the stage has finished its paused lifecycle") { model.isAutoHideSuspended }
+        harness.layout()
+        guard let interaction = descendants(
+            of: harness.rootView, matching: PlaybackScrubberInteractionView.self
+        ).first else {
+            XCTFail("the production stage must mount its scrubber touch owner")
+            await harness.tearDown(model: model)
+            return
+        }
+        // Permit the countdown without starting audio. These are the production
+        // callback and model paths, not synthesized UITouches or AV playback.
+        model.isAutoHideSuspended = false
+        await waitUntil("the original hide deadline is waiting") { clock.delays.count == 1 }
+        let location = CGPoint(x: interaction.bounds.width / 4, y: interaction.bounds.midY)
+        interaction.handleScrubGesture(state: .began, location: location)
+        XCTAssertTrue(controller.isScrubbing)
+        XCTAssertTrue(model.isInteractionHeld)
+        let previewTime = controller.currentTime
+
+        // No .changed events refresh the timer: a finger resting on the track
+        // must remain an owned interaction even after the old deadline expires.
+        clock.release(0)
+        await waitUntil("the cancelled deadline returned") { clock.cancelledOnReturn[0] == true }
+        await Task.yield()
+        harness.layout()
+        XCTAssertTrue(model.areControlsVisible)
+        XCTAssertTrue(model.isInteractionHeld)
+        XCTAssertTrue(controller.isScrubbing)
+        XCTAssertEqual(controller.currentTime, previewTime, accuracy: 0.001)
+        XCTAssertEqual(clock.delays.count, 1, "holding must not schedule replacement hide deadlines")
+        XCTAssertTrue(descendants(of: harness.rootView, matching: PlaybackScrubberInteractionView.self).first === interaction)
+        XCTAssertTrue(controller.player.currentItem === item)
+
+        interaction.handleScrubGesture(state: .ended, location: location)
+        XCTAssertFalse(controller.isScrubbing)
+        XCTAssertFalse(model.isInteractionHeld)
+        XCTAssertTrue(model.areControlsVisible, "release must not hide chrome immediately")
+        XCTAssertEqual(controller.currentTime, previewTime, accuracy: 0.001)
+        await waitUntil("release starts a fresh complete hide delay") { clock.delays.count == 2 }
+        XCTAssertEqual(clock.delays, [model.autoHideDelay, model.autoHideDelay])
+        XCTAssertTrue(model.areControlsVisible, "chrome must remain visible before the new deadline returns")
+        XCTAssertNil(clock.cancelledOnReturn[1])
+        clock.release(1)
+        await waitUntil("the post-release deadline returns without cancellation") { clock.cancelledOnReturn[1] == false }
+        await waitUntil("chrome hides only after the post-release deadline") { !model.areControlsVisible }
+        await harness.tearDown(model: model)
+        XCTAssertTrue(harness.isTornDown)
+    }
+
     func testScrubberDisableDefersCancellationWithoutCommittingSeek() async {
         var startedCount = 0
         var endedCount = 0
@@ -625,6 +697,36 @@ final class FullScreenPlaybackTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(condition(), message)
+    }
+}
+
+/// Ignores cancellation until released, so a queued old deadline is exercised
+/// without a wall-clock sleep. It never owns UIKit gesture recognition.
+@MainActor
+private final class HeldScrubAutoHideClock {
+    private(set) var delays: [TimeInterval] = []
+    private(set) var cancelledOnReturn: [Int: Bool] = [:]
+    private var waits: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var isDraining = false
+
+    func wait(_ delay: TimeInterval) async {
+        let id = delays.count
+        delays.append(delay)
+        if !isDraining {
+            await withCheckedContinuation { waits[id] = $0 }
+        }
+        cancelledOnReturn[id] = Task.isCancelled
+    }
+
+    func release(_ id: Int) {
+        waits.removeValue(forKey: id)?.resume()
+    }
+
+    func releaseAll() {
+        isDraining = true
+        let pending = Array(waits.values)
+        waits.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 
