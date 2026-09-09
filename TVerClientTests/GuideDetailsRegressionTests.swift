@@ -177,6 +177,109 @@ final class GuideDetailsRegressionTests: XCTestCase {
         XCTAssertNil(model.catchUpPlayback)
     }
 
+    func testFoundEpisodeIsReusedBeforeItsAbsoluteDeadline() async throws {
+        let fixture = try GuideDetailsFixture(isPast: true)
+        addTeardownBlock { await fixture.tearDown() }
+        let deadline = fixture.clock.now.addingTimeInterval(60)
+        let episode = TVerProgram(
+            id: "expiring-episode", seriesID: nil, title: "見逃し", seriesTitle: "番組",
+            description: "", broadcastLabel: "放送分", availableUntil: nil,
+            availableUntilAt: deadline, thumbnailURL: nil
+        )
+        await fixture.lookup.setEpisode(episode)
+        let model = fixture.makeModel()
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        XCTAssertEqual(model.catchUpPlayback, episode)
+        model.catchUpPlayback = nil // Dismiss the presented episode, retaining details.
+        fixture.clock.now = deadline.addingTimeInterval(-1)
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        let calls = await fixture.lookup.calls
+        XCTAssertEqual(calls, 1, "An unexpired result can still be reused")
+        XCTAssertEqual(model.catchUpPlayback, episode)
+    }
+
+    func testFoundEpisodeRevalidatesAtQueuedDeadlineInsteadOfReopeningExpiredPlayback() async throws {
+        let fixture = try GuideDetailsFixture(isPast: true)
+        addTeardownBlock { await fixture.tearDown() }
+        let deadline = fixture.clock.now.addingTimeInterval(60)
+        let episode = TVerProgram(
+            id: "expired-opening-hint", seriesID: nil, title: "見逃し", seriesTitle: "番組",
+            description: "", broadcastLabel: "放送分", availableUntil: nil,
+            availableUntilAt: deadline, thumbnailURL: nil
+        )
+        await fixture.lookup.setEpisode(episode)
+        let model = fixture.makeModel()
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        XCTAssertEqual(model.catchUpPlayback, episode)
+        model.catchUpPlayback = nil
+        await fixture.lookup.setEpisode(fixture.episode)
+        model.requestPrimaryAction()
+        fixture.clock.now = deadline // Time changes between activation and its task.
+        await model.waitForPendingAction()
+        let calls = await fixture.lookup.calls
+        let liveCalls = await fixture.resolver.liveCalls
+        XCTAssertEqual(calls, 2, "The expired result must be looked up again")
+        XCTAssertEqual(liveCalls, 0)
+        XCTAssertEqual(model.catchUpPlayback, fixture.episode)
+        XCTAssertEqual(model.catchUpState, .found(fixture.episode))
+    }
+
+    func testExpiredLookupResultDoesNotPresentPlaybackAndCanBeRetried() async throws {
+        let fixture = try GuideDetailsFixture(isPast: true)
+        addTeardownBlock { await fixture.tearDown() }
+        let episode = TVerProgram(
+            id: "expired-response", seriesID: nil, title: "見逃し", seriesTitle: "番組",
+            description: "", broadcastLabel: "放送分", availableUntil: nil,
+            availableUntilAt: fixture.clock.now, thumbnailURL: nil
+        )
+        await fixture.lookup.setEpisode(episode)
+        let model = fixture.makeModel()
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        XCTAssertNil(model.catchUpPlayback)
+        XCTAssertEqual(model.catchUpState, .failed("この見逃し配信は終了しました。TVer公式ページで配信状況を確認してください。"))
+        XCTAssertTrue(model.playButtonState.isEnabled)
+        XCTAssertEqual(model.playButtonState.title, "見逃し配信をもう一度探す")
+        await fixture.lookup.setEpisode(fixture.episode)
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        let calls = await fixture.lookup.calls
+        let vodCalls = await fixture.resolver.vodCalls
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(vodCalls, 0, "Lookup validation does not itself start a player")
+        XCTAssertEqual(model.catchUpPlayback, fixture.episode)
+    }
+
+    func testEpisodeExpiringDuringLookupIsNotPresented() async throws {
+        let fixture = try GuideDetailsFixture(isPast: true)
+        addTeardownBlock {
+            await fixture.lookup.setBeforeReturn(nil)
+            await fixture.tearDown()
+        }
+        let deadline = fixture.clock.now.addingTimeInterval(60)
+        let episode = TVerProgram(
+            id: "expires-in-flight", seriesID: nil, title: "見逃し", seriesTitle: "番組",
+            description: "", broadcastLabel: "放送分", availableUntil: nil,
+            availableUntilAt: deadline, thumbnailURL: nil
+        )
+        await fixture.lookup.setEpisode(episode)
+        await fixture.lookup.setBeforeReturn {
+            await MainActor.run { fixture.clock.now = deadline }
+        }
+        let model = fixture.makeModel()
+        XCTAssertLessThan(model.currentDate, deadline)
+        model.requestPrimaryAction()
+        await model.waitForPendingAction()
+        await fixture.lookup.setBeforeReturn(nil)
+        XCTAssertEqual(model.currentDate, deadline, "Recheck time after the real lookup suspension")
+        XCTAssertNil(model.catchUpPlayback)
+        XCTAssertEqual(model.catchUpState, .failed("この見逃し配信は終了しました。TVer公式ページで配信状況を確認してください。"))
+        XCTAssertTrue(model.playButtonState.isEnabled)
+    }
+
     func testSuccessfulExpiredLookupPresentsTheFoundEpisodeNotLive() async throws {
         let fixture = try GuideDetailsFixture(isPast: true)
         addTeardownBlock { await fixture.tearDown() }
@@ -777,14 +880,18 @@ private actor GuideDetailsLookup: TVerCatchUpLookupServicing {
     private(set) var activeCalls = 0
     private var episode: TVerProgram?
     private var suspended = false
+    private var beforeReturn: (@Sendable () async -> Void)?
     func setEpisode(_ episode: TVerProgram) { self.episode = episode }
     func setSuspended(_ value: Bool) { suspended = value }
+    func setBeforeReturn(_ operation: (@Sendable () async -> Void)?) { beforeReturn = operation }
     func findCatchUpProgram(channelID: String, program: TVerLiveProgram) async throws -> TVerProgram? {
         calls += 1
         activeCalls += 1
         defer { activeCalls -= 1 }
         try Task.checkCancellation()
         if suspended { try await Task.sleep(nanoseconds: 30_000_000_000) }
+        try Task.checkCancellation()
+        await beforeReturn?()
         try Task.checkCancellation()
         return episode
     }

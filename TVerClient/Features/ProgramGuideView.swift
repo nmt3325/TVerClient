@@ -1133,7 +1133,12 @@ final class GuideDetailsPlaybackModel: ObservableObject {
             )
             await controller.playLive(channel)
         case .catchUp:
-            if case let .found(episode) = catchUpState {
+            // A previously found episode can expire while its detail stays open.
+            // Reuse it only before the absolute deadline; unknown deadlines keep
+            // the existing behavior instead of guessing from a display label.
+            if case let .found(episode) = catchUpState,
+               episode.availableUntilAt.map({ currentDate < $0 }) ?? true
+            {
                 catchUpPlayback = episode
                 return
             }
@@ -1142,8 +1147,16 @@ final class GuideDetailsPlaybackModel: ObservableObject {
             // expiry the store returns unknown and this same action can search.
             guard catchUpState != .idle || availability != .unavailable else { return }
             catchUpState = .searching
-            let result = await lookup.resolve(channelID: selection.channel.id, program: selection.program)
+            var result = await lookup.resolve(channelID: selection.channel.id, program: selection.program)
             guard !Task.isCancelled else { return }
+            // The lookup can finish after the episode's deadline, even if its
+            // response was valid when the request began. Do not present it then.
+            refreshClock()
+            if case let .found(episode) = result,
+               let deadline = episode.availableUntilAt, currentDate >= deadline
+            {
+                result = .failed("この見逃し配信は終了しました。TVer公式ページで配信状況を確認してください。")
+            }
             catchUpState = result
             switch result {
             case let .found(episode):
