@@ -938,6 +938,38 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(rows.first?["acceptedDeferredEpisodeIDs"] as? [String], ["unknown"])
     }
 
+    func testRefusedFailureRetryRetainsAcceptedProvenanceAcrossRestore() async throws {
+        for refusal in [DownloadStartResult.blockedByCellular, .rejected(reason: "offline")] {
+            for legacyFailedRecord in [false, true] {
+                let service = FakeSeriesService()
+                let downloads = FakeDownloadEnqueuer()
+                let url = temporaryPersistenceURL()
+                defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+                let store = makeStore(service: service, persistenceURL: url)
+                if legacyFailedRecord {
+                    let legacy = SeriesSubscription(seriesID: "series-1", seriesTitle: "Legacy", subscribedAt: fixedNow,
+                                                    isBaselined: true, knownEpisodeIDs: ["ep2"], deferredPrograms: [newProgram("ep2")])
+                    try writeProvenanceFixture([legacy], acceptedIDs: [nil], to: url)
+                    store.restore()
+                } else {
+                    await service.enqueue(.success([newProgram("ep2")]), for: "series-1")
+                    await store.subscribe(to: program("ep1"), downloads: downloads)
+                }
+                downloads.states["ep2"] = .failed(message: "a real tracked failure")
+                downloads.enqueue(refusal, for: "ep2")
+                _ = await store.networkStatusDidChange(.wifi, downloads: downloads)
+                let attemptsBeforeRemoval = downloads.startedIDs
+                XCTAssertEqual(attemptsBeforeRemoval.count, legacyFailedRecord ? 1 : 2)
+                downloads.simulateManualDeletion(of: "ep2")
+                let restored = makeStore(service: service, persistenceURL: url)
+                restored.restore()
+                _ = await restored.networkStatusDidChange(.wifi, downloads: downloads)
+                XCTAssertEqual(downloads.startedIDs, attemptsBeforeRemoval)
+                XCTAssertEqual(restored.subscription(for: "series-1")?.deferredCount, 0)
+            }
+        }
+    }
+
     private func writeProvenanceFixture(
         _ subscriptions: [SeriesSubscription], acceptedIDs: [[String]?], to url: URL
     ) throws {

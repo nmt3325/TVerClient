@@ -277,6 +277,9 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
             XCTAssertTrue(notice.contains("マイリスト"))
             XCTAssertTrue(notice.contains("履歴"))
         }
+        let cleared = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+        cleared.clearRecentPrograms()
+        XCTAssertFalse(cleared.lastPersistenceFailure?.contains("履歴") ?? false)
     }
 
     @MainActor
@@ -318,6 +321,51 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
             XCTAssertTrue(notice.contains("登録"))
             XCTAssertTrue(notice.contains("番組情報"))
             XCTAssertFalse(notice.contains("履歴"))
+        }
+    }
+
+    @MainActor
+    func testSubscriptionDoesNotRecreateRealCancelledOrDeletedDownload() async throws {
+        for finishBeforeRemoval in [false, true] {
+            let bed = try LibraryRejectionTestBed()
+            defer { bed.cleanUp() }
+            let program = storageProgram("subscribed")
+            let service = LibrarySubscriptionFixtureService(programs: [program])
+            let url = bed.directory.appendingPathComponent("subscriptions-v1.json")
+            let subscriptionDate = Date(timeIntervalSince1970: 1_799_999_999)
+            let store = SeriesSubscriptionStore(service: service, persistenceURL: url, now: { subscriptionDate })
+            await store.subscribe(to: program, downloads: bed.center)
+            await bed.center.waitForPendingResolutions()
+            XCTAssertEqual(bed.driver.startedIDs, [program.id])
+            if finishBeforeRemoval {
+                let asset = bed.directory.appendingPathComponent("finished.movpkg", isDirectory: true)
+                try FileManager.default.createDirectory(at: asset, withIntermediateDirectories: true)
+                try Data(repeating: 7, count: 64).write(to: asset.appendingPathComponent("segment"))
+                bed.driver.onEvent?(.finished(programID: program.id, location: asset))
+                XCTAssertTrue(bed.center.isAvailableOffline(program.id))
+                // No subscription poll between the actual completion and deletion.
+                bed.center.delete(program.id)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: asset.path))
+            } else {
+                bed.center.cancel(program.id)
+            }
+            XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+            let restored = SeriesSubscriptionStore(service: service, persistenceURL: url, now: { subscriptionDate })
+            restored.restore()
+            _ = await restored.networkStatusDidChange(.wifi, downloads: bed.center)
+            _ = await restored.refreshAll(downloads: bed.center, forceRefresh: true)
+            await bed.center.waitForPendingResolutions()
+            XCTAssertEqual(bed.driver.startedIDs, [program.id])
+            XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+            XCTAssertNil(bed.center.offlineAssetURL(for: program.id))
+            XCTAssertEqual(restored.subscription(for: "series")?.deferredCount, 0)
+        }
+    }
+
+    private struct LibrarySubscriptionFixtureService: TVerSeriesEpisodeServicing {
+        let programs: [TVerProgram]
+        func fetchSeriesEpisodes(seriesID: String, forceRefresh: Bool) async throws -> [TVerProgram] {
+            programs
         }
     }
 
