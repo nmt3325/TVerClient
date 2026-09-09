@@ -21,6 +21,7 @@ struct LiveOfficialActionPresentation {
     init(isPlayable: Bool, isCurrent: Bool, failure: TVerErrorPresentation?) {
         let displayedFailure = isPlayable && isCurrent ? failure : nil
         failurePresentation = displayedFailure
-        showsStandaloneOfficialAction = !(isCurrent && failure != nil)
+        // Suppress the extra action only when the displayed failure supplies one.
+        showsStandaloneOfficialAction = displayedFailure == nil
     }
 }
