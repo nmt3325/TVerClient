@@ -11,6 +11,8 @@ struct SeriesSubscription: Identifiable, Equatable, Sendable, Codable {
     var knownEpisodeIDs: Set<String>
     var deferredPrograms: [TVerProgram]
     var lastCheckedAt: Date?
+    /// Positive evidence only. Missing legacy data does not imply a prior start.
+    fileprivate var acceptedDeferredEpisodeIDs: Set<String> = []
 
     var id: String { seriesID }
     var deferredCount: Int { deferredPrograms.count }
@@ -41,6 +43,7 @@ struct SeriesSubscription: Identifiable, Equatable, Sendable, Codable {
         case knownEpisodeIDs
         case deferredPrograms
         case lastCheckedAt
+        case acceptedDeferredEpisodeIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -57,6 +60,9 @@ struct SeriesSubscription: Identifiable, Equatable, Sendable, Codable {
             forKey: .deferredPrograms
         ) ?? []
         lastCheckedAt = try values.decodeIfPresent(Date.self, forKey: .lastCheckedAt)
+        acceptedDeferredEpisodeIDs = Set(
+            try values.decodeIfPresent([String].self, forKey: .acceptedDeferredEpisodeIDs) ?? []
+        )
     }
 
     func encode(to encoder: Encoder) throws {
@@ -68,6 +74,9 @@ struct SeriesSubscription: Identifiable, Equatable, Sendable, Codable {
         try values.encode(knownEpisodeIDs.sorted(), forKey: .knownEpisodeIDs)
         try values.encode(deferredPrograms.sorted { $0.id < $1.id }, forKey: .deferredPrograms)
         try values.encodeIfPresent(lastCheckedAt, forKey: .lastCheckedAt)
+        if !acceptedDeferredEpisodeIDs.isEmpty {
+            try values.encode(acceptedDeferredEpisodeIDs.sorted(), forKey: .acceptedDeferredEpisodeIDs)
+        }
     }
 }
 
@@ -632,25 +641,40 @@ final class SeriesSubscriptionStore: ObservableObject {
                 continue
             case .queued, .downloading, .paused:
                 subscription.knownEpisodeIDs.insert(program.id)
-                // Keep the model until completion so a later asynchronous failure
-                // remains retryable even if the episode disappears from the API.
+                subscription.acceptedDeferredEpisodeIDs.insert(program.id)
+                // Keep the model for asynchronous failures, but remember that
+                // an accepted copy disappearing must not recreate user intent.
                 deferredByID[program.id] = program
                 summary.alreadyPresentEpisodeCount += 1
                 continue
-            case .notDownloaded, .failed:
-                break
+            case .notDownloaded:
+                if subscription.acceptedDeferredEpisodeIDs.contains(program.id) {
+                    subscription.knownEpisodeIDs.insert(program.id)
+                    deferredByID[program.id] = nil
+                    continue
+                }
+            case .failed:
+                // A real failed record is positive observation, unlike an
+                // absent legacy record. Keep this evidence if retry is refused.
+                subscription.acceptedDeferredEpisodeIDs.insert(program.id)
             }
 
             let result = downloads.start(program, allowingCellular: false)
             subscription.knownEpisodeIDs.insert(program.id)
             switch result {
             case .started:
+                subscription.acceptedDeferredEpisodeIDs.insert(program.id)
                 deferredByID[program.id] = program
                 summary.startedEpisodeCount += 1
             case .alreadyPresent:
-                if case .downloaded = downloads.state(for: program.id) {
+                switch downloads.state(for: program.id) {
+                case .downloaded:
                     deferredByID[program.id] = nil
-                } else {
+                case .notDownloaded:
+                    // Do not manufacture acceptance from inconsistent providers.
+                    deferredByID[program.id] = program
+                case .queued, .downloading, .paused, .failed:
+                    subscription.acceptedDeferredEpisodeIDs.insert(program.id)
                     deferredByID[program.id] = program
                 }
                 summary.alreadyPresentEpisodeCount += 1
@@ -660,6 +684,7 @@ final class SeriesSubscriptionStore: ObservableObject {
         }
 
         subscription.deferredPrograms = deferredByID.values.sorted { $0.id < $1.id }
+        subscription.acceptedDeferredEpisodeIDs.formIntersection(deferredByID.keys)
         if recordsFreshDiscovery {
             subscription.lastCheckedAt = checkedAt
         }
@@ -743,6 +768,7 @@ final class SeriesSubscriptionStore: ObservableObject {
                 lastCheckedAt: raw.lastCheckedAt
             )
             candidate.knownEpisodeIDs.formUnion(deferred.map(\.id))
+            candidate.acceptedDeferredEpisodeIDs = raw.acceptedDeferredEpisodeIDs.intersection(deferred.map(\.id))
 
             guard var existing = bySeriesID[seriesID] else {
                 bySeriesID[seriesID] = candidate
@@ -755,6 +781,7 @@ final class SeriesSubscriptionStore: ObservableObject {
             existing.subscribedAt = min(existing.subscribedAt, candidate.subscribedAt)
             existing.isBaselined = existing.isBaselined || candidate.isBaselined
             existing.knownEpisodeIDs.formUnion(candidate.knownEpisodeIDs)
+            existing.acceptedDeferredEpisodeIDs.formUnion(candidate.acceptedDeferredEpisodeIDs)
 
             var deferredByID = Dictionary(
                 existing.deferredPrograms.map { ($0.id, $0) },

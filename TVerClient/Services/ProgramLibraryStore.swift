@@ -20,7 +20,14 @@ final class ProgramLibraryStore: ObservableObject {
         let favoritePrograms: [TVerProgram]?
         let recentPrograms: [TVerProgram]
         let recentViewedAt: [String: Date]?
+        let compactedFavoriteIDs: Set<String>?
+        let didTrimHistory: Bool?
     }
+
+    // These flags describe omissions already present in restored models. A new
+    // compact write keeps the richer in-memory models and records flags on disk.
+    private var restoredCompactedFavoriteIDs: Set<String> = []
+    private var restoredTrimmedHistory = false
 
     /// UserDefaults keeps a whole domain in memory and rewrites it as a single
     /// plist, so an unbounded library blob degrades every launch. Anything over
@@ -62,6 +69,8 @@ final class ProgramLibraryStore: ObservableObject {
         let storedSnapshot = storedData.flatMap { try? snapshotDecoder.decode(Snapshot.self, from: $0) }
 
         if let snapshot = storedSnapshot {
+            restoredCompactedFavoriteIDs = snapshot.compactedFavoriteIDs ?? []
+            restoredTrimmedHistory = snapshot.didTrimHistory ?? false
             let storedFavorites = snapshot.favoritePrograms ?? []
             let storedFavoriteIDs = snapshot.favoriteProgramIDs.union(storedFavorites.map(\.id))
             favoriteProgramIDs = storedFavoriteIDs
@@ -163,6 +172,7 @@ final class ProgramLibraryStore: ObservableObject {
     func clearRecentPrograms() {
         recentPrograms = []
         recentViewedAt = [:]
+        restoredTrimmedHistory = false
         persist()
     }
 
@@ -194,15 +204,20 @@ final class ProgramLibraryStore: ObservableObject {
     private func persist() {
         var favorites = favoritePrograms
         var recents = recentPrograms
-        var droppedFavoritePayloads = false
+        restoredCompactedFavoriteIDs.formIntersection(favoriteProgramIDs)
+        var compactedIDs = restoredCompactedFavoriteIDs
+        var attemptedCompaction = false
 
         while true {
             let retainedIDs = Set(recents.map(\.id))
+            let trimmedHistory = restoredTrimmedHistory || recents.count < recentPrograms.count
             let snapshot = Snapshot(
                 favoriteProgramIDs: favoriteProgramIDs,
                 favoritePrograms: favorites,
                 recentPrograms: recents,
-                recentViewedAt: recentViewedAt.filter { retainedIDs.contains($0.key) }
+                recentViewedAt: recentViewedAt.filter { retainedIDs.contains($0.key) },
+                compactedFavoriteIDs: compactedIDs.isEmpty ? nil : compactedIDs,
+                didTrimHistory: trimmedHistory ? true : nil
             )
 
             guard let data = try? encoder.encode(snapshot) else {
@@ -212,10 +227,17 @@ final class ProgramLibraryStore: ObservableObject {
 
             if data.count <= maximumPersistedByteCount {
                 defaults.set(data, forKey: storageKey)
-                let trimmedRecents = recents.count < recentPrograms.count
-                lastPersistenceFailure = droppedFavoritePayloads || trimmedRecents
-                    ? "保存容量の上限に達したため、一部の履歴を省いて保存しました"
-                    : nil
+                var notices: [String] = []
+                if !favoriteProgramIDs.subtracting(favorites.map(\.id)).isEmpty {
+                    notices.append("マイリストの登録は残っていますが、一部の番組情報が保存データにありません。")
+                }
+                if !compactedIDs.isEmpty {
+                    notices.append("保存容量の上限により、マイリストの一部の詳細（説明・画像）を省いた保存データです。")
+                }
+                if trimmedHistory {
+                    notices.append("保存容量の上限により、一部の履歴を省いた保存データです。")
+                }
+                lastPersistenceFailure = notices.isEmpty ? nil : notices.joined(separator: "\n")
                 return
             }
 
@@ -224,19 +246,31 @@ final class ProgramLibraryStore: ObservableObject {
                 continue
             }
 
-            if !favorites.isEmpty {
-                // Favourite ids stay in the snapshot, so nothing the user
-                // explicitly saved is lost; only the cached programme payloads
-                // that can be refetched are dropped.
-                favorites = []
-                droppedFavoritePayloads = true
+            if !attemptedCompaction {
+                attemptedCompaction = true
+                favorites = favorites.map { program in
+                    let compact = Self.compactFavorite(program)
+                    if compact != program { compactedIDs.insert(program.id) }
+                    return compact
+                }
                 continue
             }
 
+            // Even useful identity/title/expiry metadata may exceed the budget.
+            // Keep the last durable snapshot rather than replacing it with IDs only.
             lastPersistenceFailure =
-                "保存データが上限(\(maximumPersistedByteCount)バイト)を超えたため保存できませんでした"
+                "保存データが上限(\(maximumPersistedByteCount)バイト)を超えたため保存できませんでした。今回の変更はアプリを閉じると失われる場合があります。"
             return
         }
+    }
+
+    private static func compactFavorite(_ program: TVerProgram) -> TVerProgram {
+        TVerProgram(
+            id: program.id, seriesID: program.seriesID, title: program.title,
+            seriesTitle: program.seriesTitle, description: "", broadcastLabel: program.broadcastLabel,
+            publishedAt: program.publishedAt, availableUntil: program.availableUntil,
+            availableUntilAt: program.availableUntilAt, thumbnailURL: nil
+        )
     }
 
     private static func retainedRecents(

@@ -231,6 +231,150 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOversizedFavoriteKeepsCompactMetadataAtMinimumBudgetAcrossRestarts() throws {
+        let suite = "library-compact-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let program = storageProgram("large", description: String(repeating: "大", count: 5_000))
+        let store = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+        XCTAssertTrue(store.toggleFavorite(program))
+        XCTAssertEqual(store.favoritePrograms.first?.description, program.description, "keep full in-memory data")
+        let data = try XCTUnwrap(defaults.data(forKey: suite))
+        XCTAssertLessThanOrEqual(data.count, 4_096)
+        for _ in 0 ..< 2 {
+            let reopened = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+            XCTAssertTrue(reopened.isFavorite(program))
+            let retained = try XCTUnwrap(reopened.favoritePrograms.first)
+            XCTAssertEqual(retained.id, program.id)
+            XCTAssertEqual(retained.seriesID, program.seriesID)
+            XCTAssertEqual(retained.title, program.title)
+            XCTAssertEqual(retained.seriesTitle, program.seriesTitle)
+            XCTAssertEqual(retained.publishedAt, program.publishedAt)
+            XCTAssertEqual(retained.availableUntilAt, program.availableUntilAt)
+            XCTAssertLessThan(retained.description.count, program.description.count)
+            let notice = try XCTUnwrap(reopened.lastPersistenceFailure)
+            XCTAssertTrue(notice.contains("マイリスト"))
+            XCTAssertFalse(notice.contains("履歴"), "favorite-detail loss must not be described as history-only trimming")
+        }
+    }
+
+    @MainActor
+    func testCompactedFavoriteAndTrimmedHistoryHaveAccuratePersistentNotice() throws {
+        let suite = "library-compact-history-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let favorite = storageProgram("favorite", description: String(repeating: "f", count: 5_000))
+        let history = storageProgram("history", description: String(repeating: "h", count: 5_000))
+        let store = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+        store.toggleFavorite(favorite)
+        store.recordRecentlyViewed(history)
+        for _ in 0 ..< 2 {
+            let reopened = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+            XCTAssertEqual(reopened.favoritePrograms.map(\.id), [favorite.id])
+            XCTAssertTrue(reopened.recentPrograms.isEmpty)
+            let notice = try XCTUnwrap(reopened.lastPersistenceFailure)
+            XCTAssertTrue(notice.contains("マイリスト"))
+            XCTAssertTrue(notice.contains("履歴"))
+        }
+        let cleared = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+        cleared.clearRecentPrograms()
+        XCTAssertFalse(cleared.lastPersistenceFailure?.contains("履歴") ?? false)
+    }
+
+    @MainActor
+    func testUnavoidableFavoriteOverflowPreservesLastSavedSnapshotAndReportsRefusal() throws {
+        for overflowIdentity in [false, true] {
+            let suite = "library-overflow-" + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+            let original = storageProgram("saved")
+            store.toggleFavorite(original)
+            let savedData = try XCTUnwrap(defaults.data(forKey: suite))
+            let tooLarge = storageProgram(overflowIdentity ? String(repeating: "x", count: 6_000) : "oversized-title",
+                                          title: overflowIdentity ? "Episode" : String(repeating: "大", count: 5_000))
+            XCTAssertTrue(store.toggleFavorite(tooLarge))
+            XCTAssertTrue(store.isFavorite(original))
+            XCTAssertTrue(store.isFavorite(tooLarge), "a failed write must not clear current intent")
+            XCTAssertEqual(defaults.data(forKey: suite), savedData, "never replace useful metadata with an IDs-only snapshot")
+            XCTAssertTrue(store.lastPersistenceFailure?.contains("保存できません") == true)
+            let reopened = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+            XCTAssertEqual(reopened.favoritePrograms, [original])
+            XCTAssertTrue(reopened.isFavorite(original))
+        }
+    }
+
+    @MainActor
+    func testLegacyIDsOnlyFavoritesKeepMembershipAndExplainMissingProgramMetadata() throws {
+        let suite = "library-legacy-ids-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacy: [String: Any] = ["favoriteProgramIDs": ["legacy"], "favoritePrograms": [], "recentPrograms": []]
+        defaults.set(try JSONSerialization.data(withJSONObject: legacy), forKey: suite)
+        for _ in 0 ..< 2 {
+            let reopened = ProgramLibraryStore(defaults: defaults, storageKey: suite, maximumPersistedByteCount: 4_096)
+            XCTAssertEqual(reopened.favoriteProgramIDs, ["legacy"])
+            XCTAssertTrue(reopened.favoritePrograms.isEmpty)
+            XCTAssertFalse(reopened.didRecoverFromCorruptedStorage)
+            let notice = try XCTUnwrap(reopened.lastPersistenceFailure)
+            XCTAssertTrue(notice.contains("登録"))
+            XCTAssertTrue(notice.contains("番組情報"))
+            XCTAssertFalse(notice.contains("履歴"))
+        }
+    }
+
+    @MainActor
+    func testSubscriptionDoesNotRecreateRealCancelledOrDeletedDownload() async throws {
+        for finishBeforeRemoval in [false, true] {
+            let bed = try LibraryRejectionTestBed()
+            defer { bed.cleanUp() }
+            let program = storageProgram("subscribed")
+            let service = LibrarySubscriptionFixtureService(programs: [program])
+            let url = bed.directory.appendingPathComponent("subscriptions-v1.json")
+            let subscriptionDate = Date(timeIntervalSince1970: 1_799_999_999)
+            let store = SeriesSubscriptionStore(service: service, persistenceURL: url, now: { subscriptionDate })
+            await store.subscribe(to: program, downloads: bed.center)
+            await bed.center.waitForPendingResolutions()
+            XCTAssertEqual(bed.driver.startedIDs, [program.id])
+            if finishBeforeRemoval {
+                let asset = bed.directory.appendingPathComponent("finished.movpkg", isDirectory: true)
+                try FileManager.default.createDirectory(at: asset, withIntermediateDirectories: true)
+                try Data(repeating: 7, count: 64).write(to: asset.appendingPathComponent("segment"))
+                bed.driver.onEvent?(.finished(programID: program.id, location: asset))
+                XCTAssertTrue(bed.center.isAvailableOffline(program.id))
+                // No subscription poll between the actual completion and deletion.
+                bed.center.delete(program.id)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: asset.path))
+            } else {
+                bed.center.cancel(program.id)
+            }
+            XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+            let restored = SeriesSubscriptionStore(service: service, persistenceURL: url, now: { subscriptionDate })
+            restored.restore()
+            _ = await restored.networkStatusDidChange(.wifi, downloads: bed.center)
+            _ = await restored.refreshAll(downloads: bed.center, forceRefresh: true)
+            await bed.center.waitForPendingResolutions()
+            XCTAssertEqual(bed.driver.startedIDs, [program.id])
+            XCTAssertEqual(bed.center.state(for: program.id), .notDownloaded)
+            XCTAssertNil(bed.center.offlineAssetURL(for: program.id))
+            XCTAssertEqual(restored.subscription(for: "series")?.deferredCount, 0)
+        }
+    }
+
+    private struct LibrarySubscriptionFixtureService: TVerSeriesEpisodeServicing {
+        let programs: [TVerProgram]
+        func fetchSeriesEpisodes(seriesID: String, forceRefresh: Bool) async throws -> [TVerProgram] {
+            programs
+        }
+    }
+
+    private func storageProgram(_ id: String, title: String = "第1話", description: String = "") -> TVerProgram {
+        TVerProgram(id: id, seriesID: "series", title: title, seriesTitle: "保存テスト番組", description: description,
+                    broadcastLabel: "放送済み", publishedAt: Date(timeIntervalSince1970: 1_800_000_000),
+                    availableUntil: "配信期限", availableUntilAt: Date(timeIntervalSince1970: 2_000_000_000), thumbnailURL: nil)
+    }
+
     private func rejectionProgram(_ id: String) -> TVerProgram {
         TVerProgram(
             id: id, seriesID: "series", title: "第1話", seriesTitle: "テスト番組",
