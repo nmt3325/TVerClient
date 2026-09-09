@@ -261,13 +261,7 @@ final class DiagnosticLogStore: ObservableObject {
         message: String,
         metadata: [String: String] = [:]
     ) {
-        // Different URLs or credentials in keys can sanitize to the same key.
-        // Logging must neither trap nor arbitrarily attribute one value to it.
-        let sanitizedMetadata = Dictionary(metadata.map { key, value in
-            let sanitizedKey = Self.sanitize(key)
-            let sanitizedValue = Self.isSensitiveMetadataKey(key) ? "<redacted>" : Self.sanitize(value)
-            return (sanitizedKey, sanitizedValue)
-        }, uniquingKeysWith: { _, _ in "<redacted>" })
+        let sanitizedMetadata = Self.sanitizedMetadata(metadata)
         entries.append(DiagnosticLogEntry(
             id: UUID(),
             timestamp: now(),
@@ -363,13 +357,15 @@ final class DiagnosticLogStore: ObservableObject {
             with: "Bearer <redacted>"
         )
 
-        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s\]\[(){}<>\"']+"#, options: [.caseInsensitive]) else {
+        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s\]\[(){}<>\"']+(?:<redacted>)*"#, options: [.caseInsensitive]) else {
             return output
         }
         let source = output as NSString
         let matches = regex.matches(in: output, range: NSRange(location: 0, length: source.length))
         for match in matches.reversed() {
+            // Consume previous markers so repeated sanitization stays stable.
             let raw = source.substring(with: match.range)
+                .replacingOccurrences(of: "<redacted>", with: "", options: .caseInsensitive)
             guard let url = URL(string: raw), let scheme = url.scheme, let host = url.host else { continue }
             let replacement = "\(scheme)://\(host)/<redacted>"
             output = (output as NSString).replacingCharacters(in: match.range, with: replacement)
@@ -396,7 +392,18 @@ final class DiagnosticLogStore: ObservableObject {
             try? FileManager.default.removeItem(at: fileURL)
             return
         }
-        entries = decoded
+        // Upgrade retained records through the current redaction policy too.
+        // Preserve their identity and time instead of recording them as new events.
+        entries = decoded.map { entry in
+            DiagnosticLogEntry(
+                id: entry.id,
+                timestamp: entry.timestamp,
+                level: entry.level,
+                category: Self.sanitize(entry.category),
+                message: Self.sanitize(entry.message),
+                metadata: Self.sanitizedMetadata(entry.metadata)
+            )
+        }
         prune()
     }
 
@@ -420,6 +427,16 @@ final class DiagnosticLogStore: ObservableObject {
                 // Diagnostics must never prevent the app from continuing to run.
             }
         }
+    }
+
+    private static func sanitizedMetadata(_ metadata: [String: String]) -> [String: String] {
+        // Different URLs or credentials in keys can sanitize to the same key.
+        // Logging must neither trap nor arbitrarily attribute one value to it.
+        Dictionary(metadata.map { key, value in
+            let sanitizedKey = sanitize(key)
+            let sanitizedValue = isSensitiveMetadataKey(key) ? "<redacted>" : sanitize(value)
+            return (sanitizedKey, sanitizedValue)
+        }, uniquingKeysWith: { _, _ in "<redacted>" })
     }
 
     private static func isSensitiveMetadataKey(_ key: String) -> Bool {

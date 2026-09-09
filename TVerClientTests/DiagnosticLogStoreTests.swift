@@ -100,6 +100,52 @@ final class DiagnosticLogStoreTests: XCTestCase {
         XCTAssertEqual(persisted.last?.metadata, expected)
     }
 
+    func testSanitizationIsIdempotentForRedactedURLsAndHeaders() {
+        let input = "GET https://example.test/path/master.m3u8?apiKey=fixture-secret\nAuthorization: Bearer fixture-token"
+        let sanitized = DiagnosticLogStore.sanitize(input)
+
+        XCTAssertFalse(sanitized.contains("fixture-secret"))
+        XCTAssertFalse(sanitized.contains("fixture-token"))
+        XCTAssertTrue(sanitized.contains("https://example.test/<redacted>"))
+        XCTAssertEqual(DiagnosticLogStore.sanitize(sanitized), sanitized)
+    }
+
+    func testSanitizesLegacyEntriesOnLoadBeforeExportAndPersistence() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let timestamp = Date(timeIntervalSince1970: 2_000_000)
+        let entry = DiagnosticLogEntry(
+            id: UUID(),
+            timestamp: timestamp,
+            level: .error,
+            category: "network",
+            message: "Authorization=<redacted> legacy-bearer\nCookie=<redacted>; sid=legacy-cookie",
+            metadata: ["apiKey": "legacy-api-key", "httpStatus": "503"]
+        )
+        let file = directory.appendingPathComponent("diagnostic-log.json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([entry]).write(to: file, options: .atomic)
+
+        let store = DiagnosticLogStore(directoryURL: directory, now: { timestamp })
+        defer { store.flushPendingWrites() }
+        let loaded = try XCTUnwrap(store.entries.first { $0.id == entry.id })
+        XCTAssertEqual(loaded.timestamp, entry.timestamp)
+        XCTAssertEqual(loaded.level, entry.level)
+        XCTAssertEqual(loaded.category, entry.category)
+        XCTAssertEqual(loaded.metadata, ["apiKey": "<redacted>", "httpStatus": "503"])
+        store.flushPendingWrites()
+        let persisted = try String(contentsOf: file, encoding: .utf8)
+        let exported = store.exportText()
+        for secret in ["legacy-bearer", "legacy-cookie", "legacy-api-key"] {
+            XCTAssertFalse(loaded.message.contains(secret))
+            XCTAssertFalse(exported.contains(secret))
+            XCTAssertFalse(persisted.contains(secret))
+        }
+    }
+
     func testPersistsEntriesAndPrunesOldAndExcessRecords() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

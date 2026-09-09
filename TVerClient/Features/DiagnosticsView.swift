@@ -123,7 +123,7 @@ struct DiagnosticsView: View {
                         }
                     } else {
                         Text(
-                            "このセッションでは未実行です。起動時の自動実行は統合作業で App 側に配線する必要があります。"
+                            "表示できるセルフチェック結果はありません。「セルフチェックを実行」から診断できます。"
                         )
                         .font(.footnote)
                         .foregroundStyle(.secondary)
