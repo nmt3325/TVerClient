@@ -124,6 +124,90 @@ final class OfflineCacheTests: XCTestCase {
         XCTAssertNil(snapshot)
     }
 
+    func testRevalidationKeepsANewerResponseInMemoryAndOnDisk() async throws {
+        let directory = try makeTemporaryDirectory()
+        let storedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = "platform-api.tver.jp/service/api/v1/callHome"
+        let cache = TVerResponseCache(directory: directory, currentDate: { storedAt })
+        await cache.store(data: Data("old".utf8), for: key, at: storedAt, eTag: "v1", lastModified: nil)
+        let captured = await cache.snapshot(for: key)
+        let old = try XCTUnwrap(captured)
+
+        let newerAt = storedAt.addingTimeInterval(30)
+        let newerBody = Data("new".utf8)
+        await cache.store(data: newerBody, for: key, at: newerAt, eTag: "v2", lastModified: "new-date")
+        // Reproduce an older conditional GET completing after the newer 200.
+        await cache.markRevalidated(old, for: key, at: storedAt.addingTimeInterval(60))
+
+        let memory = await cache.snapshot(for: key)
+        let reopened = TVerResponseCache(directory: directory, currentDate: { storedAt.addingTimeInterval(90) })
+        let disk = await reopened.snapshot(for: key)
+        for snapshot in [memory, disk] {
+            XCTAssertEqual(snapshot?.data, newerBody)
+            XCTAssertEqual(snapshot?.storedAt, newerAt)
+            XCTAssertEqual(snapshot?.eTag, "v2")
+            XCTAssertEqual(snapshot?.lastModified, "new-date")
+        }
+    }
+
+    func testLateRevalidationDoesNotRestoreAClearedCache() async throws {
+        let directory = try makeTemporaryDirectory()
+        let storedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = "platform-api.tver.jp/service/api/v1/callHome"
+        let cache = TVerResponseCache(directory: directory, currentDate: { storedAt })
+        await cache.store(data: Data("old".utf8), for: key, at: storedAt, eTag: "v1", lastModified: nil)
+        let captured = await cache.snapshot(for: key)
+        let old = try XCTUnwrap(captured)
+        await cache.removeAll()
+
+        await cache.markRevalidated(old, for: key, at: storedAt.addingTimeInterval(60))
+
+        let memory = await cache.snapshot(for: key)
+        let reopened = TVerResponseCache(directory: directory, currentDate: { storedAt.addingTimeInterval(90) })
+        let disk = await reopened.snapshot(for: key)
+        XCTAssertNil(memory)
+        XCTAssertNil(disk)
+        XCTAssertTrue(contentsOfDirectory(directory).isEmpty)
+    }
+
+    func testRevalidationOfTheCurrentSnapshotStillRefreshesBothTiers() async throws {
+        let directory = try makeTemporaryDirectory()
+        let storedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = "platform-api.tver.jp/service/api/v1/callHome"
+        let body = Data("current".utf8)
+        let cache = TVerResponseCache(directory: directory, currentDate: { storedAt })
+        await cache.store(data: body, for: key, at: storedAt, eTag: "v1", lastModified: "last-date")
+        let captured = await cache.snapshot(for: key)
+        let old = try XCTUnwrap(captured)
+        let revalidatedAt = storedAt.addingTimeInterval(60)
+
+        await cache.markRevalidated(old, for: key, at: revalidatedAt)
+
+        let memory = await cache.snapshot(for: key)
+        let reopened = TVerResponseCache(directory: directory, currentDate: { storedAt.addingTimeInterval(90) })
+        let disk = await reopened.snapshot(for: key)
+        for snapshot in [memory, disk] {
+            XCTAssertEqual(snapshot?.data, body)
+            XCTAssertEqual(snapshot?.storedAt, revalidatedAt)
+            XCTAssertEqual(snapshot?.eTag, "v1")
+            XCTAssertEqual(snapshot?.lastModified, "last-date")
+        }
+    }
+
+    func testRevalidationCannotMoveTheStoredTimeBackwards() async throws {
+        let storedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let key = "platform-api.tver.jp/service/api/v1/callHome"
+        let cache = TVerResponseCache(directory: nil, currentDate: { storedAt })
+        await cache.store(data: Data("current".utf8), for: key, at: storedAt, eTag: "v1", lastModified: nil)
+        let captured = await cache.snapshot(for: key)
+        let current = try XCTUnwrap(captured)
+
+        await cache.markRevalidated(current, for: key, at: storedAt.addingTimeInterval(-1))
+
+        let after = await cache.snapshot(for: key)
+        XCTAssertEqual(after, current)
+    }
+
     func testPersistabilityRulesRejectCredentials() {
         XCTAssertTrue(TVerResponseCache.isPersistable(key: "platform-api.tver.jp/service/api/v1/callHome"))
         XCTAssertFalse(TVerResponseCache.isPersistable(key: "host/path?platform_uid=1"))

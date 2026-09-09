@@ -128,6 +128,10 @@ actor TVerResponseCache {
 
     func markRevalidated(_ snapshot: Snapshot, for key: String, at date: Date) {
         loadFromDiskIfNeeded()
+        // The conditional request may finish after a newer response was stored,
+        // or after the user cleared the cache. Its 304 validates only the exact
+        // snapshot sent with that request, not the current value of this key.
+        guard entries[key] == snapshot, date >= snapshot.storedAt else { return }
         let refreshed = Snapshot(
             data: snapshot.data,
             storedAt: date,
