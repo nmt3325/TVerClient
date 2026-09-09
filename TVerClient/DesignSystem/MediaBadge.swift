@@ -74,6 +74,8 @@ struct MediaBadge: View, Equatable, Hashable {
                 .imageScale(.small)
                 .symbolRenderingMode(.hierarchical)
             Text(label)
+                // Status tint identifies the badge; small text needs opaque semantic contrast.
+                .foregroundStyle(Color(uiColor: .label))
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
         }
         .font(DS.Typography.badge)
