@@ -838,6 +838,123 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
         XCTAssertEqual(store.refreshState, .completed(discovered))
     }
 
+    func testAcceptedEpisodeRemovedBeforePollStaysRemovedAfterRestart() async {
+        for completedBeforeDeletion in [false, true] {
+            for useConnectivityRetry in [false, true] {
+                let service = FakeSeriesService()
+                await service.enqueue(.success([program("ep1")]), for: "series-1")
+                let downloads = FakeDownloadEnqueuer()
+                let url = temporaryPersistenceURL()
+                defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+                let store = makeStore(service: service, persistenceURL: url)
+                await store.subscribe(to: program("ep1"), downloads: downloads)
+                await service.enqueue(.success([newProgram("ep2")]), for: "series-1")
+                _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+                XCTAssertEqual(downloads.startedIDs, ["ep2"])
+                if completedBeforeDeletion { downloads.states["ep2"] = .downloaded(bytes: 42) }
+                // Deliberately do not let subscriptions observe completion first.
+                downloads.simulateManualDeletion(of: "ep2")
+                let restored = makeStore(service: service, persistenceURL: url)
+                restored.restore()
+                if useConnectivityRetry {
+                    _ = await restored.networkStatusDidChange(.wifi, downloads: downloads)
+                } else {
+                    await service.enqueue(.success([]), for: "series-1")
+                    _ = await restored.refreshAll(downloads: downloads, forceRefresh: true)
+                }
+                XCTAssertEqual(downloads.startedIDs, ["ep2"], "explicit removal must survive API omission and restart")
+                XCTAssertEqual(restored.subscription(for: "series-1")?.deferredCount, 0)
+                XCTAssertTrue(restored.subscription(for: "series-1")?.knownEpisodeIDs.contains("ep2") == true)
+                await service.enqueue(.success([newProgram("ep2")]), for: "series-1")
+                _ = await restored.refreshAll(downloads: downloads, forceRefresh: true)
+                XCTAssertEqual(downloads.startedIDs, ["ep2"], "a later API result must not revive removed intent")
+            }
+        }
+    }
+
+    func testAcceptedPausedAndFailedWorkSurvivesProvenanceRoundTrip() async {
+        let service = FakeSeriesService()
+        await service.enqueue(.success([program("ep1")]), for: "series-1")
+        let downloads = FakeDownloadEnqueuer()
+        let url = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = makeStore(service: service, persistenceURL: url)
+        await store.subscribe(to: program("ep1"), downloads: downloads)
+        await service.enqueue(.success([newProgram("ep2")]), for: "series-1")
+        _ = await store.refreshAll(downloads: downloads, forceRefresh: true)
+        downloads.states["ep2"] = .paused(progress: 0.4)
+        let restored = makeStore(service: service, persistenceURL: url)
+        restored.restore()
+        _ = await restored.networkStatusDidChange(.wifi, downloads: downloads)
+        XCTAssertEqual(downloads.startedIDs, ["ep2"])
+        XCTAssertEqual(downloads.state(for: "ep2"), .paused(progress: 0.4))
+        XCTAssertEqual(restored.subscription(for: "series-1")?.deferredCount, 1)
+        downloads.states["ep2"] = .failed(message: "asynchronous failure")
+        await service.enqueue(.success([]), for: "series-1")
+        _ = await restored.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(downloads.startedIDs, ["ep2", "ep2"])
+    }
+
+    func testLegacyDeferredWithoutProvenanceIsNotAssumedPreviouslyAccepted() async throws {
+        let service = FakeSeriesService()
+        let url = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let legacy = SeriesSubscription(seriesID: "series-1", seriesTitle: "Legacy", subscribedAt: fixedNow,
+                                        isBaselined: true, knownEpisodeIDs: ["legacy"], deferredPrograms: [newProgram("legacy")])
+        try writeProvenanceFixture([legacy], acceptedIDs: [nil], to: url)
+        let downloads = FakeDownloadEnqueuer()
+        downloads.enqueue(.blockedByCellular, for: "legacy")
+        let store = makeStore(service: service, persistenceURL: url)
+        store.restore()
+        _ = await store.networkStatusDidChange(.cellular, downloads: downloads)
+        XCTAssertEqual(store.subscription(for: "series-1")?.deferredCount, 1)
+        let restored = makeStore(service: service, persistenceURL: url)
+        restored.restore()
+        _ = await restored.networkStatusDidChange(.wifi, downloads: downloads)
+        XCTAssertEqual(downloads.startedIDs, ["legacy", "legacy"], "unknown legacy provenance must preserve never-started retry")
+        downloads.simulateManualDeletion(of: "legacy")
+        await service.enqueue(.success([]), for: "series-1")
+        _ = await restored.refreshAll(downloads: downloads, forceRefresh: true)
+        XCTAssertEqual(downloads.startedIDs, ["legacy", "legacy"], "newly observed acceptance must subsequently protect removal")
+    }
+
+    func testAcceptedProvenanceMergesWithoutMarkingLegacySiblingAccepted() async throws {
+        let service = FakeSeriesService()
+        let url = temporaryPersistenceURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let accepted = SeriesSubscription(seriesID: " series-1 ", seriesTitle: "Series", subscribedAt: fixedNow,
+                                          isBaselined: true, knownEpisodeIDs: ["accepted"], deferredPrograms: [newProgram("accepted")])
+        let unknown = SeriesSubscription(seriesID: "series-1", seriesTitle: "Series", subscribedAt: fixedNow,
+                                         isBaselined: true, knownEpisodeIDs: ["unknown"], deferredPrograms: [newProgram("unknown")])
+        try writeProvenanceFixture([accepted, unknown], acceptedIDs: [["accepted", "orphan"], nil], to: url)
+        let store = makeStore(service: service, persistenceURL: url)
+        store.restore()
+        let downloads = FakeDownloadEnqueuer()
+        _ = await store.networkStatusDidChange(.wifi, downloads: downloads)
+        XCTAssertEqual(downloads.startedIDs, ["unknown"])
+        XCTAssertEqual(store.subscription(for: "series-1")?.deferredPrograms.map(\.id), ["unknown"])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let rows = try XCTUnwrap(object["subscriptions"] as? [[String: Any]])
+        XCTAssertEqual(rows.first?["acceptedDeferredEpisodeIDs"] as? [String], ["unknown"])
+    }
+
+    private func writeProvenanceFixture(
+        _ subscriptions: [SeriesSubscription], acceptedIDs: [[String]?], to url: URL
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let payload = SeriesPersistenceFixture(version: 1, subscriptions: subscriptions)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(payload)) as? [String: Any])
+        var rows = try XCTUnwrap(object["subscriptions"] as? [[String: Any]])
+        for index in rows.indices {
+            rows[index].removeValue(forKey: "acceptedDeferredEpisodeIDs")
+            if let ids = acceptedIDs[index] { rows[index]["acceptedDeferredEpisodeIDs"] = ids }
+        }
+        object["subscriptions"] = rows
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object).write(to: url, options: .atomic)
+    }
+
     private func waitForSuspendedRequest(
         _ requestNumber: Int,
         service: FakeSeriesService
