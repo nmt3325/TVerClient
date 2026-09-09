@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import Combine
 import MediaPlayer
 @testable import TVerClient
 import UIKit
@@ -253,6 +254,62 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertTrue(context.controller.isPeriodicTimeObserverInstalled)
     }
 
+    func testLateSeekCompletionCannotAcknowledgeNewRequestsSameTarget() async {
+        await assertLateSeekCannotCrossRequestBoundary(replacementSeconds: 5)
+    }
+
+    func testLateSeekCompletionCannotStartASecondSeekForNewRequestsDifferentTarget() async {
+        await assertLateSeekCannotCrossRequestBoundary(replacementSeconds: 9)
+    }
+
+    private func assertLateSeekCannotCrossRequestBoundary(replacementSeconds: TimeInterval) async {
+        // Drive the actual controller completion closure, not only ChaseTimeSeeker.
+        // No stream loading or media-daemon seek timing is needed for this ordering.
+        let player = CapturedSeekPlayer()
+        let oldItem = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: oldItem)
+        let controller = PlaybackController(player: player, audioSession: FakePlaybackAudioSession())
+        defer { controller.stop() }
+        let oldTarget = CMTime(seconds: 5, preferredTimescale: 600)
+        controller.seekToTime(oldTarget)
+        XCTAssertEqual(player.requestedSeekTimes, [oldTarget])
+
+        controller.stop()
+        let replacement = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: replacement)
+        let newTarget = CMTime(seconds: replacementSeconds, preferredTimescale: 600)
+        controller.seekToTime(newTarget)
+        XCTAssertEqual(player.requestedSeekTimes, [oldTarget, newTarget])
+        XCTAssertTrue(controller.isSeeking)
+        XCTAssertTrue(controller.isSeekInProgress)
+
+        let prematurelyCompleted = XCTestExpectation(description: "old completion must not acknowledge the new seek")
+        prematurelyCompleted.isInverted = true
+        let duplicateSeek = XCTestExpectation(description: "old completion must not issue a concurrent seek")
+        duplicateSeek.isInverted = true
+        let observation = controller.$isSeeking.dropFirst().sink { isSeeking in
+            if !isSeeking { prematurelyCompleted.fulfill() }
+        }
+        player.didRequestSeek = { duplicateSeek.fulfill() }
+        player.completeSeek(at: 0, finished: false)
+        let result = await XCTWaiter.fulfillment(of: [prematurelyCompleted, duplicateSeek], timeout: 0.15)
+        observation.cancel()
+        player.didRequestSeek = nil
+
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(player.deliveredCompletionCount, 1)
+        XCTAssertFalse(oldItem === replacement, "keep both item identities alive through the late callback")
+        XCTAssertTrue(controller.isSeeking)
+        XCTAssertTrue(controller.isSeekInProgress)
+        XCTAssertEqual(controller.chaseTime, newTarget)
+        XCTAssertEqual(player.requestedSeekTimes, [oldTarget, newTarget])
+
+        player.completeSeek(at: 1, finished: true)
+        await waitUntil("the current seek still completes normally") { !controller.isSeekInProgress }
+        XCTAssertFalse(controller.isSeeking)
+        XCTAssertEqual(player.requestedSeekTimes, [oldTarget, newTarget])
+    }
+
     // MARK: - Helpers
 
     @MainActor
@@ -377,6 +434,36 @@ final class PlaybackControllerTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(condition(), message)
+    }
+}
+
+/// Holds the AVPlayer completion closures so regressions can deliver an old
+/// cancellation after a new seek has already started. Used only on the test actor.
+private final class CapturedSeekPlayer: AVPlayer, @unchecked Sendable {
+    private(set) var requestedSeekTimes: [CMTime] = []
+    private(set) var deliveredCompletionCount = 0
+    var didRequestSeek: (() -> Void)?
+    private var completions: [(@Sendable (Bool) -> Void)?] = []
+
+    override func seek(
+        to time: CMTime,
+        toleranceBefore: CMTime,
+        toleranceAfter: CMTime,
+        completionHandler: @escaping @Sendable (Bool) -> Void
+    ) {
+        requestedSeekTimes.append(time)
+        completions.append(completionHandler)
+        didRequestSeek?()
+    }
+
+    func completeSeek(at index: Int, finished: Bool) {
+        guard completions.indices.contains(index), let completion = completions[index] else {
+            XCTFail("each captured seek must be completed exactly once")
+            return
+        }
+        completions[index] = nil
+        deliveredCompletionCount += 1
+        completion(finished)
     }
 }
 

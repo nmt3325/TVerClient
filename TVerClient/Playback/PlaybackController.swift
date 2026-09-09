@@ -236,7 +236,17 @@ final class PlaybackController: ObservableObject {
     }
 
     func resume() {
-        guard let item = player.currentItem else { return }
+        guard let item = player.currentItem else {
+            // A paused resolver still owns the request. Remember the explicit
+            // resume without replacing it or activating audio before an item exists.
+            guard playbackRequestTask != nil else { return }
+            wantsPlayback = true
+            shouldResumeAfterInterruption = false
+            error = nil
+            continuityNotice = nil
+            transition(to: .resolving)
+            return
+        }
         do {
             try activateAudioSession()
             wantsPlayback = true
@@ -447,9 +457,15 @@ final class PlaybackController: ObservableObject {
     }
 
     private func performSeek(to time: CMTime, tolerance: CMTime) {
-        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+        let generation = requestGeneration
+        let item = player.currentItem
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self, weak item] _ in
+            Task { @MainActor [weak self, weak item] in
+                // Cancelling/replacing an item still delivers its completion.
+                // It must not acknowledge or restart the new request's seeker.
+                guard let self,
+                      generation == self.requestGeneration,
+                      item === self.player.currentItem else { return }
                 if let next = self.seeker.complete(time, tolerance: tolerance) {
                     self.performSeek(to: next, tolerance: self.seeker.chaseTolerance)
                 } else {

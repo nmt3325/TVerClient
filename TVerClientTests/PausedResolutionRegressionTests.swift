@@ -80,6 +80,62 @@ final class PausedResolutionRegressionTests: XCTestCase {
         XCTAssertFalse(controller.isPlaying)
     }
 
+    func testExplicitResumeWhileVODResolutionIsPendingRestoresIntentWithoutRestartingRequest() async throws {
+        let url = try makeAudioFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let resolver = PausedResolutionGate()
+        let controller = PlaybackController(resolver: resolver, audioSession: ResolutionAudioSession())
+        defer { controller.stop() }
+        let program = TVerProgram(id: "resume-pending-vod", seriesID: nil, title: "テスト", seriesTitle: "テスト",
+                                  description: "", broadcastLabel: "", availableUntil: nil, thumbnailURL: nil)
+        let request = Task { await controller.play(program) }
+        await waitUntil { await resolver.calls == 1 }
+        controller.pause()
+        XCTAssertEqual(controller.state, .paused)
+        XCTAssertNil(controller.player.currentItem)
+
+        controller.resume()
+
+        XCTAssertEqual(controller.state, .resolving)
+        XCTAssertFalse(controller.isAudioSessionActive, "resume intent alone must not claim the process-wide audio session")
+        XCTAssertTrue(controller.isLoaded(program))
+        XCTAssertNil(controller.player.currentItem)
+        let pendingCalls = await resolver.calls
+        XCTAssertEqual(pendingCalls, 1)
+        await resolver.complete(with: url)
+        await request.value
+        await waitUntil { controller.state == .playing }
+        XCTAssertTrue(controller.isPlaying)
+        let finalCalls = await resolver.calls
+        XCTAssertEqual(finalCalls, 1)
+    }
+
+    func testExplicitResumeWhileLiveResolutionIsPendingCanBePausedAgain() async throws {
+        let url = try makeAudioFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let resolver = PausedResolutionGate()
+        let controller = PlaybackController(liveResolver: resolver, audioSession: ResolutionAudioSession())
+        defer { controller.stop() }
+        let channel = TVerLiveChannel(id: "resume-pending-live", name: "テスト放送局", iconURL: nil,
+                                     projectID: "fixture", mediaID: "fixture", apiKey: "fixture",
+                                     currentProgram: nil, state: .onAir)
+        let request = Task { await controller.playLive(channel) }
+        await waitUntil { await resolver.calls == 1 }
+        controller.pause()
+        controller.resume()
+        XCTAssertEqual(controller.state, .resolving)
+        XCTAssertNil(controller.player.currentItem)
+        controller.pause()
+        await resolver.complete(with: url)
+        await request.value
+        await waitUntil { controller.player.currentItem?.status == .readyToPlay }
+        XCTAssertEqual(controller.state, .paused, "the latest explicit intent must win when resolution finishes")
+        XCTAssertFalse(controller.isPlaying)
+        XCTAssertEqual(controller.player.rate, 0)
+        let calls = await resolver.calls
+        XCTAssertEqual(calls, 1)
+    }
+
     private func waitUntil(_ condition: () async -> Bool) async {
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
