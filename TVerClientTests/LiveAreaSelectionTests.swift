@@ -227,6 +227,75 @@ final class LiveAreaSelectionTests: XCTestCase {
         XCTAssertFalse(model.isLoading)
     }
 
+    func testLoadIfNeededJoinsTheSameInFlightAreaSwitch() async {
+        await assertAppearanceJoinsAreaSwitch(whileQueued: false)
+    }
+
+    func testLoadIfNeededJoinsTheSameQueuedAreaSwitch() async {
+        await assertAppearanceJoinsAreaSwitch(whileQueued: true)
+    }
+
+    private func assertAppearanceJoinsAreaSwitch(whileQueued: Bool) async {
+        let suspended = expectation(description: "predecessor or switch is suspended")
+        let osakaChannel = Self.channel(id: "osaka", state: .onAir)
+        let service = GatedAreaLiveService(
+            channelsByArea: [
+                "13": [Self.channel(id: "tokyo", state: .onAir)],
+                "27": [osakaChannel],
+            ],
+            suspendedRequestNumber: whileQueued ? 1 : 2,
+            didSuspend: suspended,
+            maximumRequestCount: 2
+        )
+        let model = LiveViewModel(service: service, usesPreviewFallback: false)
+        let defaults = makeDefaults()
+        let store = AreaStore(service: service, defaults: defaults)
+        let initial = Task { await model.load(area: tokyo) }
+        if whileQueued {
+            await fulfillment(of: [suspended], timeout: 5)
+        } else {
+            _ = await initial.value
+        }
+
+        let switchEntered = expectation(description: "area switch entered")
+        let switching = Task { @MainActor in
+            switchEntered.fulfill()
+            await store.select(osaka) { target in await model.load(area: target) }
+        }
+        await fulfillment(of: [switchEntered], timeout: 5)
+        if !whileQueued {
+            await fulfillment(of: [suspended], timeout: 5)
+        }
+        let appearanceEntered = expectation(description: "same area appearance entered")
+        let appearing = Task { @MainActor in
+            appearanceEntered.fulfill()
+            await model.loadIfNeeded(area: store.selected)
+        }
+        await fulfillment(of: [appearanceEntered], timeout: 5)
+        XCTAssertEqual(store.selected, osaka)
+        XCTAssertTrue(store.isSwitchingArea)
+        XCTAssertTrue(model.isLoading)
+
+        await service.releaseSuspendedRequest()
+        let initialSucceeded = await initial.value
+        await switching.value
+        await appearing.value
+
+        XCTAssertEqual(initialSucceeded, !whileQueued)
+        let requests = await service.requests
+        XCTAssertEqual(requests.map(\.areaCode), ["13", "27"])
+        XCTAssertEqual(requests.map(\.forceRefresh), [false, false])
+        XCTAssertEqual(store.selected, osaka)
+        XCTAssertEqual(defaults.string(forKey: "tverclient.selectedAreaCode"), osaka.code)
+        XCTAssertEqual(model.loadedArea, store.selected)
+        XCTAssertEqual(model.channels, [osakaChannel])
+        XCTAssertNil(store.areaSwitchFailureMessage)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.freshness?.isDegraded, false)
+        XCTAssertFalse(store.isSwitchingArea)
+        XCTAssertFalse(model.isLoading)
+    }
+
     private func makeDefaults(function: String = #function) -> UserDefaults {
         let name = "LiveAreaSelectionTests.\(function).\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
@@ -292,17 +361,20 @@ private actor GatedAreaLiveService: TVerLiveServicing, TVerProgramGuideServicing
     private let channelsByArea: [String: [TVerLiveChannel]]
     private let suspendedRequestNumber: Int
     private let didSuspend: XCTestExpectation
+    private let maximumRequestCount: Int?
     private var suspendedRequest: CheckedContinuation<Void, Never>?
     private var isReleased = false
 
     init(
         channelsByArea: [String: [TVerLiveChannel]],
         suspendedRequestNumber: Int,
-        didSuspend: XCTestExpectation
+        didSuspend: XCTestExpectation,
+        maximumRequestCount: Int? = nil
     ) {
         self.channelsByArea = channelsByArea
         self.suspendedRequestNumber = suspendedRequestNumber
         self.didSuspend = didSuspend
+        self.maximumRequestCount = maximumRequestCount
     }
 
     func fetchLiveChannels() async throws -> [TVerLiveChannel] {
@@ -311,6 +383,9 @@ private actor GatedAreaLiveService: TVerLiveServicing, TVerProgramGuideServicing
 
     func fetchLiveChannels(area: TVerArea?, forceRefresh: Bool) async throws -> [TVerLiveChannel] {
         requests.append(.init(areaCode: area?.code, forceRefresh: forceRefresh))
+        if let maximumRequestCount, requests.count > maximumRequestCount {
+            XCTFail("Unexpected duplicate area request for \(area?.code ?? "nil")")
+        }
         if requests.count == suspendedRequestNumber, !isReleased {
             await withCheckedContinuation { continuation in
                 suspendedRequest = continuation

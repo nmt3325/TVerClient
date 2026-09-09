@@ -31,6 +31,8 @@ final class LiveViewModel: ObservableObject {
     private var lastSuccessAt: Date?
     /// 走っている取得。エリアを切り替えるときはこれを畳んでから始める。
     private var loadTask: Task<Bool, Never>?
+    /// 実際の取得が始まる前の待機 Task についても、要求先を識別する。
+    private var loadTaskAreaCode: String?
 
     init(service: any TVerLiveServicing, usesPreviewFallback: Bool = true) {
         self.service = service
@@ -51,6 +53,11 @@ final class LiveViewModel: ObservableObject {
 
     func loadIfNeeded(area: TVerArea?) async {
         guard !hasLoaded || loadedArea?.code != area?.code else { return }
+        // 再表示で同じ取得に入っても、エリア切替の成否を取り消しに変えない。
+        if let running = loadTask, loadTaskAreaCode == area?.code {
+            _ = await running.value
+            return
+        }
         _ = await load(area: area, forceRefresh: false)
     }
 
@@ -65,7 +72,7 @@ final class LiveViewModel: ObservableObject {
         await load(area: area, forceRefresh: false)
     }
 
-    /// 引き下げ更新。エリア別キャッシュを跨いで取り直す。
+    /// 引き下げ更新。取得中なら合流し、なければキャッシュを跨いで取り直す。
     func refresh() async {
         // 切替中の取得を更新操作で取り消すと、AreaStore が失敗と解釈して
         // 選択だけを巻き戻してしまう。進行中ならその取得の完了を待つ。
@@ -89,9 +96,13 @@ final class LiveViewModel: ObservableObject {
             guard !Task.isCancelled else { return false }
             return await self.performLoad(area: area, forceRefresh: forceRefresh)
         }
+        loadTaskAreaCode = area?.code
         loadTask = task
         let succeeded = await task.value
-        if loadTask == task { loadTask = nil }
+        if loadTask == task {
+            loadTask = nil
+            loadTaskAreaCode = nil
+        }
         return succeeded
     }
 
