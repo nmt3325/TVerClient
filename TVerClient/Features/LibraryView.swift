@@ -512,11 +512,9 @@ struct LibraryView: View {
                     noticeRow(
                         systemImage: "exclamationmark.triangle.fill",
                         message: failure,
-                        recovery: "次に起動したとき\(Vocabulary.Library.favorites)が元に戻る場合があります。\(Vocabulary.Library.history)を減らすと保存しやすくなります。",
-                        actionLabel: clearRecentsAction() == nil
-                            ? nil
-                            : "\(Vocabulary.Library.history)をすべて消す",
-                        action: clearRecentsAction(),
+                        recovery: nil,
+                        actionLabel: nil,
+                        action: nil,
                         dismiss: { libraryStore.acknowledgePersistenceFailure() }
                     )
                 }
