@@ -248,6 +248,244 @@ final class ProgramNotificationSlotRegressionTests: XCTestCase {
         XCTAssertEqual(operations, ["add:" + stale.identifier, "remove:" + stale.identifier])
     }
 
+    func testCancelQueuedDuringRollbackRemovesRestoredReservationsAcrossSchedulers() async throws {
+        for cancelAll in [false, true] {
+            let originals = fullProgramQueue()
+            let center = TransactionalNotificationCenter(requests: originals)
+            let scheduler = ProgramNotificationScheduler(center: center)
+            let cancellingScheduler = ProgramNotificationScheduler(center: center)
+            let evictee = try XCTUnwrap(originals.last)
+            let newID = ProgramNotificationScheduler.identifier(channelID: "fixtures", programID: "new")
+            let restoring = expectation(description: "Victim restoration entered the real center")
+            await center.failNextAdd(identifier: newID, code: 101)
+            await center.holdNextAdd(identifier: evictee.identifier, entered: restoring)
+            let scheduling = Task {
+                try await scheduler.schedule(program: makeProgram(id: "new", start: hours(5)),
+                                             channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+            }
+            await fulfillment(of: [restoring], timeout: 2)
+            let entered = expectation(description: "Cancellation entered its scheduler actor")
+            let cancellation = Task {
+                await cancellingScheduler.cancelAfterActorEntry(identifier: cancelAll ? nil : evictee.identifier,
+                                                                 entered: entered)
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            await cancellingScheduler.mutationEntryCheckpoint()
+            let heldOperations = await center.operationLog()
+            XCTAssertEqual(heldOperations, ["remove:" + evictee.identifier, "add:" + newID, "add:" + evictee.identifier])
+            await center.releaseHeldAdd()
+            if case .failure(let error) = await scheduling.result {
+                XCTAssertEqual((error as NSError).code, 101)
+            } else {
+                XCTFail("The original new add failed")
+            }
+            let cancelledCount = await cancellation.value
+            XCTAssertEqual(cancelledCount, cancelAll ? originals.count : 1)
+            let remaining = await center.snapshot()
+            let expected = cancelAll ? [] : Array(originals.dropLast())
+            XCTAssertEqual(remaining, expected.sorted { $0.identifier < $1.identifier })
+            let peak = await center.peakCount()
+            XCTAssertEqual(peak, ProgramNotificationScheduler.maximumPendingNotifications)
+        }
+    }
+
+    func testAlreadyStartedCancellationFinishesBeforeAnotherSchedulerTakesItsSnapshot() async throws {
+        for cancelAll in [false, true] {
+            let originals = fullProgramQueue()
+            let center = TransactionalNotificationCenter(requests: originals)
+            let cancellingScheduler = ProgramNotificationScheduler(center: center)
+            let scheduler = ProgramNotificationScheduler(center: center)
+            let removed = try XCTUnwrap(originals.last)
+            let removing = expectation(description: "Cancellation reached remove before deleting")
+            await center.holdNextRemoval(containing: removed.identifier, entered: removing)
+            let cancellation = Task {
+                if cancelAll { return await cancellingScheduler.cancelAll() }
+                await cancellingScheduler.cancel(identifier: removed.identifier)
+                return 1
+            }
+            await fulfillment(of: [removing], timeout: 2)
+            let entered = expectation(description: "Following schedule entered its actor")
+            let scheduling = Task {
+                try await scheduler.scheduleAfterActorEntry(program: makeProgram(id: "new", start: hours(5)),
+                                                            channel: makeChannel(id: "fixtures"), now: base, entered: entered)
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            await scheduler.mutationEntryCheckpoint()
+            let held = await center.snapshot()
+            XCTAssertEqual(held, originals.sorted { $0.identifier < $1.identifier })
+            let heldOperations = await center.operationLog()
+            XCTAssertFalse(heldOperations.contains { $0.hasPrefix("add:") })
+            await center.releaseHeldRemoval()
+            let removedCount = await cancellation.value
+            XCTAssertEqual(removedCount, cancelAll ? originals.count : 1)
+            let added = try await scheduling.value
+            let expected = (cancelAll ? [] : Array(originals.dropLast())) + [added]
+            let remaining = await center.snapshot()
+            XCTAssertEqual(remaining, expected.sorted { $0.identifier < $1.identifier })
+            let operations = await center.operationLog()
+            XCTAssertEqual(operations.last, "add:" + added.identifier)
+            XCTAssertEqual(operations.filter { $0.hasPrefix("remove:") }.count, removedCount)
+        }
+    }
+
+    func testCancelledQueuedMutationReleasesPermitAndPreservesUpdateCleanup() async throws {
+        for updating in [false, true] {
+            let originals = fullProgramQueue()
+            let center = TransactionalNotificationCenter(requests: originals)
+            let scheduler = ProgramNotificationScheduler(center: center)
+            let waitingScheduler = ProgramNotificationScheduler(center: center)
+            let holderID = ProgramNotificationScheduler.identifier(channelID: "fixtures", programID: "holder")
+            let adding = expectation(description: "Holder add is suspended")
+            await center.holdNextAdd(identifier: holderID, entered: adding)
+            let holder = Task {
+                try await scheduler.schedule(program: makeProgram(id: "holder", start: hours(5)),
+                                             channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+            }
+            await fulfillment(of: [adding], timeout: 2)
+            let entered = expectation(description: "Waiter entered before cancellation")
+            let programID = updating ? "seed-0" : "abandoned"
+            let waiter = Task {
+                try await waitingScheduler.scheduleAfterActorEntry(program: makeProgram(id: programID, start: hours(4)),
+                                                                   channel: makeChannel(id: "fixtures"), now: base,
+                                                                   updating: updating, entered: entered)
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            await waitingScheduler.mutationEntryCheckpoint()
+            waiter.cancel()
+            await center.releaseHeldAdd()
+            let accepted = try await holder.value
+            if case .failure(let error) = await waiter.result {
+                XCTAssertTrue(error is CancellationError)
+            } else {
+                XCTFail("A cancelled waiter must not submit its schedule")
+            }
+            let following = try await scheduler.schedule(program: makeProgram(id: "following", start: hours(3)),
+                                                         channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+            let secondRemovedID = updating ? originals[0].identifier : originals[originals.count - 2].identifier
+            let expected = originals.filter { $0.identifier != originals.last?.identifier && $0.identifier != secondRemovedID }
+                + [accepted, following]
+            let remaining = await center.snapshot()
+            XCTAssertEqual(remaining, expected.sorted { $0.identifier < $1.identifier })
+            let operations = await center.operationLog()
+            let rejectedID = ProgramNotificationScheduler.identifier(channelID: "fixtures", programID: programID)
+            XCTAssertFalse(operations.contains("add:" + rejectedID))
+            let peak = await center.peakCount()
+            XCTAssertEqual(peak, ProgramNotificationScheduler.maximumPendingNotifications)
+        }
+    }
+
+    func testDeniedUpdateReleasesMutationAfterItsStaleReservationCleanup() async throws {
+        for (state, expectedError) in [
+            (ProgramNotificationAuthorizationState.denied, ProgramNotificationSchedulerError.authorizationDenied),
+            (.notDetermined, .authorizationRequired)
+        ] {
+            let originals = Array(fullProgramQueue().prefix(2))
+            let center = TransactionalNotificationCenter(requests: originals)
+            let scheduler = ProgramNotificationScheduler(center: center)
+            await center.setAuthorizationState(state)
+            do {
+                _ = try await scheduler.update(program: makeProgram(id: "seed-0", start: hours(5)),
+                                               channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+                XCTFail("The permission error must propagate")
+            } catch let error as ProgramNotificationSchedulerError {
+                XCTAssertEqual(error, expectedError)
+            }
+            await center.setAuthorizationState(.authorized)
+            let added = try await scheduler.schedule(program: makeProgram(id: "following", start: hours(4)),
+                                                     channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+            let remaining = await center.snapshot()
+            XCTAssertEqual(remaining, [originals[1], added].sorted { $0.identifier < $1.identifier })
+        }
+    }
+
+    func testConcurrentSchedulersKeepTheVisibleQueueAt64() async throws {
+        let originals = Array(fullProgramQueue().dropLast())
+        let center = TransactionalNotificationCenter(requests: originals)
+        let firstScheduler = ProgramNotificationScheduler(center: center)
+        let secondScheduler = ProgramNotificationScheduler(center: center)
+        let firstID = ProgramNotificationScheduler.identifier(channelID: "fixtures", programID: "first")
+        let adding = expectation(description: "First add has observed the 63-slot queue")
+        await center.holdNextAdd(identifier: firstID, entered: adding)
+        let first = Task {
+            try await firstScheduler.schedule(program: makeProgram(id: "first", start: hours(5)),
+                                              channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+        }
+        await fulfillment(of: [adding], timeout: 2)
+        let entered = expectation(description: "Second schedule entered while the first is held")
+        let second = Task {
+            try await secondScheduler.scheduleAfterActorEntry(program: makeProgram(id: "second", start: hours(4)),
+                                                              channel: makeChannel(id: "fixtures"), now: base, entered: entered)
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        await secondScheduler.mutationEntryCheckpoint()
+        let heldOperations = await center.operationLog()
+        XCTAssertEqual(heldOperations, ["add:" + firstID])
+        await center.releaseHeldAdd()
+        let firstAdded = try await first.value
+        let secondAdded = try await second.value
+        let expected = Array(originals.dropLast()) + [firstAdded, secondAdded]
+        let remaining = await center.snapshot()
+        XCTAssertEqual(remaining, expected.sorted { $0.identifier < $1.identifier })
+        let peak = await center.peakCount()
+        XCTAssertEqual(peak, ProgramNotificationScheduler.maximumPendingNotifications)
+    }
+
+    func testOlderFailedUpdateCannotDeleteTheFollowingReplacement() async throws {
+        let originals = Array(fullProgramQueue().prefix(2))
+        let center = TransactionalNotificationCenter(requests: originals)
+        let firstScheduler = ProgramNotificationScheduler(center: center)
+        let secondScheduler = ProgramNotificationScheduler(center: center)
+        let identifier = originals[0].identifier
+        let adding = expectation(description: "Older update add is held before failure")
+        await center.failNextAdd(identifier: identifier, code: 101)
+        await center.holdNextAdd(identifier: identifier, entered: adding)
+        let older = Task {
+            try await firstScheduler.update(program: makeProgram(id: "seed-0", start: hours(5)),
+                                            channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+        }
+        await fulfillment(of: [adding], timeout: 2)
+        let entered = expectation(description: "Newer update entered its actor")
+        let newer = Task {
+            try await secondScheduler.scheduleAfterActorEntry(program: makeProgram(id: "seed-0", start: hours(6)),
+                                                              channel: makeChannel(id: "fixtures"), now: base,
+                                                              updating: true, entered: entered)
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        await secondScheduler.mutationEntryCheckpoint()
+        await center.releaseHeldAdd()
+        if case .failure(let error) = await older.result {
+            XCTAssertEqual((error as NSError).code, 101)
+        } else {
+            XCTFail("Expected the older update's configured failure")
+        }
+        let replacement = try await newer.value
+        let remaining = await center.snapshot()
+        XCTAssertEqual(remaining, [replacement, originals[1]].sorted { $0.identifier < $1.identifier })
+        let operations = await center.operationLog()
+        XCTAssertEqual(operations, ["add:" + identifier, "remove:" + identifier, "add:" + identifier])
+    }
+
+    func testAcceptedAddIsNotReportedAsCancelledAfterItsCommit() async throws {
+        let center = TransactionalNotificationCenter(requests: [])
+        let scheduler = ProgramNotificationScheduler(center: center)
+        let identifier = ProgramNotificationScheduler.identifier(channelID: "fixtures", programID: "accepted")
+        let adding = expectation(description: "Center is processing the submitted add")
+        await center.holdNextAdd(identifier: identifier, entered: adding)
+        let scheduling = Task {
+            try await scheduler.schedule(program: makeProgram(id: "accepted", start: hours(5)),
+                                         channel: makeChannel(id: "fixtures"), leadTime: .atStart, now: base)
+        }
+        await fulfillment(of: [adding], timeout: 2)
+        scheduling.cancel()
+        await center.releaseHeldAdd()
+        let accepted = try await scheduling.value
+        let pending = await center.snapshot()
+        XCTAssertEqual(pending, [accepted], "A successful center add is the commit point, not a false cancellation result")
+        await scheduler.cancel(identifier: identifier)
+        let afterExplicitCancel = await center.snapshot()
+        XCTAssertTrue(afterExplicitCancel.isEmpty)
+    }
+
     private func fullProgramQueue() -> [ProgramNotificationRequest] {
         (0..<ProgramNotificationScheduler.maximumPendingNotifications).map { index in
             ProgramNotificationRequest(
@@ -360,6 +598,10 @@ private actor TransactionalNotificationCenter: ProgramNotificationCenter {
     private var addEntered: XCTestExpectation?
     private var addContinuation: CheckedContinuation<Void, Never>?
     private var addReleased = false
+    private var heldRemoveIdentifier: String?
+    private var removeEntered: XCTestExpectation?
+    private var removeContinuation: CheckedContinuation<Void, Never>?
+    private var removeReleased = false
 
     init(requests: [ProgramNotificationRequest]) {
         self.requests = Dictionary(uniqueKeysWithValues: requests.map { ($0.identifier, $0) })
@@ -398,10 +640,19 @@ private actor TransactionalNotificationCenter: ProgramNotificationCenter {
     }
 
     func removePendingRequests(withIdentifiers identifiers: [String]) async {
-        for identifier in identifiers {
-            operations.append("remove:" + identifier)
-            requests.removeValue(forKey: identifier)
+        for identifier in identifiers { operations.append("remove:" + identifier) }
+        if let held = heldRemoveIdentifier, identifiers.contains(held) {
+            heldRemoveIdentifier = nil
+            if removeReleased {
+                removeEntered?.fulfill()
+            } else {
+                await withCheckedContinuation { continuation in
+                    removeContinuation = continuation
+                    removeEntered?.fulfill()
+                }
+            }
         }
+        for identifier in identifiers { requests.removeValue(forKey: identifier) }
     }
 
     func pendingRequests() async -> [ProgramNotificationPendingRequest] {
@@ -427,6 +678,18 @@ private actor TransactionalNotificationCenter: ProgramNotificationCenter {
         addContinuation = nil
     }
 
+    func holdNextRemoval(containing identifier: String, entered: XCTestExpectation) {
+        heldRemoveIdentifier = identifier
+        removeEntered = entered
+        removeReleased = false
+    }
+
+    func releaseHeldRemoval() {
+        removeReleased = true
+        removeContinuation?.resume()
+        removeContinuation = nil
+    }
+
     func snapshot() -> [ProgramNotificationRequest] {
         requests.values.sorted { $0.identifier < $1.identifier }
     }
@@ -434,4 +697,35 @@ private actor TransactionalNotificationCenter: ProgramNotificationCenter {
     func operationLog() -> [String] { operations }
 
     func peakCount() -> Int { maximumCount }
+}
+
+/// Test-only actor entry handshakes, not production APIs or a fake scheduler.
+/// After the signal, forwarding and acquireMutation enqueue on the same actor
+/// before its first suspension. A checkpoint on that actor confirms this turn
+/// has yielded before the test releases a holder on another scheduler instance.
+private extension ProgramNotificationScheduler {
+    func scheduleAfterActorEntry(
+        program: TVerLiveProgram,
+        channel: TVerLiveChannel,
+        now: Date,
+        updating: Bool = false,
+        entered: XCTestExpectation
+    ) async throws -> ProgramNotificationRequest {
+        entered.fulfill()
+        if updating {
+            return try await update(program: program, channel: channel, leadTime: .atStart, now: now)
+        }
+        return try await schedule(program: program, channel: channel, leadTime: .atStart, now: now)
+    }
+
+    func cancelAfterActorEntry(identifier: String?, entered: XCTestExpectation) async -> Int {
+        entered.fulfill()
+        if let identifier {
+            await cancel(identifier: identifier)
+            return 1
+        }
+        return await cancelAll()
+    }
+
+    func mutationEntryCheckpoint() {}
 }
