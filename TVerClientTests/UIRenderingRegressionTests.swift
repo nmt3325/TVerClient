@@ -198,6 +198,21 @@ final class UIRenderingRegressionTests: XCTestCase {
         fixture.player.stop()
         XCTAssertEqual(snapshots.count, 19)
 
+        // Keep every original initial-position capture. Large text puts the
+        // badges below that viewport, so inspect the real list at its bottom too.
+        try await record("shared-row-presence-320-accessibility-scrolled",
+                         view: AnyView(sharedComponents), fixture: fixture,
+                         size: CGSize(width: 320, height: 640), dynamicType: .accessibility3,
+                         scrollsToBottom: true)
+        try await record("shared-row-presence-320-accessibility-dark-scrolled",
+                         view: AnyView(sharedComponents), fixture: fixture,
+                         size: CGSize(width: 320, height: 640), dynamicType: .accessibility3,
+                         colorScheme: .dark, scrollsToBottom: true)
+        try await record("shared-row-presence-320-accessibility5-scrolled",
+                         view: AnyView(sharedComponents), fixture: fixture,
+                         size: narrowPhone, dynamicType: .accessibility5, scrollsToBottom: true)
+        XCTAssertEqual(snapshots.count, 22)
+
         let data = try JSONEncoder().encode(snapshots)
         try data.write(to: fixture.outputDirectory.appendingPathComponent("ui-rendering-manifest.json"), options: .atomic)
         let summary = snapshots.map {
@@ -214,7 +229,7 @@ final class UIRenderingRegressionTests: XCTestCase {
         _ name: String, view: AnyView, fixture: UIRenderingFixture, size: CGSize,
         dynamicType: DynamicTypeSize = .large, colorScheme: ColorScheme = .light,
         verticalSizeClass: UserInterfaceSizeClass = .regular,
-        validatesPlayerBounds: Bool = false
+        validatesPlayerBounds: Bool = false, scrollsToBottom: Bool = false
     ) async throws {
         let root = AnyView(view
             .environmentObject(fixture.downloads)
@@ -247,6 +262,31 @@ final class UIRenderingRegressionTests: XCTestCase {
         let rootView = try XCTUnwrap(harness.rootView)
         XCTAssertEqual(rootView.bounds.size, size)
         XCTAssertFalse(rootView.subviews.isEmpty, "Expected a mounted production hierarchy")
+        if scrollsToBottom {
+            let candidates = descendants(of: rootView, matching: UIScrollView.self).filter {
+                !$0.isHidden && $0.alpha > 0.01 && $0.isScrollEnabled &&
+                    $0.bounds.width > size.width * 0.5 &&
+                    $0.contentSize.height + $0.adjustedContentInset.top + $0.adjustedContentInset.bottom > $0.bounds.height + 1
+            }
+            XCTAssertEqual(candidates.count, 1, "Expected one scrollable production list")
+            let scrollView = try XCTUnwrap(candidates.first)
+            let initialOffset = scrollView.contentOffset.y
+            // Recompute after native navigation/inset layout settles. This is
+            // bounded viewport positioning, not simulated physical touch input.
+            for _ in 0..<3 {
+                let bottom = max(-scrollView.adjustedContentInset.top,
+                                 scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+                scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: bottom), animated: false)
+                harness.layout()
+                try await Task.sleep(nanoseconds: 80_000_000)
+                harness.layout()
+            }
+            let bottom = max(-scrollView.adjustedContentInset.top,
+                             scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+            XCTAssertGreaterThan(scrollView.contentOffset.y, initialOffset + 1, "The capture must actually scroll")
+            XCTAssertEqual(scrollView.contentOffset.y, bottom, accuracy: 1, "The capture must reach the list bottom")
+            print("UI_REVIEW_SCROLL name=\(name) initial=\(initialOffset) offset=\(scrollView.contentOffset.y) bottom=\(bottom)")
+        }
         print("UI_REVIEW_GEOMETRY name=\(name) \(harness.geometryDescription)")
 
         if validatesPlayerBounds {
