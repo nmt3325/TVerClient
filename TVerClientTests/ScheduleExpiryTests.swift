@@ -69,6 +69,69 @@ final class ScheduleExpiryTests: XCTestCase {
         XCTAssertNil(ScheduleExpiry.remainingDays(from: "配信期限は未定です", now: now, calendar: calendar))
     }
 
+    func testLegacyBroadcastHoursRollOverIntoTheNextCalendarDay() throws {
+        let now = try date(2026, 12, 31, 23)
+        for hour in 24 ... 28 {
+            XCTAssertEqual(
+                ScheduleExpiry.deadline(from: "12月31日 \(hour):30まで", now: now),
+                try date(2027, 1, 1, hour - 24, 30)
+            )
+        }
+    }
+
+    func testLegacyFullWidthBroadcastTimeIsNormalized() throws {
+        XCTAssertEqual(
+            ScheduleExpiry.deadline(from: "９月８日 ２６：３０まで", now: try date(2026, 9, 8)),
+            try date(2026, 9, 9, 2, 30)
+        )
+    }
+
+    func testLegacyDeadlineRoundTripsTheDisplayedBroadcastLabel() throws {
+        let now = try date(2026, 9, 8, 22)
+        let deadline = try date(2026, 9, 9, 2, 30)
+        let program = TVerProgram(
+            id: "broadcast-deadline", seriesID: nil, title: "Episode", seriesTitle: "Series",
+            description: "", broadcastLabel: "", availableUntil: nil,
+            availableUntilAt: deadline, thumbnailURL: nil
+        )
+        let label = try XCTUnwrap(ScheduleExpiry.deadlineLabel(for: program, now: now))
+        XCTAssertTrue(label.contains("26:30"))
+        XCTAssertEqual(ScheduleExpiry.deadline(from: label, now: now), deadline)
+    }
+
+    func testMalformedLegacyDatesAndTimesDoNotInventADeadline() throws {
+        let now = try date(2026, 9, 8)
+        for label in [
+            "2月30日 12:00まで", "4月31日まで", "13月1日まで",
+            "9月8日 29:00まで", "9月8日 23:60まで", "9月8日 1:2まで",
+            "9月8日 123:00まで", "9月8日 23:590まで",
+        ] {
+            XCTAssertNil(ScheduleExpiry.deadline(from: label, now: now), label)
+            XCTAssertNil(ScheduleExpiry.remainingDays(from: label, now: now), label)
+        }
+    }
+
+    func testValidLeapDayAndItsBroadcastRolloverAreRetained() throws {
+        let now = try date(2024, 2, 28)
+        XCTAssertEqual(
+            ScheduleExpiry.deadline(from: "2月29日 26:00まで", now: now),
+            try date(2024, 3, 1, 2)
+        )
+        XCTAssertNil(ScheduleExpiry.deadline(from: "2月29日 12:00まで", now: try date(2026, 2, 28)))
+    }
+
+    func testMalformedLegacyDeadlineKeepsItsLabelWithoutAnUrgentBadge() throws {
+        let now = try date(2026, 9, 8)
+        let label = "9月8日 23:60まで"
+        let program = TVerProgram(
+            id: "unknown-deadline", seriesID: nil, title: "Episode", seriesTitle: "Series",
+            description: "", broadcastLabel: "", availableUntil: label, thumbnailURL: nil
+        )
+        XCTAssertNil(ScheduleExpiry.deadline(for: program, now: now))
+        XCTAssertNil(ScheduleExpiry.badgeText(for: program, now: now))
+        XCTAssertEqual(ScheduleExpiry.deadlineLabel(for: program, now: now), label)
+    }
+
     private func date(
         _ year: Int,
         _ month: Int,

@@ -153,8 +153,10 @@ enum ScheduleExpiry {
         now: Date,
         calendar: Calendar = ScheduleExpiry.calendar
     ) -> Date? {
-        guard let label, !label.isEmpty, let parsed = monthAndDay(in: label) else { return nil }
-        let time = hourAndMinute(in: label)
+        guard let label, !label.isEmpty,
+              let parsed = monthAndDay(in: label),
+              let time = hourAndMinute(in: label)
+        else { return nil }
         let referenceYear = calendar.component(.year, from: now)
         // The label carries no year, so read it as the occurrence closest to
         // now. That keeps a late-December list pointing at next January.
@@ -164,9 +166,15 @@ enum ScheduleExpiry {
                 components.year = year
                 components.month = parsed.month
                 components.day = parsed.day
-                components.hour = time?.hour ?? 23
-                components.minute = time?.minute ?? 59
-                return calendar.date(from: components)
+                guard let day = calendar.date(from: components) else { return nil }
+                // Calendar normalizes impossible dates (e.g. February 30).
+                // Validate the printed date before allowing broadcast-hour rollover.
+                let resolved = calendar.dateComponents([.year, .month, .day], from: day)
+                guard resolved.year == year,
+                      resolved.month == parsed.month,
+                      resolved.day == parsed.day
+                else { return nil }
+                return calendar.date(byAdding: .minute, value: time.hour * 60 + time.minute, to: day)
             }
         return candidates.min { abs($0.timeIntervalSince(now)) < abs($1.timeIntervalSince(now)) }
     }
@@ -232,9 +240,12 @@ enum ScheduleExpiry {
     }
 
     private static func hourAndMinute(in label: String) -> (hour: Int, minute: Int)? {
-        guard let groups = firstMatch(pattern: "([0-9]{1,2}):([0-9]{2})", in: label),
+        let normalized = label.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? label
+        // Only a missing time means end of day; a malformed time is unknown.
+        guard normalized.contains(":") else { return (23, 59) }
+        guard let groups = firstMatch(pattern: "(?<![0-9])([0-9]{1,2}):([0-9]{2})(?![0-9])", in: normalized),
               groups.count == 2,
-              (0 ... 23).contains(groups[0]),
+              (0 ..< (24 + BroadcastDay.boundaryHour)).contains(groups[0]),
               (0 ... 59).contains(groups[1])
         else { return nil }
         return (groups[0], groups[1])
