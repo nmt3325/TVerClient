@@ -142,9 +142,23 @@ enum GuideBroadcastAxis {
         BroadcastDay.timeLabel(for: instant, calendar: calendar)
     }
 
-    /// "25:30〜26:00"。
+    /// Keep compact times within one broadcast day. A slot spanning 05:00
+    /// appears on both days, so both endpoints need their own date context.
     static func timeRangeLabel(for program: TVerLiveProgram) -> String {
-        BroadcastDay.rangeLabel(from: program.startAt, to: program.endAt, calendar: calendar)
+        guard isSameDay(program.startAt, program.endAt) else {
+            return dayAndTimeRangeLabel(for: program)
+        }
+        return BroadcastDay.rangeLabel(from: program.startAt, to: program.endAt, calendar: calendar)
+    }
+
+    /// Full date context for details without duplicating the starting day.
+    /// Late-night hours remain 24...28; dates name broadcast days, not civil days.
+    static func dayAndTimeRangeLabel(for program: TVerLiveProgram) -> String {
+        let head = dayAndTimeLabel(for: program.startAt)
+        let tail = isSameDay(program.startAt, program.endAt)
+            ? timeLabel(for: program.endAt)
+            : dayAndTimeLabel(for: program.endAt)
+        return "\(head)〜\(tail)"
     }
 
     /// "今日" / "明日" / "昨日"。放送日で判定するので、深夜1時でも前日の欄が今日になる。

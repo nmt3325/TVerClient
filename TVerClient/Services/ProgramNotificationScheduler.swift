@@ -30,6 +30,45 @@ struct ProgramNotificationLeadTime: RawRepresentable, Equatable, Hashable, Senda
     static let fiveMinutes = ProgramNotificationLeadTime(rawValue: 5 * 60)!
     static let tenMinutes = ProgramNotificationLeadTime(rawValue: 10 * 60)!
     static let thirtyMinutes = ProgramNotificationLeadTime(rawValue: 30 * 60)!
+
+    static let choices: [Self] = [.thirtyMinutes, .tenMinutes, .fiveMinutes, .atStart]
+
+    /// Calendar notification triggers have second precision; the program may not.
+    static func matching(fireDate: Date, programStart: Date) -> Self? {
+        let interval = programStart.timeIntervalSince(fireDate)
+        return choices.first { abs(interval - $0.rawValue) < 1 }
+    }
+}
+
+/// Only the latest detail read may publish reservation state. A user's lead
+/// selection invalidates selection restoration, not the reservation itself.
+struct ProgramNotificationDetailReadState {
+    struct Token {
+        fileprivate let reservationRevision: UInt64
+        fileprivate let selectionRevision: UInt64
+        fileprivate let readRevision: UInt64
+    }
+
+    private var reservationRevision: UInt64 = 0
+    private var selectionRevision: UInt64 = 0
+    private var readRevision: UInt64 = 0
+
+    mutating func beginRead() -> Token {
+        readRevision &+= 1
+        return Token(reservationRevision: reservationRevision,
+                     selectionRevision: selectionRevision, readRevision: readRevision)
+    }
+
+    mutating func beginMutation() { reservationRevision &+= 1 }
+    mutating func selectLeadTime() { selectionRevision &+= 1 }
+
+    func accepts(_ token: Token) -> Bool {
+        token.reservationRevision == reservationRevision && token.readRevision == readRevision
+    }
+
+    func canRestoreLeadTime(_ token: Token) -> Bool {
+        accepts(token) && token.selectionRevision == selectionRevision
+    }
 }
 
 struct ProgramNotificationRequest: Equatable, Sendable {

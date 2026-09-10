@@ -134,6 +134,39 @@ final class CatchUpLookupTests: XCTestCase {
         XCTAssertEqual(CatchUpMatcher.similarity(lhs, ""), 0.0)
     }
 
+    func testOnlyPreviousWeekEpisodeIsNotOfferedForTheRequestedBroadcast() {
+        let previous = CatchUpEpisodeCandidate(
+            id: "previous-week", seriesID: "sr542nxzof", title: "前回の放送",
+            seriesTitle: "アメトーーク！", broadcastDateLabel: "8月20日(木)放送分",
+            endAt: 9_999_999_999
+        )
+        XCTAssertNil(CatchUpMatcher.bestMatch(
+            among: [previous], seriesTitle: "アメトーーク！", episodeTitle: "アメトーーク！",
+            broadcastDate: Self.jstDate(month: 8, day: 27)
+        ))
+    }
+
+    func testLateNightMatchingAcceptsCivilAndBroadcastDayLabelsButNotThePreviousWeek() {
+        let lateNight = Self.jstDate(month: 8, day: 27).addingTimeInterval(2 * 60 * 60)
+        let previousBroadcastDay = Self.ametalk
+        let sameCivilDay = CatchUpEpisodeCandidate(
+            id: "civil-day", seriesID: "sr542nxzof", title: previousBroadcastDay.title,
+            seriesTitle: previousBroadcastDay.seriesTitle, broadcastDateLabel: "8月28日(金)放送分", endAt: nil
+        )
+        let previousWeek = CatchUpEpisodeCandidate(
+            id: "prior-week", seriesID: "sr542nxzof", title: previousBroadcastDay.title,
+            seriesTitle: previousBroadcastDay.seriesTitle, broadcastDateLabel: "8月20日(木)放送分", endAt: nil
+        )
+        func match(_ candidate: CatchUpEpisodeCandidate, at date: Date) -> CatchUpEpisodeCandidate? {
+            CatchUpMatcher.bestMatch(among: [candidate], seriesTitle: "アメトーーク！",
+                episodeTitle: previousBroadcastDay.title, broadcastDate: date)
+        }
+        XCTAssertNotNil(match(previousBroadcastDay, at: lateNight))
+        XCTAssertNotNil(match(sameCivilDay, at: lateNight))
+        XCTAssertNil(match(previousWeek, at: lateNight))
+        XCTAssertNil(match(previousBroadcastDay, at: lateNight.addingTimeInterval(4 * 60 * 60)))
+    }
+
     // MARK: - Fixtures
 
     private static let ametalk = CatchUpEpisodeCandidate(

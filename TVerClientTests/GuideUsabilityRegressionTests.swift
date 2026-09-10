@@ -3,6 +3,50 @@ import XCTest
 @testable import TVerClient
 
 final class GuideUsabilityRegressionTests: XCTestCase {
+    func testBroadcastRangesKeepNightHoursAndDisambiguateTheFiveAMBoundary() {
+        func instant(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+            AccessibilityTestSupport.date(year: 2026, month: 9, day: day, hour: hour, minute: minute)
+        }
+        let cases: [(Date, Date, String, String)] = [
+            (instant(9, 20), instant(9, 21), "20:00〜21:00", "9月9日(水) 20:00〜21:00"),
+            (instant(9, 23, 30), instant(10, 0, 30), "23:30〜24:30", "9月9日(水) 23:30〜24:30"),
+            (instant(10, 4, 30), instant(10, 4, 59), "28:30〜28:59", "9月9日(水) 28:30〜28:59"),
+            (instant(10, 4, 30), instant(10, 5), "9月9日(水) 28:30〜9月10日(木) 5:00", "9月9日(水) 28:30〜9月10日(木) 5:00"),
+            (instant(10, 4, 30), instant(10, 19), "9月9日(水) 28:30〜9月10日(木) 19:00", "9月9日(水) 28:30〜9月10日(木) 19:00"),
+            (instant(10, 5), instant(10, 19), "5:00〜19:00", "9月10日(木) 5:00〜19:00"),
+            (instant(9, 20), instant(11, 5), "9月9日(水) 20:00〜9月11日(金) 5:00", "9月9日(水) 20:00〜9月11日(金) 5:00")
+        ]
+        for (start, end, compact, detailed) in cases {
+            let slot = TVerLiveProgram(
+                id: "range", title: "配信休止", seriesTitle: "配信休止", description: "",
+                startAt: start, endAt: end, thumbnailURL: nil, isPause: true
+            )
+            XCTAssertEqual(GuideBroadcastAxis.timeRangeLabel(for: slot), compact)
+            XCTAssertEqual(GuideBroadcastAxis.dayAndTimeRangeLabel(for: slot), detailed)
+            XCTAssertEqual(ProgramGuideListRowMetadata(channel: station("ntv", name: "日テレ"), program: slot).timeRange, compact)
+        }
+    }
+
+    func testPauseRangeDateContextDoesNotChangeOverlapOrBoundaryMembership() {
+        let start = AccessibilityTestSupport.date(year: 2026, month: 9, day: 10, hour: 4, minute: 30)
+        let end = AccessibilityTestSupport.date(year: 2026, month: 9, day: 10, hour: 19)
+        let previousDay = AccessibilityTestSupport.date(year: 2026, month: 9, day: 9, hour: 5)
+        let nextDay = AccessibilityTestSupport.date(year: 2026, month: 9, day: 10, hour: 5)
+        let pause = TVerLiveProgram(id: "pause-range", title: "配信休止", seriesTitle: "配信休止", description: "",
+                                    startAt: start, endAt: end, thumbnailURL: nil, isPause: true)
+        let channel = TVerGuideChannel(channel: station("ntv", name: "日テレ"), programs: [pause])
+        XCTAssertEqual(BroadcastDay.displayHour(for: start), 28)
+        XCTAssertEqual(GuideBroadcastAxis.dayStart(containing: start), previousDay)
+        XCTAssertEqual(GuideBroadcastAxis.dayStart(containing: nextDay), nextDay)
+        XCTAssertEqual(GuideBroadcastAxis.dates(in: [channel]), [previousDay, nextDay])
+        XCTAssertEqual(GuideBroadcastAxis.programs([pause], on: previousDay).map(\.id), [pause.id])
+        XCTAssertEqual(GuideBroadcastAxis.programs([pause], on: nextDay).map(\.id), [pause.id])
+        let untilBoundary = TVerLiveProgram(id: "boundary-end", title: "配信休止", seriesTitle: "配信休止", description: "",
+                                            startAt: start, endAt: nextDay, thumbnailURL: nil, isPause: true)
+        XCTAssertEqual(GuideBroadcastAxis.dates(in: [TVerGuideChannel(channel: channel.channel, programs: [untilBoundary])]), [previousDay])
+        XCTAssertTrue(GuideBroadcastAxis.programs([untilBoundary], on: nextDay).isEmpty)
+    }
+
     func testCurrentDayUsesFiveAMBoundary() {
         let days = [date(day: 28, hour: 5), date(day: 29, hour: 5)]
         XCTAssertEqual(GuideDayNavigation.currentDate(in: days, now: date(day: 29, hour: 4)), days[0])

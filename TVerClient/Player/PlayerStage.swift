@@ -199,8 +199,8 @@ struct PlayerStage: View {
     /// 中断の告知を映像の上に出すかどうか。縦向きの埋め込みプレイヤーは
     /// 映像が小さいので、下の番組情報側に出したほうが読める。
     var showsContinuityNotice: Bool = true
-    /// Insets captured before a full-screen host expands the video. Ordinary
-    /// inline stages keep their own geometry when no override is supplied.
+    /// Insets captured before a full-screen host expands the video. Inline
+    /// hosts already inset the stage; do not apply their safe area a second time.
     var chromeSafeAreaInsets: EdgeInsets? = nil
     /// A value wrapper keeps existing trailing closures bound to full-screen.
     var recoveryAction: PlayerRecoveryAction? = nil
@@ -257,7 +257,7 @@ struct PlayerStage: View {
                     supportsSeeking: supportsSeeking,
                     isFullScreen: isFullScreen,
                     showsContinuityNotice: showsContinuityNotice,
-                    safeAreaInsets: chromeSafeAreaInsets ?? proxy.safeAreaInsets,
+                    safeAreaInsets: chromeSafeAreaInsets ?? (isFullScreen ? proxy.safeAreaInsets : EdgeInsets()),
                     recoveryAction: recoveryAction,
                     onToggleFullScreen: onToggleFullScreen,
                     onBackgroundSingleTap: { handleBackgroundSingleTap() },
