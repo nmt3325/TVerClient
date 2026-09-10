@@ -486,6 +486,34 @@ final class ProgramNotificationSlotRegressionTests: XCTestCase {
         XCTAssertTrue(afterExplicitCancel.isEmpty)
     }
 
+    func testRejectedUserLeadEditsPreserveTheExistingRequestOnPermissionAndAddFailures() async throws {
+        for denied in [true, false] {
+            let original = try XCTUnwrap(fullProgramQueue().first)
+            let center = TransactionalNotificationCenter(requests: [original])
+            let scheduler = ProgramNotificationScheduler(center: center)
+            if denied {
+                await center.setAuthorizationState(.denied)
+            } else {
+                await center.failNextAdd(identifier: original.identifier, code: 109)
+            }
+            do {
+                _ = try await scheduler.schedule(program: makeProgram(id: "seed-0", start: hours(10)),
+                                                 channel: makeChannel(id: "fixtures"), leadTime: .fiveMinutes, now: base)
+                XCTFail("The rejected user edit must report failure")
+            } catch {
+                if denied {
+                    XCTAssertEqual(error as? ProgramNotificationSchedulerError, .authorizationDenied)
+                } else {
+                    XCTAssertEqual((error as NSError).code, 109)
+                }
+            }
+            let remaining = await center.snapshot()
+            XCTAssertEqual(remaining, [original])
+            let operations = await center.operationLog()
+            XCTAssertFalse(operations.contains("remove:" + original.identifier))
+        }
+    }
+
     private func fullProgramQueue() -> [ProgramNotificationRequest] {
         (0..<ProgramNotificationScheduler.maximumPendingNotifications).map { index in
             ProgramNotificationRequest(

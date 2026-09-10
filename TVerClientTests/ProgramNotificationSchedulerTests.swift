@@ -200,6 +200,77 @@ final class ProgramNotificationSchedulerTests: XCTestCase {
         XCTAssertEqual(stillPending, [pending], "Cancelling a list load must not cancel the notification itself")
     }
 
+    func testUserLeadTimeEditPastItsDeadlinePreservesTheExistingReservation() async throws {
+        let center = MockProgramNotificationCenter(state: .authorized)
+        let scheduler = ProgramNotificationScheduler(center: center)
+        let program = makeProgram(id: "same-program", start: makeDate(day: 30, hour: 12))
+        let channel = makeChannel(id: "same-channel", program: program)
+        let original = try await scheduler.schedule(program: program, channel: channel,
+                                                     leadTime: .atStart, now: makeDate(day: 30, hour: 11))
+        do {
+            _ = try await scheduler.schedule(program: program, channel: channel,
+                                             leadTime: .fiveMinutes, now: makeDate(day: 30, hour: 11, minute: 57))
+            XCTFail("An expired user-selected lead must be rejected")
+        } catch let error as ProgramNotificationSchedulerError {
+            XCTAssertEqual(error, .notificationTimePassed)
+        }
+        let preserved = await center.request(withIdentifier: original.identifier)
+        XCTAssertEqual(preserved, original, "A rejected form edit must not cancel a valid reservation")
+        let recovered = try await scheduler.schedule(program: program, channel: channel,
+                                                      leadTime: .atStart, now: makeDate(day: 30, hour: 11, minute: 58))
+        XCTAssertEqual(recovered.identifier, original.identifier)
+        let count = await center.requestCount()
+        XCTAssertEqual(count, 1)
+    }
+
+    func testDetailCanRestoreEverySupportedReservedLeadTime() async throws {
+        let center = MockProgramNotificationCenter(state: .authorized)
+        let scheduler = ProgramNotificationScheduler(center: center)
+        let program = makeProgram(id: "reserved", start: makeDate(day: 30, hour: 12))
+        let channel = makeChannel(id: "channel", program: program)
+        for lead in ProgramNotificationLeadTime.choices {
+            let request = try await scheduler.schedule(program: program, channel: channel,
+                                                       leadTime: lead, now: makeDate(day: 30, hour: 10))
+            let reservations = await scheduler.reservations()
+            let reservation = try XCTUnwrap(reservations.first { $0.identifier == request.identifier })
+            XCTAssertEqual(ProgramNotificationLeadTime.matching(fireDate: reservation.fireDate,
+                                                                 programStart: program.startAt), lead)
+            XCTAssertEqual(ProgramNotificationLeadTime.matching(fireDate: reservation.fireDate.addingTimeInterval(-0.75),
+                                                                 programStart: program.startAt), lead)
+        }
+        XCTAssertNil(ProgramNotificationLeadTime.matching(fireDate: program.startAt.addingTimeInterval(-1200),
+                                                          programStart: program.startAt))
+    }
+
+    func testDetailReadCannotRollBackALaterReservationMutation() {
+        var state = ProgramNotificationDetailReadState()
+        let initialEmptyRead = state.beginRead()
+        state.beginMutation()
+        XCTAssertFalse(state.accepts(initialEmptyRead))
+        XCTAssertFalse(state.canRestoreLeadTime(initialEmptyRead))
+        let currentRead = state.beginRead()
+        XCTAssertTrue(state.accepts(currentRead))
+        state.beginMutation()
+        XCTAssertFalse(state.accepts(currentRead), "Cancellation must invalidate older reads too")
+    }
+
+    func testDetailReadDoesNotOverwriteALeadEditedWhileLoading() {
+        var state = ProgramNotificationDetailReadState()
+        let read = state.beginRead()
+        state.selectLeadTime()
+        XCTAssertTrue(state.accepts(read), "Still restore whether an existing reservation can be cancelled")
+        XCTAssertFalse(state.canRestoreLeadTime(read), "Do not replace a user's newer selection")
+    }
+
+    func testOnlyLatestDetailReadCanPublish() {
+        var state = ProgramNotificationDetailReadState()
+        let older = state.beginRead()
+        let newer = state.beginRead()
+        XCTAssertFalse(state.accepts(older))
+        XCTAssertTrue(state.accepts(newer))
+        XCTAssertTrue(state.canRestoreLeadTime(newer))
+    }
+
     private func makeProgram(id: String, start: Date) -> TVerLiveProgram {
         TVerLiveProgram(
             id: id,
@@ -261,6 +332,13 @@ private actor MockProgramNotificationCenter: ProgramNotificationCenter {
     func removePendingRequests(withIdentifiers identifiers: [String]) async {
         for identifier in identifiers {
             requests.removeValue(forKey: identifier)
+        }
+    }
+
+    func pendingRequests() async -> [ProgramNotificationPendingRequest] {
+        requests.values.map {
+            ProgramNotificationPendingRequest(identifier: $0.identifier, fireDate: $0.fireDate,
+                                              title: $0.title, body: $0.body, userInfo: $0.userInfo)
         }
     }
 

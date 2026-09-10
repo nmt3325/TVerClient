@@ -9,6 +9,85 @@ import XCTest
 /// but never replace the independent geometry assertions.
 @MainActor
 final class PlayerFooterLayoutRegressionTests: XCTestCase {
+    func testInline390By844NavigationKeepsFooterOutOfProgramDetails() async throws {
+        let fixture = try FooterLayoutFixture(failing: false)
+        addTeardownBlock { await fixture.tearDown() }
+        await fixture.controller.play(fixture.program)
+        fixture.controller.pause()
+        try await waitUntil("local WAV becomes seekable") {
+            fixture.controller.player.currentItem?.status == .readyToPlay && fixture.controller.canSeek
+        }
+        let screen = NavigationStack {
+            GeometryReader { proxy in
+                VStack(spacing: 0) {
+                    PlayerStage(
+                        playbackController: fixture.controller, pictureInPicture: fixture.pictureInPicture,
+                        model: fixture.chrome, title: fixture.program.title,
+                        accessibilityLabel: "埋め込みプレイヤー",
+                        showsContinuityNotice: false, onToggleFullScreen: {}
+                    )
+                    .frame(width: proxy.size.width, height: 219)
+                    ScrollView {
+                        Text(fixture.program.title).font(.title3.bold()).padding(DS.Spacing.l)
+                    }
+                }
+            }
+            .navigationTitle("視聴")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        // Unlike an isolated zero-inset canvas, this host has navigation, native
+        // safe-area insets and the competing details scroll view below the stage.
+        let host = FooterLayoutHost(
+            root: AnyView(screen.dynamicTypeSize(.large).defaultAppStorage(fixture.defaults)),
+            size: CGSize(width: 390, height: 844), dynamicType: .large,
+            additionalInsets: UIEdgeInsets(top: 44, left: 0, bottom: 34, right: 0)
+        )
+        fixture.host = host
+        try await waitUntil("embedded fullscreen target mounts") {
+            host.layout()
+            guard let root = host.rootView else { return false }
+            return self.descendants(of: root, matching: PlayerFooterLayoutProbeView.self)
+                .contains { $0.element == .fullScreenToggle && !$0.bounds.isEmpty }
+        }
+        for _ in 0..<3 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            host.layout()
+        }
+        let root = try XCTUnwrap(host.rootView)
+        let window = try XCTUnwrap(root.window)
+        let probes = descendants(of: root, matching: PlayerFooterLayoutProbeView.self)
+        let surface = try XCTUnwrap(probes.first { $0.element == .surface })
+        let surfaceRect = surface.convert(surface.bounds, to: root)
+        let details = try XCTUnwrap(descendants(of: root, matching: UIScrollView.self).first)
+        let detailsRect = details.convert(details.bounds, to: root)
+        XCTAssertEqual(surfaceRect.width, 390, accuracy: 0.5)
+        XCTAssertEqual(surfaceRect.height, 219, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(surfaceRect.maxY, detailsRect.minY + 0.5)
+        let footer = probes.filter {
+            $0.element == .elapsedTime || $0.element == .remainingTime || $0.element == .fullScreenToggle
+        }
+        XCTAssertEqual(footer.count, 3)
+        for probe in footer {
+            let rect = probe.convert(probe.bounds, to: root)
+            XCTAssertTrue(surfaceRect.contains(rect), "Inline footer escapes into program details: \(rect)")
+            XCTAssertFalse(rect.intersects(detailsRect))
+        }
+        let toggle = try XCTUnwrap(footer.first { $0.element == .fullScreenToggle })
+        let planes = descendants(of: root, matching: PlayerBackgroundTapView.self).filter(\.isUserInteractionEnabled)
+        XCTAssertEqual(planes.count, 1)
+        // Check the failed centre and the previously successful upper point.
+        // Native hit testing is not synthetic touch recognition or an action invocation.
+        for localPoint in [CGPoint(x: toggle.bounds.midX, y: toggle.bounds.midY),
+                           CGPoint(x: toggle.bounds.midX, y: 5)] {
+            for plane in planes {
+                XCTAssertFalse(plane.point(inside: toggle.convert(localPoint, to: plane), with: nil))
+            }
+            let hit = try XCTUnwrap(window.hitTest(toggle.convert(localPoint, to: window), with: nil))
+            XCTAssertFalse(hit === details || hit.isDescendant(of: details))
+            XCTAssertFalse(hit is PlayerBackgroundTapView)
+        }
+    }
+
     func testInline320By180KeepsPausedAndRetryFootersInsideTheSurface() async throws {
         for failing in [false, true] {
             try await checkLayout(fullScreen: false, dynamicType: .large, failing: failing)
@@ -278,6 +357,8 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         let elapsed = probes.filter { $0.element == .elapsedTime }
         let remaining = probes.filter { $0.element == .remainingTime }
         let closes = probes.filter { $0.element == .fullScreenClose }
+        let toggles = probes.filter { $0.element == .fullScreenToggle }
+        XCTAssertEqual(toggles.count, 1, file: file, line: line)
         XCTAssertEqual(surfaces.count, 1, file: file, line: line)
         XCTAssertEqual(elapsed.count, 1, file: file, line: line)
         XCTAssertEqual(remaining.count, 1, file: file, line: line)
@@ -304,7 +385,8 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
         XCTAssertEqual(controls.count, expected.count, file: file, line: line)
         let scrubbers = descendants(of: root, matching: PlaybackScrubberInteractionView.self)
         XCTAssertEqual(scrubbers.count, 1, file: file, line: line)
-        let targets = controls.map { $0 as UIView } + scrubbers.map { $0 as UIView } + closes.map { $0 as UIView }
+        let targets = controls.map { $0 as UIView } + scrubbers.map { $0 as UIView }
+            + (closes + toggles).map { $0 as UIView }
         let targetRects = targets.map { $0.convert($0.bounds, to: root) }
         for rect in targetRects {
             // Only the existing subpixel rounding allowance, not a smaller target.

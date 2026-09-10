@@ -63,6 +63,7 @@ final class PlaybackController: ObservableObject {
     private let liveResolver: any TVerLiveStreamResolving
     private let audioSession: any PlaybackAudioSessioning
     private let notificationCenter: NotificationCenter
+    private weak var downloadCenter: DownloadCenter?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
@@ -180,6 +181,11 @@ final class PlaybackController: ObservableObject {
     /// 再生の状態をこれで変えてはいけない。
     func requestPlayerPresentation() {
         presentationRequestToken += 1
+    }
+
+    /// The app lifetime owns completion effects, not a visible player screen.
+    func configureDownloads(_ downloadCenter: DownloadCenter) {
+        self.downloadCenter = downloadCenter
     }
 
     func play(_ program: TVerProgram) async {
@@ -319,6 +325,8 @@ final class PlaybackController: ObservableObject {
     /// Natural completion keeps the item for replay but retires every resource
     /// that can continue producing audio or system playback state.
     private func completeCurrentItem() {
+        guard state != .ended else { return }
+        let completedProgramID = currentProgram?.id
         wantsPlayback = false
         shouldResumeAfterInterruption = false
         player.pause()
@@ -327,6 +335,7 @@ final class PlaybackController: ObservableObject {
         transition(to: .ended)
         deactivateAudioSession()
         continuityNotice = PlaybackContinuityNotice(reason: .playedToEnd)
+        if let completedProgramID { downloadCenter?.markWatched(completedProgramID) }
     }
 
     private func clearNowPlayingInfo() {
@@ -375,6 +384,15 @@ final class PlaybackController: ObservableObject {
     /// instead cancels the previous one forever and the picture never
     /// catches up with the finger.
     func seekToTime(_ time: CMTime, tolerance: CMTime = .zero) {
+        // A completed pass may seek to the same previously acknowledged target.
+        if state == .ended, !isSeekInProgress { seeker.reset() }
+        // Choosing a new position after completion is a paused seek, not a
+        // replay request. Clear the end latch before the asynchronous seek.
+        if state == .ended, let duration, time.seconds.isFinite,
+           time.seconds >= 0, time.seconds < duration - 0.05 {
+            continuityNotice = nil
+            transition(to: .paused)
+        }
         guard let next = seeker.request(time, tolerance: tolerance) else { return }
         isSeeking = true
         performSeek(to: next, tolerance: seeker.chaseTolerance)
@@ -869,8 +887,15 @@ final class PlaybackController: ObservableObject {
     /// True when the playhead already reached the end of a finite item.
     private func hasPlayedToEnd(_ item: AVPlayerItem) -> Bool {
         guard !isLive else { return false }
-        if state == .ended { return true }
         let duration = item.duration.seconds
+        // The AVPlayer clock can still be at the end when Play immediately
+        // follows a seek. The user's pending position outranks that old clock.
+        if isSeekInProgress {
+            let target = seeker.chaseTime.seconds
+            return duration.isFinite && duration > 0 && target.isFinite
+                && target >= duration - 0.05
+        }
+        if state == .ended { return true }
         let current = item.currentTime().seconds
         guard duration.isFinite, duration > 0, current.isFinite else { return false }
         return current >= duration - 0.05

@@ -4,12 +4,88 @@ import UIKit
 import XCTest
 @testable import TVerClient
 
-/// Opt-in review artifacts, not pixel-baseline tests. Run only with
-/// TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 when invoking xcodebuild (it forwards
-/// RECORD_UI_SNAPSHOTS=1 to the test process). The fixtures inject offline
-/// services and do not request a live stream.
+/// Native layout regressions and opt-in review artifacts, not pixel baselines.
+/// Only the snapshot test requires TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 when
+/// invoking xcodebuild (forwarded as RECORD_UI_SNAPSHOTS=1). Fixtures use
+/// offline services and do not request a live stream.
 @MainActor
 final class UIRenderingRegressionTests: XCTestCase {
+    func testLibraryBatchRemovalAvoidsNativeTabsWithAndWithoutPresence() async throws {
+        let fixture = try UIRenderingFixture()
+        addTeardownBlock { await fixture.tearDown() }
+        let program = fixture.service.schedule[0].programs[0]
+        _ = fixture.downloads.start(program)
+        await fixture.downloads.waitForPendingResolutions()
+        fixture.driver.onEvent?(.finished(programID: program.id, location: fixture.localAsset))
+        XCTAssertTrue(fixture.downloads.state(for: program.id).isFinished)
+
+        for dynamicType in [DynamicTypeSize.large, .accessibility5] {
+            for showsPresence in [false, true] {
+                let screen = TabView(selection: .constant(RootTab.library)) {
+                    Text("見逃し").tabItem { Label("見逃し", systemImage: "play.rectangle") }.tag(RootTab.catchUp)
+                    Text("番組表").tabItem { Label("番組表", systemImage: "calendar") }.tag(RootTab.guide)
+                    Text("ライブ").tabItem { Label("ライブ", systemImage: "tv") }.tag(RootTab.live)
+                    LibraryView(libraryStore: fixture.library, playbackController: fixture.player,
+                                initialSelection: [.saved(program.id)])
+                        // Same placement as RootTabView: outside Library's NavigationStack.
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            if showsPresence {
+                                PlaybackPresenceBar(
+                                    presence: PlaybackPresence(source: .catchUp(programID: program.id),
+                                                               title: program.title, subtitle: "一時停止中", isPlaying: false),
+                                    onToggle: {}, onStop: {}, onOpen: {}
+                                )
+                                .background(UIRenderingBoundsProbe(identifier: "library-test.presence"))
+                            }
+                        }
+                        .tabItem { Label("ライブラリ", systemImage: "rectangle.stack") }.tag(RootTab.library)
+                }
+                .environmentObject(fixture.downloads)
+                .environmentObject(fixture.subscriptions)
+                .environmentObject(fixture.tabReselection)
+                .dynamicTypeSize(dynamicType)
+                .defaultAppStorage(fixture.defaults)
+                .transaction { $0.disablesAnimations = true }
+                let host = UIRenderingHost(root: AnyView(screen), size: CGSize(width: 390, height: 844))
+                fixture.mountedHost = host
+                for _ in 0..<4 {
+                    try await Task.sleep(nanoseconds: 80_000_000)
+                    host.layout()
+                }
+                let root = try XCTUnwrap(host.rootView)
+                let window = try XCTUnwrap(root.window)
+                let buttons = descendants(of: root, matching: LibrarySelectionLayoutProbeView.self)
+                XCTAssertEqual(buttons.count, 1)
+                let button = try XCTUnwrap(buttons.first)
+                XCTAssertFalse(button.isUserInteractionEnabled)
+                let buttonRect = button.convert(button.bounds, to: root)
+                let tabBar = try XCTUnwrap(descendants(of: root, matching: UITabBar.self).first { !$0.isHidden })
+                let tabRect = tabBar.convert(tabBar.bounds, to: root)
+                XCTAssertGreaterThanOrEqual(buttonRect.width, 44)
+                XCTAssertGreaterThanOrEqual(buttonRect.height, 44)
+                XCTAssertTrue(root.bounds.contains(buttonRect))
+                XCTAssertLessThanOrEqual(buttonRect.maxY, tabRect.minY)
+                if showsPresence {
+                    let presence = try XCTUnwrap(descendants(of: root, matching: UIRenderingBoundsProbeView.self)
+                        .first { $0.accessibilityIdentifier == "library-test.presence" })
+                    let presenceRect = presence.convert(presence.bounds, to: root)
+                    XCTAssertLessThanOrEqual(buttonRect.maxY, presenceRect.minY)
+                    XCTAssertLessThanOrEqual(presenceRect.maxY, tabRect.minY)
+                }
+                // The reported centre and left side must not route into another tab.
+                for localPoint in [CGPoint(x: button.bounds.midX, y: button.bounds.midY),
+                                   CGPoint(x: 8, y: button.bounds.midY)] {
+                    let hit = try XCTUnwrap(window.hitTest(button.convert(localPoint, to: window), with: nil))
+                    XCTAssertFalse(hit === tabBar || hit.isDescendant(of: tabBar))
+                }
+                XCTAssertTrue(fixture.downloads.state(for: program.id).isFinished,
+                              "Layout and hit-test probes must never perform deletion")
+                await host.tearDown()
+                fixture.mountedHost = nil
+            }
+        }
+    }
+
     private struct SnapshotRecord: Codable {
         let filename: String
         let width: Int
@@ -309,11 +385,14 @@ final class UIRenderingRegressionTests: XCTestCase {
             let probes = descendants(of: rootView, matching: PlayerFooterLayoutProbeView.self)
             let times = probes.filter { $0.element == .elapsedTime || $0.element == .remainingTime }
             let closes = probes.filter { $0.element == .fullScreenClose }
+            let toggles = probes.filter { $0.element == .fullScreenToggle }
             XCTAssertEqual(times.count, 2)
+            XCTAssertEqual(toggles.count, 1)
             if name.contains("fullscreen") { XCTAssertEqual(closes.count, 1) }
-            let targets = controls.map { $0 as UIView } + scrubbers.map { $0 as UIView } + closes.map { $0 as UIView }
+            let targets = controls.map { $0 as UIView } + scrubbers.map { $0 as UIView }
+                + (closes + toggles).map { $0 as UIView }
             let controlRects = targets.map { $0.convert($0.bounds, to: rootView) }
-            for close in closes {
+            for close in closes + toggles {
                 XCTAssertFalse(close.isUserInteractionEnabled)
                 let rect = close.convert(close.bounds, to: rootView)
                 XCTAssertGreaterThanOrEqual(rect.width + 0.000_001, 44)
@@ -374,6 +453,22 @@ final class UIRenderingRegressionTests: XCTestCase {
             ((child as? T).map { [$0] } ?? []) + descendants(of: child, matching: type)
         }
     }
+}
+
+@MainActor
+private final class UIRenderingBoundsProbeView: UIView {}
+
+@MainActor
+private struct UIRenderingBoundsProbe: UIViewRepresentable {
+    let identifier: String
+    func makeUIView(context: Context) -> UIRenderingBoundsProbeView {
+        let view = UIRenderingBoundsProbeView()
+        view.accessibilityIdentifier = identifier
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        return view
+    }
+    func updateUIView(_ view: UIRenderingBoundsProbeView, context: Context) {}
 }
 
 @MainActor

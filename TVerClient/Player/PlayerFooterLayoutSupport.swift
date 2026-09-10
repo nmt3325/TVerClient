@@ -5,7 +5,7 @@ import UIKit
 /// markers. Text probes sit directly behind fixed-size intrinsic Text bounds;
 /// they cannot consume a touch or change the existing control-marker count.
 enum PlayerFooterLayoutElement: String {
-    case surface, elapsedTime, remainingTime, fullScreenClose
+    case surface, elapsedTime, remainingTime, fullScreenClose, fullScreenToggle
 }
 
 @MainActor

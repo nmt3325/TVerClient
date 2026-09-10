@@ -20,6 +20,7 @@ struct PlaybackView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var isFullScreenPresented = false
     @State private var confirmsUnsubscribe = false
+    @State private var initialPlaybackProgramID: String?
     @ScaledMetric(relativeTo: .subheadline) private var minimumStageHeight: CGFloat = 180
 
     init(
@@ -87,21 +88,18 @@ struct PlaybackView: View {
                 .accessibilityHint("共有、公式ページ、再生の停止")
             }
         }
-        .modifier(PlaybackPictureInPictureSurfaceBinding(
-            controller: playbackController,
-            coordinator: pictureInPicture
-        ))
         .task(id: program.id) {
+            // A new navigation starts playback; returning to an existing tab
+            // or a stopped detail does not reclaim another program's player.
+            guard !Task.isCancelled, initialPlaybackProgramID != program.id else { return }
+            initialPlaybackProgramID = program.id
             libraryStore.recordRecentlyViewed(program)
             // 最小化して開き直しただけなら、最初からに戻さず続きを見せる。
             guard !playbackController.isLoaded(program) else { return }
             await playbackController.play(program)
         }
-        // Finishing an episode retires its download so the library can offer to
-        // free the space back up.
-        .onChange(of: playbackController.state) { state in
-            guard isCurrent, state == .ended else { return }
-            downloadCenter.markWatched(program.id)
+        .onChange(of: isCurrent) { current in
+            if !current { isFullScreenPresented = false }
         }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
             FullScreenPlaybackView(
@@ -115,20 +113,55 @@ struct PlaybackView: View {
         }
     }
 
+    @ViewBuilder
     private var stage: some View {
-        PlayerStage(
-            playbackController: playbackController,
-            pictureInPicture: pictureInPicture,
-            model: chrome,
-            title: program.seriesTitle,
-            subtitle: program.title,
-            accessibilityLabel: "\(program.seriesTitle)の動画プレイヤー",
-            supportsSeeking: true,
-            isFullScreen: false,
-            isActiveSurface: !isFullScreenPresented,
-            showsContinuityNotice: isCompactHeight,
-            onToggleFullScreen: { isFullScreenPresented = true }
-        )
+        if isCurrent {
+            PlayerStage(
+                playbackController: playbackController,
+                pictureInPicture: pictureInPicture,
+                model: chrome,
+                title: program.seriesTitle,
+                subtitle: program.title,
+                accessibilityLabel: "\(program.seriesTitle)の動画プレイヤー",
+                supportsSeeking: true,
+                isFullScreen: false,
+                isActiveSurface: !isFullScreenPresented,
+                showsContinuityNotice: isCompactHeight,
+                onToggleFullScreen: { isFullScreenPresented = true }
+            )
+            .modifier(PlaybackPictureInPictureSurfaceBinding(
+                controller: playbackController,
+                coordinator: pictureInPicture
+            ))
+        } else {
+            // Stop releases the shared target. Keep an explicit way to start
+            // this program, without showing controls for somebody else's item.
+            let startAction: () -> Void = { Task { await startProgramPlayback() } }
+            Button(action: startAction) {
+                Label("この番組を再生", systemImage: "play.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minHeight: DS.Size.minimumTapTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(.black)
+            .accessibilityIdentifier("playback.start-program")
+            .background(PlayerControlHitTarget(
+                identifier: "playback.start-program", action: startAction
+            ).allowsHitTesting(false))
+        }
+    }
+
+    /// Explicit button action; unlike appearance, this may take playback ownership.
+    private func startProgramPlayback() async {
+        guard !Task.isCancelled else { return }
+        if playbackController.isLoaded(program) {
+            playbackController.resume()
+        } else {
+            await playbackController.play(program)
+        }
     }
 
     /// 通常は16:9。大きい文字では時間表示の余白を確保するが、

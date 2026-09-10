@@ -601,6 +601,7 @@ struct PlayerOverlayControls: View {
                     model.registerInteraction()
                     onToggleFullScreen()
                 }
+                .background(PlayerFooterLayoutProbe(element: .fullScreenToggle).allowsHitTesting(false))
             }
         }
     }

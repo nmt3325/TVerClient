@@ -138,6 +138,7 @@ struct RootTabView: View {
             storedTab = playerTab.rawValue
         }
         .task {
+            playbackController.configureDownloads(downloadCenter)
             seriesSubscriptions.configureAutomaticDownloads(downloadCenter)
             DownloadNetworkMonitor.shared.start()
             // Download records must be restored before subscription discovery so

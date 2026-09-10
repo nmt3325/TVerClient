@@ -1,6 +1,30 @@
 import SwiftUI
 import UIKit
 
+/// Passive geometry marker behind the real batch-removal button, never a touch owner.
+@MainActor
+final class LibrarySelectionLayoutProbeView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+    }
+
+    required init?(coder: NSCoder) {
+        preconditionFailure("LibrarySelectionLayoutProbeView is created in code only")
+    }
+}
+
+@MainActor
+struct LibrarySelectionLayoutProbe: UIViewRepresentable {
+    func makeUIView(context: Context) -> LibrarySelectionLayoutProbeView {
+        LibrarySelectionLayoutProbeView(frame: .zero)
+    }
+
+    func updateUIView(_ view: LibrarySelectionLayoutProbeView, context: Context) {}
+}
+
 /// Library-only presentation rules. Download state and destructive actions stay outside this layer.
 @MainActor
 struct LibraryPresentationLayout {

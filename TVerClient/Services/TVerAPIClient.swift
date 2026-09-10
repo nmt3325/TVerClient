@@ -70,6 +70,26 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     /// （クエリにはトークンが載るため意図的に除外されている）、エリアの出し分けはここで持つしかない。
     private let areaCache: TVerAreaResultCache
 
+    /// Per-call provenance, inherited by structured child requests but never
+    /// shared between concurrent screen refreshes.
+    @TaskLocal private static var snapshotTransportState: SnapshotTransportState?
+
+    private actor SnapshotTransportState {
+        private var oldest: Date?
+        private var staleReason: StaleReason?
+
+        func include(storedAt: Date, reason: StaleReason?) {
+            oldest = min(oldest ?? storedAt, storedAt)
+            if staleReason == nil { staleReason = reason }
+        }
+
+        func freshness(fallbackDate: Date) -> LoadFreshness {
+            let timestamp = oldest ?? fallbackDate
+            if let staleReason { return .cached(at: timestamp, reason: staleReason) }
+            return .fresh(at: timestamp)
+        }
+    }
+
     init(
         session: URLSession = TVerNetworking.makeEphemeralSession(),
         responseCache: TVerResponseCache = TVerResponseCache(),
@@ -132,8 +152,11 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     /// それが「いつの」内容なのかを呼び出し側に伝える。
     func fetchScheduleSnapshot(forceRefresh: Bool) async throws -> ScheduleSnapshot {
         do {
-            let days = try await networkSchedule(forceRefresh: forceRefresh)
-            return ScheduleSnapshot(days: days, freshness: .fresh(at: dateProvider()))
+            let trace = SnapshotTransportState()
+            let days = try await Self.$snapshotTransportState.withValue(trace) {
+                try await networkSchedule(forceRefresh: forceRefresh)
+            }
+            return ScheduleSnapshot(days: days, freshness: await trace.freshness(fallbackDate: dateProvider()))
         } catch {
             guard let cached = await cachedScheduleSnapshot(for: error) else { throw error }
             return cached
@@ -311,6 +334,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         let servedWithoutRequest: Bool
         /// The attempt failed and the stale cache answered in its place.
         let usedStaleFallback: Bool
+        let storedAt: Date
     }
 
     private struct TransportFailure: Error {
@@ -342,7 +366,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         if !forceRefresh, let cached, cacheAge(of: cached, at: now) < cacheTTL {
             return TransportResult(
                 data: cached.data, httpStatus: nil, durationMS: 0,
-                servedWithoutRequest: true, usedStaleFallback: false
+                servedWithoutRequest: true, usedStaleFallback: false, storedAt: cached.storedAt
             )
         }
 
@@ -371,7 +395,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 await responseCache.markRevalidated(cached, for: cacheKey, at: now)
                 return TransportResult(
                     data: cached.data, httpStatus: 304, durationMS: duration,
-                    servedWithoutRequest: false, usedStaleFallback: false
+                    servedWithoutRequest: false, usedStaleFallback: false, storedAt: now
                 )
             }
 
@@ -382,7 +406,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 {
                     return TransportResult(
                         data: cached.data, httpStatus: httpResponse.statusCode, durationMS: duration,
-                        servedWithoutRequest: false, usedStaleFallback: true
+                        servedWithoutRequest: false, usedStaleFallback: true, storedAt: cached.storedAt
                     )
                 }
                 throw TransportFailure(
@@ -403,7 +427,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
 
             return TransportResult(
                 data: data, httpStatus: httpResponse.statusCode, durationMS: duration,
-                servedWithoutRequest: false, usedStaleFallback: false
+                servedWithoutRequest: false, usedStaleFallback: false, storedAt: now
             )
         } catch let failure as TransportFailure {
             throw failure
@@ -412,7 +436,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             if allowStaleFallback, let cached, canUseStale(cached, at: now) {
                 return TransportResult(
                     data: cached.data, httpStatus: nil, durationMS: duration,
-                    servedWithoutRequest: false, usedStaleFallback: true
+                    servedWithoutRequest: false, usedStaleFallback: true, storedAt: cached.storedAt
                 )
             }
             let underlying = (error as? TVerClientError) ?? .network(error.localizedDescription)
@@ -467,6 +491,12 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
             useCache: useCache,
             allowStaleFallback: allowStaleFallback
         )
+        if let trace = Self.snapshotTransportState {
+            await trace.include(
+                storedAt: result.storedAt,
+                reason: result.usedStaleFallback ? (result.httpStatus == nil ? .offline : .serverError) : nil
+            )
+        }
         do {
             let outcome = try TVerPayloadDecoder.decode(
                 result.data,
@@ -1023,8 +1053,11 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
     /// 番組表と、その内容をどれだけ信用してよいかを一緒に返す。
     func fetchProgramGuideSnapshot(forceRefresh: Bool) async throws -> GuideChannelsSnapshot {
         do {
-            let channels = try await networkProgramGuide(forceRefresh: forceRefresh)
-            return GuideChannelsSnapshot(channels: channels, freshness: .fresh(at: dateProvider()))
+            let trace = SnapshotTransportState()
+            let channels = try await Self.$snapshotTransportState.withValue(trace) {
+                try await networkProgramGuide(forceRefresh: forceRefresh)
+            }
+            return GuideChannelsSnapshot(channels: channels, freshness: await trace.freshness(fallbackDate: dateProvider()))
         } catch {
             guard let cached = await cachedGuideChannelsSnapshot(for: error) else { throw error }
             return cached
@@ -1039,14 +1072,14 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
         )
         let now = dateProvider()
 
-        return await withTaskGroup(of: (Int, TVerGuideChannel).self) { group in
+        return try await withThrowingTaskGroup(of: (Int, TVerGuideChannel).self) { group in
             for (index, raw) in rawChannels.enumerated() {
                 group.addTask { [self] in
-                    let timeline = ((try? await fetchLiveTimeline(
+                    let timeline = (try await fetchLiveTimeline(
                         channelID: raw.id,
                         credentials: credentials,
                         forceRefresh: forceRefresh
-                    )) ?? []).sorted { $0.startAt < $1.startAt }
+                     )).sorted { $0.startAt < $1.startAt }
                     let current = timeline.first { $0.startAt <= now && now < $0.endAt }
                     return (index, TVerGuideChannel(
                         channel: makeLiveChannel(raw: raw, currentProgram: current),
@@ -1055,7 +1088,7 @@ final class TVerAPIClient: TVerCatalogServicing, TVerLiveServicing, TVerProgramG
                 }
             }
             var guide: [(Int, TVerGuideChannel)] = []
-            for await channel in group {
+            for try await channel in group {
                 guide.append(channel)
             }
             return guide.sorted { $0.0 < $1.0 }.map(\.1)
@@ -1666,10 +1699,20 @@ enum CatchUpMatcher {
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
             let components = calendar.dateComponents([.month, .day], from: broadcastDate)
-            if components.month == day.month, components.day == day.day {
+            // Before 05:00, TV labels may use either the civil date or the
+            // preceding broadcast day (24:00...28:59). Do not reject those
+            // legitimate late-night episodes while excluding older broadcasts.
+            let broadcastComponents = calendar.dateComponents(
+                [.month, .day], from: broadcastDate.addingTimeInterval(-5 * 60 * 60)
+            )
+            let sameCivilDate = components.month == day.month && components.day == day.day
+            let sameBroadcastDate = broadcastComponents.month == day.month && broadcastComponents.day == day.day
+            if sameCivilDate || sameBroadcastDate {
                 total += 0.2
             } else {
-                total -= 0.1
+                // A known different broadcast is not an alternative episode
+                // for this slot, regardless of a high series-title score.
+                return 0
             }
         }
 
@@ -1736,7 +1779,8 @@ extension TVerAPIClient {
         var candidates: [CatchUpEpisodeCandidate] = []
         var seen = Set<String>()
         for keyword in keywords {
-            let found = (try? await searchCatchUpEpisodes(keyword: keyword, credentials: credentials)) ?? []
+            // Transport failure is unknown availability, never confirmed absence.
+            let found = try await searchCatchUpEpisodes(keyword: keyword, credentials: credentials)
             for candidate in found where seen.insert(candidate.id).inserted {
                 candidates.append(candidate)
             }

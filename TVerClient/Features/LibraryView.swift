@@ -156,9 +156,15 @@ struct LibraryView: View {
         var id: String { rawValue }
     }
 
-    init(libraryStore: ProgramLibraryStore, playbackController: PlaybackController) {
+    init(
+        libraryStore: ProgramLibraryStore,
+        playbackController: PlaybackController,
+        initialSelection: Set<LibraryRowID> = []
+    ) {
         self.libraryStore = libraryStore
         self.playbackController = playbackController
+        _selection = State(initialValue: initialSelection)
+        _editMode = State(initialValue: initialSelection.isEmpty ? .inactive : .active)
     }
 
     private var inFlight: [DownloadRecord] {
@@ -264,6 +270,9 @@ struct LibraryView: View {
                 Text("「\(subscription.seriesTitle)」の今後の新着を停止します。保存済み・ダウンロード中の番組は残ります。")
             }
         }
+        // Keep both bottom insets outside NavigationStack so the selection
+        // actions receive the space left above the root mini-player and tabs.
+        .safeAreaInset(edge: .bottom, spacing: 0) { selectionBar }
         .environment(\.editMode, $editMode)
         .onChange(of: category) { _ in finishSelection() }
         .onChange(of: path) { _ in finishSelection() }
@@ -467,16 +476,32 @@ struct LibraryView: View {
             }
             .accessibilityLabel("その他の操作")
         }
-        ToolbarItemGroup(placement: .bottomBar) {
-            if editMode.isEditing {
+    }
+
+    @ViewBuilder
+    private var selectionBar: some View {
+        if editMode.isEditing {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: DS.Spacing.xs))
+                : AnyLayout(HStackLayout(spacing: DS.Spacing.m))
+            layout {
                 Text("\(selectedRows.count)件選択")
                     .monospacedDigit()
-                Spacer()
-                Button(category.selectionKind.confirmLabel, role: .destructive) {
-                    requestSelectionRemoval()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(role: .destructive, action: requestSelectionRemoval) {
+                    Text(category.selectionKind.confirmLabel)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(minWidth: DS.Size.minimumTapTarget, minHeight: DS.Size.minimumTapTarget)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.bordered)
                 .disabled(selectedRows.isEmpty)
+                .accessibilityIdentifier("library.selection-remove")
+                .background(LibrarySelectionLayoutProbe().allowsHitTesting(false))
             }
+            .padding(.horizontal, DS.Spacing.l)
+            .padding(.vertical, DS.Spacing.xs)
+            .background(.bar)
         }
     }
 

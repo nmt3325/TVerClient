@@ -555,6 +555,7 @@ struct ProgramGuideDetailSheet: View {
     @State private var notificationStatus: String?
     @State private var notificationStatusIsError = false
     @State private var isConfirmingCancel = false
+    @State private var notificationReadState = ProgramNotificationDetailReadState()
 
     init(
         selection: ProgramGuideSelection,
@@ -650,7 +651,7 @@ struct ProgramGuideDetailSheet: View {
                         if selection.program.title != selection.program.seriesTitle {
                             Text(selection.program.title).font(.headline).foregroundStyle(.secondary)
                         }
-                        Label("\(GuideBroadcastAxis.fullDayLabel(for: GuideBroadcastAxis.dayStart(containing: selection.program.startAt))) \(GuideBroadcastAxis.timeRangeLabel(for: selection.program))", systemImage: "clock")
+                        Label(GuideBroadcastAxis.dayAndTimeRangeLabel(for: selection.program), systemImage: "clock")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)
@@ -801,12 +802,9 @@ struct ProgramGuideDetailSheet: View {
     }
 
     private var availableLeadTimes: [ProgramNotificationLeadTime] {
-        [
-            .thirtyMinutes,
-            .tenMinutes,
-            .fiveMinutes,
-            .atStart,
-        ].filter { selection.program.startAt.addingTimeInterval(-$0.rawValue) > currentDate }
+        ProgramNotificationLeadTime.choices.filter {
+            selection.program.startAt.addingTimeInterval(-$0.rawValue) > currentDate
+        }
     }
 
     private var notificationControls: some View {
@@ -818,6 +816,7 @@ struct ProgramGuideDetailSheet: View {
             Menu {
                 ForEach(availableLeadTimes, id: \.rawValue) { leadTime in
                     Button {
+                        notificationReadState.selectLeadTime()
                         selectedLeadTime = leadTime
                     } label: {
                         if leadTime == selectedLeadTime {
@@ -838,6 +837,7 @@ struct ProgramGuideDetailSheet: View {
                 .frame(maxWidth: .infinity, minHeight: ProgramGuideMetrics.minimumTapTarget)
             }
             .buttonStyle(.bordered)
+            .disabled(isUpdatingNotification || availableLeadTimes.isEmpty)
             .accessibilityLabel("通知時刻、\(notificationLeadTimeLabel(selectedLeadTime))")
             .accessibilityHint("ダブルタップして通知時刻を選びます")
 
@@ -852,8 +852,15 @@ struct ProgramGuideDetailSheet: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isUpdatingNotification || availableLeadTimes.isEmpty)
+            .disabled(isUpdatingNotification || !availableLeadTimes.contains(selectedLeadTime))
             .accessibilityHint("選択した時刻に、この番組の放送開始を通知します")
+
+            if !availableLeadTimes.contains(selectedLeadTime) {
+                Text("選択した通知時刻を過ぎました。通知時刻を選び直してください。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if isNotificationScheduled {
                 Button(role: .destructive) {
@@ -897,10 +904,21 @@ struct ProgramGuideDetailSheet: View {
 
     /// 予約が実際に残っているかを見て、画面の表示を実態に合わせる。
     private func refreshNotificationState() async {
-        isNotificationScheduled = await notificationScheduler.isScheduled(
-            programID: selection.program.id,
-            channelID: selection.channel.id
+        guard !isUpdatingNotification else { return }
+        let token = notificationReadState.beginRead()
+        let identifier = ProgramNotificationScheduler.identifier(
+            channelID: selection.channel.id, programID: selection.program.id
         )
+        let reservations = await notificationScheduler.reservations()
+        guard !Task.isCancelled, notificationReadState.accepts(token) else { return }
+        let reservation = reservations.first { $0.identifier == identifier }
+        isNotificationScheduled = reservation != nil
+        if notificationReadState.canRestoreLeadTime(token), let reservation,
+           let restored = ProgramNotificationLeadTime.matching(
+               fireDate: reservation.fireDate, programStart: selection.program.startAt
+           ) {
+            selectedLeadTime = restored
+        }
     }
 
     private func notificationLeadTimeLabel(_ leadTime: ProgramNotificationLeadTime) -> String {
@@ -917,6 +935,9 @@ struct ProgramGuideDetailSheet: View {
     }
 
     private func scheduleNotification() {
+        guard !isUpdatingNotification, availableLeadTimes.contains(selectedLeadTime) else { return }
+        let submittedLeadTime = selectedLeadTime
+        notificationReadState.beginMutation()
         isUpdatingNotification = true
         notificationStatus = nil
         Task {
@@ -928,14 +949,16 @@ struct ProgramGuideDetailSheet: View {
                 guard authorization.canSchedule else {
                     throw ProgramNotificationSchedulerError.authorizationDenied
                 }
-                _ = try await notificationScheduler.update(
+                // This is a user's lead-time edit, not invalidation of an obsolete
+                // broadcast schedule. Rejection must preserve the existing request.
+                _ = try await notificationScheduler.schedule(
                     program: selection.program,
                     channel: selection.channel,
-                    leadTime: selectedLeadTime
+                    leadTime: submittedLeadTime
                 )
                 isNotificationScheduled = true
                 notificationStatusIsError = false
-                notificationStatus = "\(notificationLeadTimeLabel(selectedLeadTime))に通知します。"
+                notificationStatus = "\(notificationLeadTimeLabel(submittedLeadTime))に通知します。"
             } catch {
                 // 失敗したのに「予約済み」の表示が残ると嘘になる。実際に残っている
                 // 予約を見直してから、どちらの状態なのかを言葉にして伝える。
@@ -948,7 +971,7 @@ struct ProgramGuideDetailSheet: View {
                 let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 let followUp = stillScheduled
                     ? "これまでの予約はそのまま残っています。"
-                    : "予約は解除されました。"
+                    : "予約は設定されていません。"
                 notificationStatus = reason + followUp
             }
             isUpdatingNotification = false
@@ -957,6 +980,8 @@ struct ProgramGuideDetailSheet: View {
     }
 
     private func cancelNotification() {
+        guard !isUpdatingNotification else { return }
+        notificationReadState.beginMutation()
         isUpdatingNotification = true
         notificationStatus = nil
         Task {
