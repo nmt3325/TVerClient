@@ -281,3 +281,7 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 残り4件は文字列がたまたま一致しているだけで、置き換えません。`LiveView` の「一時停止中」は再生の状態でダウンロードの状態ではなく、`LibraryView` の「確認中」はシリーズ購読の更新中で見逃し配信の確認中ではありません。`Models.swift` と `TVerAPIClient` の「配信中」は契約側の定義とAPI由来の印の一覧です。
 
 同じ走査で上がったもう一件、「縮小時の番組枠が28ptで 44pt を下回る」は不具合ではありません。`ProgramGuideMetrics.minimumHeight(pointsPerMinute:)` のコメントにあるとおり、標準倍率以上では44ptを保ち、縮小時にだけ隣の枠と重ならないよう床値を下げる意図的な例外で、`GuideZoomMetricsTests` が押さえています。
+
+### この回の検証
+
+`f660cee` で、変更に関係するサブセットだけを iPhone 17 / iOS 26.5 のシミュレータで実行しました。`UIRenderingRegressionTests` `AccessibilityCoverageTests` `GuideZoomMetricsTests` の32件が全て成功し、撮影はPNG23枚で変わっていません。文言の差し替え後に `GuideUsabilityRegressionTests` と `LibraryUsabilityRegressionTests` も個別に通しています。全件実行はこの枝では行っていないので、取り込み前に一度全体を回してください。
