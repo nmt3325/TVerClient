@@ -1251,7 +1251,7 @@ struct GuidePlaybackButtonState: Equatable, Sendable {
                 return self
             case .unavailable:
                 return GuidePlaybackButtonState(
-                    title: "見逃し配信なし",
+                    title: Vocabulary.CatchUp.none,
                     systemImage: "play.slash",
                     isEnabled: false,
                     isSearching: false

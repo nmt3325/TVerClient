@@ -32,7 +32,7 @@ struct DownloadConfirmation: Identifiable, Equatable, Sendable {
         var confirmLabel: String {
             switch self {
             case .savedDownloads: return "動画を削除"
-            case .transfers: return "ダウンロードを中止"
+            case .transfers: return Vocabulary.Download.cancel
             case .favorites: return "マイリストから外す"
             case .recents: return "履歴から消す"
             case .subscriptions: return "自動ダウンロードを解除"

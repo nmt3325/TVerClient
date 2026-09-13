@@ -270,3 +270,14 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 - どちらも局名と本文の間に余白が残り、66pt のヘッダ帯からのはみ出しや本文との重なりは観測されませんでした。
 
 未検証：この撮影のfixture局名は「放送局 1」のような短い文字列です。実データのより長い局名が2行になった場合の収まりは確認していません。撮影枚数はこの追加で22枚から23枚になります（過去の実行記録に出てくる22枚はその時点の枚数です）。
+
+### 文言の定義元一本化と、調べて問題なかった点
+
+`Vocabulary` の全語を対象に、画面側で同じ文字列を直書きしていないかを機械的に走査しました。完全一致は6件で、うち2件だけが同じ概念を指していたため参照に置き換えました。
+
+- `ProgramGuideView` の再生ボタン文言「見逃し配信なし」→ `Vocabulary.CatchUp.none`
+- `DownloadConfirmation.SelectionKind.transfers` の確定ラベル「ダウンロードを中止」→ `Vocabulary.Download.cancel`
+
+残り4件は文字列がたまたま一致しているだけで、置き換えません。`LiveView` の「一時停止中」は再生の状態でダウンロードの状態ではなく、`LibraryView` の「確認中」はシリーズ購読の更新中で見逃し配信の確認中ではありません。`Models.swift` と `TVerAPIClient` の「配信中」は契約側の定義とAPI由来の印の一覧です。
+
+同じ走査で上がったもう一件、「縮小時の番組枠が28ptで 44pt を下回る」は不具合ではありません。`ProgramGuideMetrics.minimumHeight(pointsPerMinute:)` のコメントにあるとおり、標準倍率以上では44ptを保ち、縮小時にだけ隣の枠と重ならないよう床値を下げる意図的な例外で、`GuideZoomMetricsTests` が押さえています。
