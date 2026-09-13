@@ -98,6 +98,23 @@ final class UIRenderingRegressionTests: XCTestCase {
             try await record("guide-\(mode.rawValue)-375-light", view: AnyView(view), fixture: fixture, size: phone)
         }
 
+        // The grid only falls back to the list at accessibility sizes, so the
+        // largest non-accessibility size is the worst case the fixed-height
+        // station header actually has to survive.
+        fixture.defaults.set(GuideLayoutMode.grid.rawValue, forKey: "guide.layoutMode")
+        try await record(
+            "guide-grid-375-xxxLarge",
+            view: AnyView(
+                ProgramGuideView(
+                    viewModel: guideModel, playbackController: fixture.player,
+                    libraryStore: fixture.library,
+                    notificationScheduler: ProgramNotificationScheduler(center: UIRenderingNotificationCenter()),
+                    catchUpService: fixture.service
+                )
+            ),
+            fixture: fixture, size: phone, dynamicType: .xxxLarge
+        )
+
         XCTAssertTrue(fixture.downloads.records.isEmpty)
         try await record(
             "library-empty-375-light",
@@ -196,7 +213,7 @@ final class UIRenderingRegressionTests: XCTestCase {
                          fixture: fixture, size: CGSize(width: 640, height: 240), dynamicType: .accessibility5,
                          colorScheme: .dark, verticalSizeClass: .compact, validatesPlayerBounds: true)
         fixture.player.stop()
-        XCTAssertEqual(snapshots.count, 19)
+        XCTAssertEqual(snapshots.count, 20)
 
         // Keep every original initial-position capture. Large text puts the
         // badges below that viewport, so inspect the real list at its bottom too.
@@ -211,7 +228,7 @@ final class UIRenderingRegressionTests: XCTestCase {
         try await record("shared-row-presence-320-accessibility5-scrolled",
                          view: AnyView(sharedComponents), fixture: fixture,
                          size: narrowPhone, dynamicType: .accessibility5, scrollsToBottom: true)
-        XCTAssertEqual(snapshots.count, 22)
+        XCTAssertEqual(snapshots.count, 23)
 
         let data = try JSONEncoder().encode(snapshots)
         try data.write(to: fixture.outputDirectory.appendingPathComponent("ui-rendering-manifest.json"), options: .atomic)

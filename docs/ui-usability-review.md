@@ -260,3 +260,13 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 上部insetが確保されている以上、productionのListはナビゲーション領域の下へ本文を通す通常のiOS動作をしています。撮影PNGで見出しと本文が重なって見えるのは、この「下を通る」状態が、scene未接続・非keyのwindowで撮ったために背景materialの合成を伴わずに写った、という説明と整合します。
 
 ただしこれで実端末の見えを確認したことにはなりません。scene接続済みwindowでの対照撮影も、実機での確認もしていません。以前の記録どおり、scene未接続という観測だけで原因を断定はせず、今回はinset確保という独立した計測を1つ追加した段階です。この項目は引き続き未解決として残します。
+
+### 番組表グリッドの放送局ヘッダ（アクセシビリティ手前で最大の文字サイズ）
+
+`ProgramGuideMetrics.stationHeaderHeight` は 66pt 固定で、`ProgramGuideGrid.stationHeaders` の局名は `.subheadline` の `lineLimit(2)` です。アクセシビリティ文字サイズでは `usesAccessibleList`（`isVoiceOverRunning || dynamicTypeSize.isAccessibilitySize`）でリストへ切り替わるため、格子が実際に耐える必要がある最悪条件は `.xxxLarge` です。確認のため撮影に `guide-grid-375-xxxLarge`（375×812）を追加し、既存の `guide-grid-375-light` と画素で比較しました。
+
+- 局名テキストの縦範囲：通常サイズ y=143–156（14px）、`.xxxLarge` y=141–159（19px）
+- その下の最初の本文行：通常 y=208–221、`.xxxLarge` y=205–225
+- どちらも局名と本文の間に余白が残り、66pt のヘッダ帯からのはみ出しや本文との重なりは観測されませんでした。
+
+未検証：この撮影のfixture局名は「放送局 1」のような短い文字列です。実データのより長い局名が2行になった場合の収まりは確認していません。撮影枚数はこの追加で22枚から23枚になります（過去の実行記録に出てくる22枚はその時点の枚数です）。
