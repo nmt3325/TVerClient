@@ -285,7 +285,7 @@ final class UIRenderingRegressionTests: XCTestCase {
                              scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
             XCTAssertGreaterThan(scrollView.contentOffset.y, initialOffset + 1, "The capture must actually scroll")
             XCTAssertEqual(scrollView.contentOffset.y, bottom, accuracy: 1, "The capture must reach the list bottom")
-            print("UI_REVIEW_SCROLL name=\(name) initial=\(initialOffset) offset=\(scrollView.contentOffset.y) bottom=\(bottom)")
+            print("UI_REVIEW_SCROLL name=\(name) initial=\(initialOffset) offset=\(scrollView.contentOffset.y) bottom=\(bottom) inset=\(scrollView.adjustedContentInset)")
         }
         print("UI_REVIEW_GEOMETRY name=\(name) \(harness.geometryDescription)")
 
@@ -403,7 +403,12 @@ private final class UIRenderingHost {
 
     var geometryDescription: String {
         guard let host, let window else { return "detached" }
-        return "window=\(window.bounds) root=\(host.view.bounds) frame=\(host.view.frame) safe=\(host.view.safeAreaInsets)"
+        // The capture window is deliberately never key. Record whether it is
+        // attached to a UIWindowScene so a reader can tell that the top
+        // navigation chrome in these PNGs is harness geometry, not device
+        // geometry.
+        let sceneState = window.windowScene == nil ? "none" : "attached"
+        return "window=\(window.bounds) root=\(host.view.bounds) frame=\(host.view.frame) safe=\(host.view.safeAreaInsets) windowScene=\(sceneState) key=\(window.isKeyWindow)"
     }
 
     func layout() {

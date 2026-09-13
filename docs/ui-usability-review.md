@@ -244,3 +244,19 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 今回の22 PNGは生成・保全までで、追加の目視承認はしていません。既存の大文字撮影で見えた上部ナビゲーション見出しの重なりは、撮影ホストと実画面の切り分けが未完了です。sceneが接続されていない撮影windowという観測だけで原因を断定しません。
 
 公式ボタンの公開アクセシビリティAPIによる操作テスト案は、URL受信の因果関係・可視範囲・遅延List・same-IDの保持状態に関する独立レビュー指摘があり、この統合のテストには採用していません。別の一時的なcalibrationでは、既知のSwiftUIボタンを置いたscene接続済みkey windowでも公開APIの探索結果が0要素となりました（2メソッド中、診断1失敗・撮影opt-in 1スキップ、コンパイルは成立）。この探索方法の成立が確認できないため、実際の公式ボタン操作の合否判定には進めていません。productionのボタンが不正であるという実測ではなく、診断は原本へ復元し、commit・公開していません。判定ロジックとproduction配線の確認を、実ボタン操作・VoiceOver・指入力の成功と混同しません。保存告知の実画面dismiss、実機PiP・回転、日本の実配信、iOS 16実ランタイムも別途検証が必要です。公開後CIの結果はローカル検証とは別に確認します。
+
+## 2026-09-14 撮影ホストの計測追加（見出しの重なり観測の切り分け）
+
+基準は `3bf2d44`。productionコードは変更していません。`UIRenderingRegressionTests` の記録ログに、撮影windowのscene接続状態・key状態と、位置決めしたscroll viewの `adjustedContentInset` を追加しただけです。`-only-testing:TVerClientTests/UIRenderingRegressionTests` で再撮影し、**TEST SUCCEEDED**・xcodebuild exit 0で 22 PNG を再生成しました（Xcode 26.6／iOS 26.5／iPhone 17 Simulator）。今回は選択実行であり、全体テストは実行していません。
+
+### 計測値
+
+- 22条件すべてで `windowScene=none key=false`。撮影windowはsceneに接続されず、key windowにもなっていません。
+- 22条件すべてで `safe=UIEdgeInsets(top: 54.0, left: 0.0, bottom: 0.0, right: 0.0)`。320×180 や 640×240 の横長canvasでも同じ値です。実機のiPhoneは上下両方にinsetを報告し、横向きでは左右にも出ます。この上部 54pt は撮影ホスト由来であり、実端末の値ではありません。
+- 位置決めした本物のListは上部insetを確保していました。AX3 が `top: 173.67 / bottom: 182.33`、AX5 が `top: 181.0 / bottom: 226.0`。到達offsetはそれぞれ `198.0`、`399.0` で、再計算したbottomと一致します。
+
+### この計測が示す範囲
+
+上部insetが確保されている以上、productionのListはナビゲーション領域の下へ本文を通す通常のiOS動作をしています。撮影PNGで見出しと本文が重なって見えるのは、この「下を通る」状態が、scene未接続・非keyのwindowで撮ったために背景materialの合成を伴わずに写った、という説明と整合します。
+
+ただしこれで実端末の見えを確認したことにはなりません。scene接続済みwindowでの対照撮影も、実機での確認もしていません。以前の記録どおり、scene未接続という観測だけで原因を断定はせず、今回はinset確保という独立した計測を1つ追加した段階です。この項目は引き続き未解決として残します。
