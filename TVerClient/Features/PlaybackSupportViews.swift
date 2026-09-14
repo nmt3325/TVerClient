@@ -18,7 +18,7 @@ struct PlaybackFailureView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button(action: retry) {
-                Label("もう一度試す", systemImage: "arrow.clockwise")
+                Label("再試行", systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
@@ -70,19 +70,48 @@ struct PlaybackVideoSurface: View {
     @ViewBuilder
     private var fullScreenButton: some View {
         if let onEnterFullScreen {
-            Button(action: onEnterFullScreen) {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .background(Color.black.opacity(0.55), in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("全画面")
-            .accessibilityHint("動画を画面いっぱいに表示します")
-            .padding(6)
+            FullScreenToggleButton(action: onEnterFullScreen)
+                .padding(6)
         }
+    }
+}
+
+/// 全画面ボタンの寸法。既定文字サイズでは 15pt のグリフと 44pt の円のまま。
+enum FullScreenControlMetrics {
+    static let glyphBaseSize: CGFloat = 15
+
+    /// グリフが拡大文字で育った分だけ円も広げる。最小タップ領域は下回らない。
+    static func diameter(glyphSize: CGFloat) -> CGFloat {
+        max(
+            DS.Size.minimumTapTarget,
+            DS.Size.minimumTapTarget / glyphBaseSize * glyphSize
+        )
+    }
+}
+
+/// 全画面ボタンだけは字も当たり判定も拡大文字に追従させる。既定サイズの
+/// 見た目は 15pt のグリフと 44pt の円のまま変わらない。
+private struct FullScreenToggleButton: View {
+    let action: () -> Void
+    @ScaledMetric(relativeTo: .subheadline)
+    private var glyphSize: CGFloat = FullScreenControlMetrics.glyphBaseSize
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: glyphSize, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: diameter, height: diameter)
+                .background(Color.black.opacity(0.55), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("全画面")
+        .accessibilityHint("動画を画面いっぱいに表示します")
+    }
+
+    private var diameter: CGFloat {
+        FullScreenControlMetrics.diameter(glyphSize: glyphSize)
     }
 }
 

@@ -114,12 +114,23 @@ struct DiagnosticsView: View {
 
                         ForEach(report.steps) { step in
                             LabeledContent(step.name) {
-                                Text(step.line)
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(step.isOK ? Color.secondary : DS.Palette.warning)
-                                    .multilineTextAlignment(.trailing)
+                                Label {
+                                    Text(step.line)
+                                } icon: {
+                                    Image(systemName: DiagnosticsAccessibilityText.selfCheckStepSymbol(isOK: step.isOK))
+                                }
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(step.isOK ? Color.secondary : DS.Palette.warning)
+                                .multilineTextAlignment(.trailing)
                             }
                             .accessibilityElement(children: .combine)
+                            .accessibilityLabel(
+                                DiagnosticsAccessibilityText.selfCheckStep(
+                                    name: step.name,
+                                    line: step.line,
+                                    isOK: step.isOK
+                                )
+                            )
                         }
                     } else {
                         Text(
@@ -243,7 +254,7 @@ struct DiagnosticsView: View {
                         Label("ログを消去", systemImage: "trash")
                     }
                     .accessibilityLabel("診断ログをすべて消去")
-                    .accessibilityHint("確認してから削除します。消去後は元に戻せません")
+                    .accessibilityHint("確認してから消去します。消去後は元に戻せません")
 
                     if let exportError {
                         Text(exportError)
@@ -333,10 +344,10 @@ struct DiagnosticsView: View {
             }
         }
         .confirmationDialog("診断ログを消去しますか？", isPresented: $showsClearConfirmation) {
-            Button("消去", role: .destructive) { logStore.clear() }
+            Button("消去", role: .destructive) { clearLogs() }
             Button("やめる", role: .cancel) {}
         } message: {
-            Text("記録済みのログとエンドポイントの集計をすべて削除します。元には戻せません。必要なら先に「ログを共有」か「ログを書き出す」で保存してください。")
+            Text("記録済みのログとエンドポイントの集計をすべて消去します。元には戻せません。必要なら先に「ログを共有」か「ログを書き出す」で保存してください。")
         }
     }
 
@@ -346,6 +357,16 @@ struct DiagnosticsView: View {
     private var healthSummaries: [EndpointHealthSummary] { logStore.endpointHealth }
 
     private var recentProblems: [EndpointHealthEvent] { logStore.recentHealthProblems(limit: 20) }
+
+    /// 消去は行が消えるだけで、VoiceOver には何も残らない。通知一覧や番組表と
+    /// 同じように、終わったことを読み上げてから閉じる。
+    private func clearLogs() {
+        logStore.clear()
+        UIAccessibility.post(
+            notification: .announcement,
+            argument: DiagnosticsAccessibilityText.logsCleared
+        )
+    }
 
     private func runSelfCheck() async {
         guard !isSelfChecking else { return }
@@ -427,6 +448,23 @@ private extension EndpointID {
         case .mediaManifest: return "配信マニフェスト"
         }
     }
+}
+
+/// 色や見た目だけに頼らない診断画面の読み上げ文をここに集める。
+enum DiagnosticsAccessibilityText {
+    static func selfCheckStepSymbol(isOK: Bool) -> String {
+        isOK ? "checkmark.circle" : "exclamationmark.triangle"
+    }
+
+    static func selfCheckStepStatus(isOK: Bool) -> String {
+        isOK ? "正常" : "要確認"
+    }
+
+    static func selfCheckStep(name: String, line: String, isOK: Bool) -> String {
+        "\(name)、\(selfCheckStepStatus(isOK: isOK))。\(line)"
+    }
+
+    static let logsCleared = "診断ログを消去しました。"
 }
 
 private extension EndpointOutcome {

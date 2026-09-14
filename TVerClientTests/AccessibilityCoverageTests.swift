@@ -167,6 +167,47 @@ final class AccessibilityCoverageTests: XCTestCase {
             "更新できませんでした"
         )
     }
+
+    /// 診断のセルフチェックは色以外でも成否が分かる。消去の完了も言葉で残す。
+    func testSelfCheckStepStatusIsReadableWithoutColor() {
+        XCTAssertEqual(
+            DiagnosticsAccessibilityText.selfCheckStepSymbol(isOK: false),
+            "exclamationmark.triangle"
+        )
+        XCTAssertEqual(
+            DiagnosticsAccessibilityText.selfCheckStep(
+                name: "番組表API",
+                line: "番組表API: failed (guide)",
+                isOK: false
+            ),
+            "番組表API、要確認。番組表API: failed (guide)"
+        )
+        XCTAssertEqual(DiagnosticsAccessibilityText.logsCleared, "診断ログを消去しました。")
+    }
+
+    /// 全画面ボタンは拡大文字で字も円も育つ。既定サイズでは 44pt の円のまま。
+    func testFullScreenControlGrowsWithLargerTextAndKeepsTheMinimumTarget() {
+        let defaultGlyph = AccessibilityTestSupport.scaledPointSize(
+            textStyle: .subheadline,
+            baseSize: FullScreenControlMetrics.glyphBaseSize,
+            category: .large
+        )
+        let accessibilityGlyph = AccessibilityTestSupport.scaledPointSize(
+            textStyle: .subheadline,
+            baseSize: FullScreenControlMetrics.glyphBaseSize,
+            category: .accessibilityExtraExtraExtraLarge
+        )
+
+        XCTAssertEqual(
+            FullScreenControlMetrics.diameter(glyphSize: defaultGlyph),
+            DS.Size.minimumTapTarget,
+            accuracy: 0.001
+        )
+        XCTAssertGreaterThan(
+            FullScreenControlMetrics.diameter(glyphSize: accessibilityGlyph),
+            DS.Size.minimumTapTarget
+        )
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {
