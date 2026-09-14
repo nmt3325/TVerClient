@@ -328,6 +328,15 @@ final class PlayerFooterLayoutRegressionTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(timeRects[1].minX - timeRects[0].maxX + 0.000_001, DS.Spacing.s,
                                       "Elapsed and remaining times need a readable gap", file: file, line: line)
         }
+        // Merging the failure row into the header left two bare icons behind:
+        // at AX5 the sentence itself has to keep a real box on the surface.
+        if failing, dynamicType == .accessibility5, additionalInsets == .zero {
+            let messageRects = probes.filter { $0.element == .failureMessage }
+                .map { $0.convert($0.bounds, to: root) }
+            XCTAssertTrue(messageRects.count == 1 && messageRects[0].height > 44
+                          && surfaceRect.contains(messageRects[0]),
+                          "AX5 failure text must stay readable: \(messageRects)", file: file, line: line)
+        }
         // Also compare elapsed with remaining, not only text against controls.
         let measuredRects = targetRects + timeRects
         for (index, rect) in measuredRects.enumerated() {
