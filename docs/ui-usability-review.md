@@ -295,3 +295,9 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 - 退行防止: `SeriesSubscriptionStoreTests` の既存 2 テスト（壊れた保存データの復元、最後の購読解除の書き込み失敗）に文言の等価アサーションを足した。エラー文字列を再び連結すると落ちる。
 - 変えなかった点: `errorMessage(_:)` が作る `.failed(message:)` は、サービス側の `TVerClientError` が `LocalizedError` として日本語の文を返すため表示に問題がなく、`SeriesSubscriptionStoreTests` の既存アサーションが文言を固定しているので触っていない。
 - 検証: `-only-testing:` で `SeriesSubscriptionStoreTests` / `LibraryUsabilityRegressionTests` / `OfflineCacheTests` を実行し、`** TEST SUCCEEDED **`（exit 0）。
+
+## 2026-09-14 調べて問題なかった点（失敗文言の横断監査とお知らせ行）
+
+- アプリ全体の「できません / 失敗しました」文言を横断で見た。`DownloadCenter` のお知らせはすべて `recovery` を伴っており、「失敗した事実だけを告げて終わる」文言はなかった（空き容量の測定失敗、オフライン再開、中断した転送などを個別に確認）。この回直したシリーズ購読の 2 文だけが例外だった。
+- `ProgramLibraryStore` の失敗文言は `LibraryUsabilityRegressionTests` / `OfflineCacheTests` が文字列を固定しているため、意図的に変更対象外とした。
+- `LibraryView.noticeRow` の「閉じる」はスワイプとコンテキストメニューの両方に同じラベルで用意されており、VoiceOver でもアクションとして露出する。常設の×ボタンを足す必要はないと判断し、変更していない。
