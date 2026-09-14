@@ -122,6 +122,17 @@ final class AccessibilityCoverageTests: XCTestCase {
 
         XCTAssertEqual(ProgramGuideMetrics.minimumTapTarget, 44)
     }
+
+    /// 継続バナーは見出しをそのまま読み上げる。見出しが空になれば告知は無音に戻る。
+    func testContinuityNoticeHeadlinesStayAnnounceable() {
+        let reasons: [PlaybackContinuityNotice.Reason] = [
+            .interrupted, .interruptionEndedWithoutResume, .audioRouteLost, .playedToEnd,
+        ]
+        for reason in reasons {
+            XCTAssertFalse(PlaybackContinuityNotice(reason: reason).title.isEmpty)
+        }
+        XCTAssertEqual(PlaybackContinuityNotice(reason: .interrupted).title, "再生を一時停止しました")
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {

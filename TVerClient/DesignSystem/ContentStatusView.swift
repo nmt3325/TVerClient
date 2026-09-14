@@ -87,6 +87,7 @@ struct ContentStatusView<Accessory: View>: View {
             case let .loading(message):
                 ProgressView()
                     .controlSize(.large)
+                    .accessibilityLabel(message)
                 Text(message)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

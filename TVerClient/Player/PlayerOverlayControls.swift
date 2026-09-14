@@ -220,6 +220,12 @@ struct PlayerOverlayControls: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
         .padding(chromeInsets)
+        // 帯は黙って現れるので、出たこと自体が VoiceOver に伝わらない。見出しを
+        // そのまま読み上げて、再生が止まった理由に気づけるようにする。
+        .onChange(of: playbackController.continuityNotice) { notice in
+            guard showsContinuityNotice, let notice = notice else { return }
+            UIAccessibility.post(notification: .announcement, argument: notice.title)
+        }
     }
 
     @ViewBuilder
@@ -647,7 +653,7 @@ struct PlayerOverlayControls: View {
                 .font(.caption.weight(.bold))
             Spacer(minLength: 0)
         }
-        .frame(height: DS.Size.minimumTapTarget)
+        .frame(minHeight: DS.Size.minimumTapTarget)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("ライブ配信中")
     }
