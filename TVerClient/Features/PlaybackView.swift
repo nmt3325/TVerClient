@@ -202,7 +202,7 @@ struct PlaybackView: View {
 
             Button { libraryStore.toggleFavorite(program) } label: {
                 Label(
-                    isFavorite ? "お気に入り済み" : "お気に入りに追加",
+                    isFavorite ? "\(Vocabulary.Library.favorites)に追加済み" : "\(Vocabulary.Library.favorites)に追加",
                     systemImage: isFavorite ? "heart.fill" : "heart"
                 )
                 .fixedSize(horizontal: false, vertical: true)
@@ -210,23 +210,23 @@ struct PlaybackView: View {
             }
             .buttonStyle(.bordered)
             .tint(isFavorite ? .red : .accentColor)
-            .accessibilityLabel(isFavorite ? "お気に入りから削除" : "お気に入りに追加")
+            .accessibilityLabel(isFavorite ? "\(Vocabulary.Library.favorites)から外す" : "\(Vocabulary.Library.favorites)に追加")
         }
         .controlSize(.large)
     }
 
     private var downloadStatus: String {
         switch downloadCenter.state(for: program.id) {
-        case .notDownloaded: return "保存するとオフラインでも視聴できます"
-        case .queued: return "ダウンロード待ち"
+        case .notDownloaded: return "\(Vocabulary.Download.action)するとオフラインでも視聴できます"
+        case .queued: return Vocabulary.Download.queued
         case let .downloading(progress):
-            return "ダウンロード中・\(Int((DownloadCenter.clamp(progress) * 100).rounded()))%"
+            return "\(Vocabulary.Download.running)・\(Int((DownloadCenter.clamp(progress) * 100).rounded()))%"
         case .paused:
             return downloadCenter.isInterrupted(program.id)
-                ? "一時停止中・続きから再開できないため、再ダウンロードが必要です"
-                : "一時停止中・右のボタンから再開できます"
-        case .failed: return "保存できませんでした・右のボタンから再試行できます"
-        case .downloaded: return "保存済み・オフラインで視聴できます"
+                ? "\(Vocabulary.Download.paused)・続きから再開できないため、最初からやり直してください"
+                : "\(Vocabulary.Download.paused)・右のボタンから再開できます"
+        case .failed: return "\(Vocabulary.Download.failed)・右のボタンから再試行できます"
+        case .downloaded: return "\(Vocabulary.Download.completed)・オフラインで視聴できます"
         }
     }
 
@@ -252,7 +252,7 @@ struct PlaybackView: View {
                         } else {
                             Image(systemName: isSubscribed ? "arrow.down.circle.fill" : "arrow.down.circle")
                         }
-                        Text(isSubscribed ? "新着の自動ダウンロードを停止" : "新着を自動ダウンロード")
+                        Text(isSubscribed ? "新着の自動ダウンロードを解除" : "新着を自動ダウンロード")
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text(isSubscribed ? "ON" : "OFF")
                             .font(.caption.bold())
@@ -262,16 +262,16 @@ struct PlaybackView: View {
                 .buttonStyle(.bordered)
                 .tint(isSubscribed ? DS.Palette.catchUp : .accentColor)
                 .confirmationDialog(
-                    "新着の自動ダウンロードを停止しますか？",
+                    "新着の自動ダウンロードを解除しますか？",
                     isPresented: $confirmsUnsubscribe,
                     titleVisibility: .visible
                 ) {
-                    Button("自動ダウンロードを停止", role: .destructive) {
+                    Button("自動ダウンロードを解除", role: .destructive) {
                         seriesSubscriptions.unsubscribe(seriesID: seriesID)
                     }
                     Button("キャンセル", role: .cancel) {}
                 } message: {
-                    Text("このシリーズの新着は自動保存されなくなります。保存済み・ダウンロード中の番組は削除されません。")
+                    Text("このシリーズで今後公開される新着は、ダウンロードされなくなります。ダウンロード済みの番組は残ります。")
                 }
                 .accessibilityLabel(
                     "\(program.seriesTitle)の新着自動ダウンロードを\(isSubscribed ? "オフ" : "オン")にする"
