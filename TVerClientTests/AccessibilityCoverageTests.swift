@@ -154,6 +154,19 @@ final class AccessibilityCoverageTests: XCTestCase {
             "オフライン表示中"
         )
     }
+
+    /// 見逃しの鮮度帯も同じ。更新に失敗したときだけ見出しを読み上げ、最新なら黙る。
+    @MainActor
+    func testScheduleRefreshFailureIsAnnouncedWhileTheBannerIsVisible() {
+        let now = AccessibilityTestSupport.date(hour: 12)
+        XCTAssertNil(ScheduleView.freshnessAnnouncementHeadline(for: .fresh(at: now)))
+        XCTAssertEqual(
+            ScheduleView.freshnessAnnouncementHeadline(
+                for: .refreshFailed(lastGoodAt: now, message: "通信が切れました。", recovery: nil)
+            ),
+            "更新できませんでした"
+        )
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {

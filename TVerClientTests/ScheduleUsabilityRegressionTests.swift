@@ -108,6 +108,13 @@ final class ScheduleUsabilityRegressionTests: XCTestCase {
             Vocabulary.Download.paused
         )
         XCTAssertTrue(ScheduleDownloadFeedback.stateText(.failed(message: "通信切断"))?.contains("通信切断") == true)
+        // 失敗の本文は生成元が接頭辞を持つ。表示側で足すと二重になる。
+        XCTAssertEqual(
+            ScheduleDownloadFeedback.stateText(
+                .failed(message: "\(Vocabulary.Download.failed)。通信が切れました。")
+            ),
+            "\(Vocabulary.Download.failed)。通信が切れました。"
+        )
         XCTAssertEqual(
             ScheduleDownloadFeedback.stateText(.downloaded(bytes: 100)),
             Vocabulary.Download.completed
