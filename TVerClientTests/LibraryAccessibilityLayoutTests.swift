@@ -32,6 +32,12 @@ final class LibraryAccessibilityLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testStatusBadgeWrapsInsteadOfTruncatingWhenTheRowIsNarrow() {
+        XCTAssertEqual(MediaBadge.labelLineLimit(for: .xxxLarge), 2)
+        XCTAssertLessThan(MediaBadge.labelMinimumScaleFactor, 1)
+    }
+
+    @MainActor
     func testCountColorIsOpaqueAndLegibleInLightDarkAndIncreasedContrast() {
         for style in [UIUserInterfaceStyle.light, .dark] {
             for contrast in [UIAccessibilityContrast.normal, .high] {

@@ -546,27 +546,32 @@ struct LibraryView: View {
         action: (() -> Void)?,
         dismiss: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-            Label {
+        // アイコンは行頭に一度だけ置き、本文と復旧手順は同じ縦列に積む。
+        // 補足文がアイコンの真下から始まり、別項目に見えるのを防ぐため。
+        HStack(alignment: .firstTextBaseline, spacing: DS.Spacing.s) {
+            Image(systemName: systemImage)
+                .symbolRenderingMode(.hierarchical)
+                .font(.footnote)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
                 Text(message)
+                    .font(.footnote)
                     .fixedSize(horizontal: false, vertical: true)
-            } icon: {
-                Image(systemName: systemImage)
-                    .symbolRenderingMode(.hierarchical)
-            }
-            .font(.footnote)
 
-            if let recovery = recovery {
-                Text(recovery)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                if let recovery = recovery {
+                    Text(recovery)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            if let actionLabel = actionLabel, let action = action {
-                Button(actionLabel, action: action)
-                    .font(.footnote.weight(.semibold))
+                if let actionLabel = actionLabel, let action = action {
+                    Button(actionLabel, action: action)
+                        .font(.footnote.weight(.semibold))
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(action: dismiss) {
