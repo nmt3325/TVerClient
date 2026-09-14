@@ -9,6 +9,16 @@ struct PlayerControlLayout: Equatable {
     let prioritizesFooter: Bool
     let condensesSupportingText: Bool
     let mergesPrimaryIntoHeader: Bool
+    let keepsFailureText: Bool
+    let placesTimeBesideScrubber: Bool
+
+    /// One semantic line already needs about 59pt at AX5. Keeping the failure
+    /// sentence and the labelled retry button on their own row needs the
+    /// header, that line and the single-row footer to fit together.
+    private static let failureTextMinimumHeight: CGFloat = 168
+    /// Moving both clocks under the scrubber costs another 46pt, so it has to
+    /// fit next to the failure row as well before it is worth doing.
+    private static let stackedTimeMinimumHeight: CGFloat = 216
 
     init(availableWidth: CGFloat, availableHeight: CGFloat, isFullScreen: Bool, hasLargeText: Bool = false) {
         prioritizesFooter = availableHeight < 260
@@ -22,6 +32,14 @@ struct PlayerControlLayout: Equatable {
         // Five 44pt utilities plus compact transport and gaps fit in this
         // width. Reuse that row instead of shrinking large time labels.
         mergesPrimaryIntoHeader = isFullScreen && condensesSupportingText && availableWidth >= 480
+        // Merging replaces the failure sentence and the retry label with two
+        // bare icons. At large text keep that row while the height allows it.
+        keepsFailureText = !condensesSupportingText
+            || (hasLargeText && availableHeight >= Self.failureTextMinimumHeight)
+        // Side by side, large clocks meet at the right edge and read as one
+        // string. Put them back under the scrubber when that row still fits.
+        placesTimeBesideScrubber = mergesPrimaryIntoHeader
+            && !(hasLargeText && availableHeight >= Self.stackedTimeMinimumHeight)
     }
 
     var skipDiameter: CGFloat { compactTransport ? 44 : 52 }

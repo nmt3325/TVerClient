@@ -206,6 +206,7 @@ struct PlayerOverlayControls: View {
     private func controlStack(layout: PlayerControlLayout) -> some View {
         let mergesPrimary = layout.mergesPrimaryIntoHeader
             && !(showsContinuityNotice && playbackController.continuityNotice != nil)
+            && !(playbackController.errorPresentation != nil && layout.keepsFailureText)
         return VStack(spacing: 0) {
             topBar(layout: layout, mergesPrimary: mergesPrimary)
                 .accessibilitySortPriority(4)
@@ -234,7 +235,7 @@ struct PlayerOverlayControls: View {
         if showsContinuityNotice, playbackController.continuityNotice != nil {
             continuityBanner.accessibilitySortPriority(3)
         } else if playbackController.errorPresentation != nil {
-            failureRecoveryRow(compact: layout.condensesSupportingText)
+            failureRecoveryRow(compact: layout.condensesSupportingText && !layout.keepsFailureText)
                 .accessibilitySortPriority(3)
         } else {
             transportRow(layout: layout).accessibilitySortPriority(2)
@@ -467,6 +468,7 @@ struct PlayerOverlayControls: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PlayerFooterLayoutProbe(element: .failureMessage).allowsHitTesting(false))
             }
             PlayerIconButton(systemImage: "info.circle", label: "再生エラーの詳細", action: openFailureDetails)
             .background(PlayerControlHitTarget(
@@ -558,7 +560,9 @@ struct PlayerOverlayControls: View {
         // On a wide, short surface the intrinsic time text and the 44pt
         // scrubber must share a row rather than compete for vertical space.
         // AnyLayout retains the same scrubber when native insets change.
-        let placesTimeBesideScrubber = layout.mergesPrimaryIntoHeader
+        // At accessibility sizes that shared row no longer separates the two
+        // clocks, so the layout decides when they belong under the scrubber.
+        let placesTimeBesideScrubber = layout.placesTimeBesideScrubber
         let timelineLayout = placesTimeBesideScrubber
             ? AnyLayout(HStackLayout(spacing: DS.Spacing.s))
             : AnyLayout(VStackLayout(spacing: 2))

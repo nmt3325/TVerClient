@@ -133,6 +133,16 @@ final class AccessibilityCoverageTests: XCTestCase {
         }
         XCTAssertEqual(PlaybackContinuityNotice(reason: .interrupted).title, "再生を一時停止しました")
     }
+
+    /// 全画面の AX5 は、高さが許すときだけ失敗の本文と時間ラベルを別の行に逃がす。
+    func testAccessibilityFullScreenKeepsFailureTextAndSeparatesClocksWhenHeightAllows() {
+        let roomy = PlayerControlLayout(availableWidth: 592, availableHeight: 224, isFullScreen: true, hasLargeText: true)
+        let tight = PlayerControlLayout(availableWidth: 592, availableHeight: 126, isFullScreen: true, hasLargeText: true)
+
+        XCTAssertTrue(roomy.keepsFailureText && !roomy.placesTimeBesideScrubber
+                      && !tight.keepsFailureText && tight.placesTimeBesideScrubber,
+                      "高さのある AX5 だけ本文行と 2 段の時間ラベルに切り替える")
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {
