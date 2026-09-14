@@ -6,6 +6,13 @@ import XCTest
 final class SeriesSubscriptionStoreTests: XCTestCase {
     private let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testDeferredWaitWordingMatchesTheLibraryRow() {
+        var summary = SeriesRefreshSummary()
+        summary.checkedSeriesCount = 1
+        summary.deferredEpisodeCount = 2
+        XCTAssertTrue(summary.message.contains("Wi-Fi待ち・再試行待ち 2件"))
+    }
+
     func testSubscriptionBaselinesThenEnqueuesOnlyOneUnseenIDOnce() async {
         let service = FakeSeriesService()
         await service.enqueue(.success([

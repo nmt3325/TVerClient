@@ -138,7 +138,7 @@ struct SeriesRefreshSummary: Equatable, Sendable {
             parts.append("\(baselinedSeriesCount)シリーズを準備しました")
         }
         if deferredEpisodeCount > 0 {
-            parts.append("Wi-Fi待ち・再試行待ち\(deferredEpisodeCount)件")
+            parts.append("Wi-Fi待ち・再試行待ち \(deferredEpisodeCount)件")
         }
         if expiredEpisodeCount > 0 {
             parts.append("期限切れ\(expiredEpisodeCount)件は開始しませんでした")
