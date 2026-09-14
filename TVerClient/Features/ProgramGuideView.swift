@@ -215,6 +215,9 @@ struct ProgramGuideView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar {
                 ToolbarItem(placement: ToolbarCompat.leading) { layoutModeMenu }
+                if Self.usesCompactNavigationTitle(for: dynamicTypeSize) {
+                    ToolbarItem(placement: .principal) { compactNavigationTitle }
+                }
                 ToolbarItem(placement: ToolbarCompat.trailing) { channelFilterMenu }
                 ToolbarItem(placement: ToolbarCompat.trailing) { moreActionsMenu }
             }
@@ -412,6 +415,22 @@ struct ProgramGuideView: View {
 
     private var layoutMode: GuideLayoutMode {
         GuideLayoutModeResolver.resolve(stored: storedLayoutMode, usesAccessibleList: usesAccessibleList)
+    }
+
+    /// 読み上げ用の大きさでは標準のインラインタイトルが三点リーダだけになるので、
+    /// そのときだけ自前のタイトルに差し替える。既定サイズは標準のまま。
+    static func usesCompactNavigationTitle(for size: DynamicTypeSize) -> Bool {
+        size.isAccessibilitySize
+    }
+
+    /// 幅が足りなければ字を縮めてでも、「番組表」という語を残す。
+    private var compactNavigationTitle: some View {
+        Text("番組表")
+            .font(.headline)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            .accessibilityAddTraits(.isHeader)
     }
 
     /// Density is part of display settings, not two more competing toolbar buttons.

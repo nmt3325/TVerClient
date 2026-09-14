@@ -663,10 +663,25 @@ struct ProgramGuideBlock: View {
         GuideAvailabilityPresentation.badgeKind(isOnAir: isOnAir, availability: availability)
     }
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    /// 既定サイズのうちはバッジを今まで通り右下に重ねる。文字が大きくなると
+    /// 本文が下まで伸びてバッジの下に潜るので、そのときだけ行として高さを確保する。
+    static func reservesBadgeRow(for size: DynamicTypeSize) -> Bool {
+        size > .large
+    }
+
+    /// バッジ行を確保するときは説明文を1行に抑えて、その分の高さを譲る。
+    static func detailLineLimit(height: CGFloat, size: DynamicTypeSize) -> Int {
+        if reservesBadgeRow(for: size) { return 1 }
+        return height >= 112 ? 2 : 1
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let height = proxy.size.height
             let isCompact = height < ProgramGuideMetrics.minimumTapTarget
+            let usesBadgeRow = badgeKind != nil && Self.reservesBadgeRow(for: dynamicTypeSize)
             Button(action: action) {
                 VStack(alignment: .leading, spacing: height < 62 ? 1 : 3) {
                     if !isCompact {
@@ -688,7 +703,12 @@ struct ProgramGuideBlock: View {
                         Text(program.title)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(height >= 112 ? 2 : 1)
+                            .lineLimit(Self.detailLineLimit(height: height, size: dynamicTypeSize))
+                    }
+                    if usesBadgeRow {
+                        Spacer(minLength: 0)
+                        badge(height: height, width: proxy.size.width)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
                 .foregroundStyle(.primary)
@@ -697,7 +717,9 @@ struct ProgramGuideBlock: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(blockBackground)
                 .overlay(alignment: .bottomTrailing) {
-                    badge(height: height, width: proxy.size.width)
+                    if !usesBadgeRow {
+                        badge(height: height, width: proxy.size.width)
+                    }
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
