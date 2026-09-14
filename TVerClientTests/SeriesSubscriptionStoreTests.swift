@@ -670,6 +670,11 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
 
         XCTAssertTrue(store.subscriptions.isEmpty)
         let failure = try XCTUnwrap(store.lastPersistenceFailure)
+        XCTAssertEqual(
+            failure,
+            "シリーズ購読の保存データを読み込めませんでした。購読の一覧はいったん空になります。必要なシリーズをもう一度登録してください。",
+            "内部エラー文字列ではなく、次の操作を案内する文を出す"
+        )
         XCTAssertTrue(LibraryView.shouldShowNotices(
             hasDownloadNotices: false,
             hasDownloadRejection: false,
@@ -695,6 +700,11 @@ final class SeriesSubscriptionStoreTests: XCTestCase {
 
         XCTAssertTrue(store.subscriptions.isEmpty)
         let failure = try XCTUnwrap(store.lastPersistenceFailure)
+        XCTAssertEqual(
+            failure,
+            "シリーズ購読を保存できませんでした。端末の空き容量を確認してから、登録し直してください。",
+            "内部エラー文字列ではなく、次の操作を案内する文を出す"
+        )
         XCTAssertTrue(LibraryView.shouldShowNotices(
             hasDownloadNotices: false,
             hasDownloadRejection: false,

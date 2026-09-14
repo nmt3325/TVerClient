@@ -285,3 +285,13 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 ### この回の検証
 
 `f660cee` で、変更に関係するサブセットだけを iPhone 17 / iOS 26.5 のシミュレータで実行しました。`UIRenderingRegressionTests` `AccessibilityCoverageTests` `GuideZoomMetricsTests` の32件が全て成功し、撮影はPNG23枚で変わっていません。文言の差し替え後に `GuideUsabilityRegressionTests` と `LibraryUsabilityRegressionTests` も個別に通しています。全件実行はこの枝では行っていないので、取り込み前に一度全体を回してください。
+
+## 2026-09-14 直した点: シリーズ購読の保存失敗の通知に内部エラー文字列が出ていた
+
+- 症状: ライブラリの「お知らせ」に出る通知文が、内部エラーの説明をそのまま連結していた（`SeriesSubscriptionStore` の読み込み失敗と保存失敗の 2 箇所）。JSON の復号失敗などでは英語まじりの技術的な文が利用者に見える状態で、`plan.md` の「生の `localizedDescription` を出さない」に反していた。表示経路は `LibraryView` の `library.notice.series-persistence` 行で、実際に画面に出る。
+- 直し方: 2 文を、次にどうすればよいかが分かる文へ置き換えた。
+  - 読み込み失敗: 「シリーズ購読の保存データを読み込めませんでした。購読の一覧はいったん空になります。必要なシリーズをもう一度登録してください。」（実際に購読配列は空になるので、事実と一致させた）
+  - 保存失敗: 「シリーズ購読を保存できませんでした。端末の空き容量を確認してから、登録し直してください。」
+- 退行防止: `SeriesSubscriptionStoreTests` の既存 2 テスト（壊れた保存データの復元、最後の購読解除の書き込み失敗）に文言の等価アサーションを足した。エラー文字列を再び連結すると落ちる。
+- 変えなかった点: `errorMessage(_:)` が作る `.failed(message:)` は、サービス側の `TVerClientError` が `LocalizedError` として日本語の文を返すため表示に問題がなく、`SeriesSubscriptionStoreTests` の既存アサーションが文言を固定しているので触っていない。
+- 検証: `-only-testing:` で `SeriesSubscriptionStoreTests` / `LibraryUsabilityRegressionTests` / `OfflineCacheTests` を実行し、`** TEST SUCCEEDED **`（exit 0）。

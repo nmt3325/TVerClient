@@ -337,7 +337,7 @@ final class SeriesSubscriptionStore: ObservableObject {
             subscriptionGenerations = [:]
             automaticRetryAttemptedGenerations = [:]
             activities = [:]
-            lastPersistenceFailure = "シリーズ購読の保存データを読み込めませんでした。\(error.localizedDescription)"
+            lastPersistenceFailure = "シリーズ購読の保存データを読み込めませんでした。購読の一覧はいったん空になります。必要なシリーズをもう一度登録してください。"
         }
     }
 
@@ -719,7 +719,7 @@ final class SeriesSubscriptionStore: ObservableObject {
             try data.write(to: persistenceURL, options: .atomic)
             lastPersistenceFailure = nil
         } catch {
-            lastPersistenceFailure = "シリーズ購読を保存できませんでした。\(error.localizedDescription)"
+            lastPersistenceFailure = "シリーズ購読を保存できませんでした。端末の空き容量を確認してから、登録し直してください。"
         }
     }
 
