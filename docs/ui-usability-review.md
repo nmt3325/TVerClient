@@ -307,3 +307,42 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 - 直前の修正で通知文が長くなったため、`UIRenderingRegressionTests` に `library-notice-series-375-xxxLarge` を追加した。壊れた `subscriptions.json` を置いて `restore()` を呼び、本番の `LibraryView` を 375x812 / `.xxxLarge` で撮る。
 - スナップショット総数の検証を 23 から 24 に更新した。
 - 検証: `-only-testing:TVerClientTests/UIRenderingRegressionTests` は EXIT=0、`UI_REVIEW_SNAPSHOT file=` が 24 行、`** TEST SUCCEEDED **`。
+
+## 2026-09-14 文言・アクセシビリティ修正（並列レビュー第2回）
+
+撮影と目視QA、静的監査、実装を別セッションに分担して並列実施した回。検証は影響スイートのサブセット実行のみ。
+
+### 文言（W-01〜W-06）
+
+- W-01 マイリスト操作の表示と読み上げを状態基準に統一（PlaybackView.swift:205, :213）。
+- W-02 ダウンロード状態の文言を Vocabulary.Download に統一。一時停止で再開できない場合は「一時停止中・続きから再開できないため、最初からやり直してください」。
+- W-03 ライブラリの空状態タイトルを共有語彙参照に統一（LibraryView.swift:59-62, :385）。
+- W-04 シリーズ自動ダウンロードの「停止」「購読解除」を「解除」「自動ダウンロードを解除」に統一し、確認文を結果ベースの説明に変更（PlaybackView.swift:255, :265, :269 / LibraryView.swift:258, :694）。
+- W-05 中断表示に復旧手順を付記（LibraryView.swift:1124）。
+- W-06 待ち件数の表記を「Wi-Fi待ち・再試行待ち N件」に統一（SeriesSubscriptionStore.swift:141 / LibraryView.swift:724）。
+- コミット: c42586a, 6c2235a
+
+### アクセシビリティ（A-01〜A-06）
+
+- A-01 再生継続バナーの出現を announcement で通知（PlayerOverlayControls.swift）。
+- A-02 ライブ画面のエリア切替失敗と鮮度バナーの出現を announcement で通知（LiveView.swift）。
+- A-03 読み込み中スピナーに accessibilityLabel を付与（ContentStatusView.swift）。描画は不変。
+- A-04 ダウンロード操作の hint がラベルの重複読みになっていたのを結果説明に変更し、Menu への isButton 上書きを撤去（DownloadButton.swift）。
+- A-05 主操作に download.primary の accessibilityIdentifier を付与（DownloadButton.swift）。
+- A-06 ライブ表示ラベルの固定高さを minHeight に変更（PlayerOverlayControls.swift）。
+- コミット: 0f676f4, 443bb28
+
+### 検証
+
+- 影響9スイート一括: Executed 118 tests, 1 test skipped, 0 failures。UIRenderingRegressionTests の24枚分の幾何検証を含む。
+
+### 目視レビューで新規検出（本コミット時点では未修正）
+
+- F-01 AX5 の全画面プレイヤーで失敗文言と再試行ボタンのラベルが消える。
+- F-02 AX5 でシークバーの経過時間と総時間が右端で衝突する。
+- F-03 xxxLarge の番組表グリッドで説明文の上にバッジが重なる。
+- F-04 お知らせ行で復旧手順の左端が本文とずれ、別項目に見える。
+- F-05 xxxLarge でダウンロード状態バッジのラベルが省略される。
+- F-06 320pt と AX5 の組み合わせでツールバー中央ラベルが三点リーダのみになる。
+- F-07 ライブラリ系5枚でナビゲーションタイトルがぼやけた塊になる（原因未特定）。
+- F-08 ライブ画面のナビ右上にグリフのない空のグレー矩形が出る（原因未特定）。
