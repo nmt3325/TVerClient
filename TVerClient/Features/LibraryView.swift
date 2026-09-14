@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Download-first library. Grouped lists for the transfers in flight, the saved
 /// episodes, the kept programmes and the history, plus the notices that must
@@ -270,6 +271,11 @@ struct LibraryView: View {
         .onChange(of: visibleRowIDs) { rows in
             selection = Self.removableSelection(selection, visibleRows: rows, isEditing: editMode.isEditing)
         }
+        .onChange(of: freshnessAnnouncement) { headline in
+            // 帯が出ただけでは VoiceOver は黙ったまま。見出しをその場で読み上げる。
+            guard let headline else { return }
+            UIAccessibility.post(notification: .announcement, argument: headline)
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .settings:
@@ -362,6 +368,18 @@ struct LibraryView: View {
                 retry: { downloadCenter.refreshStorage() }
             )
         }
+    }
+
+    /// 帯として出ている見出し。帯が出ていないときは nil で、読み上げも走らない。
+    static func freshnessAnnouncementHeadline(for freshness: LoadFreshness) -> String? {
+        guard freshness.isDegraded else { return nil }
+        return freshness.headline
+    }
+
+    /// いま実際に出ている鮮度帯の見出し。`freshnessBanner` の表示条件と同じ式にして、
+    /// 帯より先に読み上げだけが走らないようにする。
+    private var freshnessAnnouncement: String? {
+        Self.freshnessAnnouncementHeadline(for: downloadCenter.freshness)
     }
 
     /// 先頭へ戻るための目印。iOS 16 には `.scrollPosition` が無いので、高さ 0 の

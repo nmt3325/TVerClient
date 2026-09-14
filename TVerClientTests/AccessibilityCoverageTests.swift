@@ -142,6 +142,15 @@ final class AccessibilityCoverageTests: XCTestCase {
         XCTAssertTrue(roomy.keepsFailureText && !roomy.placesTimeBesideScrubber
                       && !tight.keepsFailureText && tight.placesTimeBesideScrubber,
                       "高さのある AX5 だけ本文行と 2 段の時間ラベルに切り替える")
+    /// ライブラリの鮮度帯も、出ているときだけ見出しを読み上げる。帯が無ければ無音のまま。
+    @MainActor
+    func testLibraryFreshnessBannerAnnouncesOnlyWhileItIsVisible() {
+        let now = AccessibilityTestSupport.date(hour: 12)
+        XCTAssertNil(LibraryView.freshnessAnnouncementHeadline(for: .fresh(at: now)))
+        XCTAssertEqual(
+            LibraryView.freshnessAnnouncementHeadline(for: .cached(at: now, reason: .offline)),
+            "オフライン表示中"
+        )
     }
 }
 
