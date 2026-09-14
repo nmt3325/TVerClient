@@ -1,5 +1,10 @@
 import SwiftUI
 
+/// 状態別の読み上げ契約をテストから名指しするための識別子。
+enum DownloadAccessibilityIdentifier {
+    static let primary = "download.primary"
+}
+
 /// Single control that drives one episode through the whole download state
 /// machine. Usable from any screen that can reach a `TVerProgram`.
 ///
@@ -165,6 +170,19 @@ struct DownloadButton: View {
             case .savedOptions: return "ダウンロード済みの操作"
             }
         }
+
+        /// 操作名は accessibilityLabel で読み上げ済み。hint は押したあとの結果だけを述べる。
+        var resultHint: String {
+            switch self {
+            case .start: return "オフラインでも視聴できるようになります"
+            case .cancel: return "確認してから順番待ちを取り消します"
+            case .pause: return "あとで続きから再開できます"
+            case .resume: return "続きからダウンロードします"
+            case .restart: return "確認してから最初からやり直します"
+            case .retry: return "最初からダウンロードし直します"
+            case .savedOptions: return "メニューから削除を選ぶと確認が表示されます"
+            }
+        }
     }
 
     /// 進行中の主操作は取り消せる一時停止。データを捨てる中止は確認付きメニューへ。
@@ -200,8 +218,8 @@ struct DownloadButton: View {
             .buttonStyle(.plain)
             .accessibilityLabel("\(title)の\(primaryAction.label)")
             .accessibilityValue(accessibilityValue)
-            .accessibilityHint(state.isFinished ? "メニューから削除を選ぶと確認が表示されます" : primaryAction.label)
-            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(state.isFinished ? "メニューから削除を選ぶと確認が表示されます" : primaryAction.resultHint)
+            .accessibilityIdentifier(DownloadAccessibilityIdentifier.primary)
             .contextMenu { contextActions }
             .confirmationDialog(
                 Text(pendingConfirmation?.title ?? ""),
@@ -259,7 +277,9 @@ struct DownloadButton: View {
             // 完了のチェックマークを押すだけで、削除へ直行させない。
             Menu { contextActions } label: { symbolBox }
         } else {
+            // Menu は自分でボタンのトレイトを持つ。未完了の Button にだけ付け直す。
             Button(action: activate) { symbolBox }
+                .accessibilityAddTraits(.isButton)
         }
     }
 

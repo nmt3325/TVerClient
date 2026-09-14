@@ -1,5 +1,6 @@
 import AVKit
 import SwiftUI
+import UIKit
 
 @MainActor
 final class LiveViewModel: ObservableObject {
@@ -212,6 +213,15 @@ struct LiveView: View {
             guard !areaStore.isSwitchingArea else { return }
             Task { await viewModel.loadIfNeeded(area: newArea) }
         }
+        .onChange(of: areaStore.areaSwitchFailureMessage) { message in
+            // 帯が出ただけでは VoiceOver は黙ったまま。見出しをその場で読み上げる。
+            guard let message else { return }
+            UIAccessibility.post(notification: .announcement, argument: message)
+        }
+        .onChange(of: freshnessAnnouncement) { headline in
+            guard let headline else { return }
+            UIAccessibility.post(notification: .announcement, argument: headline)
+        }
         .onPlayerPresentationRequest(playbackController.presentationRequestToken) {
             // ミニプレイヤーからの戻り。再生中のチャンネルを push し直す。
             guard let channel = playbackController.currentLiveChannel else { return }
@@ -240,6 +250,17 @@ struct LiveView: View {
                 )
             }
         }
+    }
+
+    /// いま実際に出ている鮮度帯の見出し。帯が無いときは nil。
+    ///
+    /// `notices` の表示条件と同じ式にして、帯より先に読み上げだけが走らないようにする。
+    private var freshnessAnnouncement: String? {
+        guard !viewModel.channels.isEmpty,
+              let freshness = viewModel.freshness,
+              freshness.isDegraded
+        else { return nil }
+        return freshness.headline
     }
 
     /// 見た目は `FreshnessBanner` と同じ標準素材に揃える。自前の色地ではなく
