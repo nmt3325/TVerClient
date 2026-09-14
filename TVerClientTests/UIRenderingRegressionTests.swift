@@ -228,7 +228,18 @@ final class UIRenderingRegressionTests: XCTestCase {
         try await record("shared-row-presence-320-accessibility5-scrolled",
                          view: AnyView(sharedComponents), fixture: fixture,
                          size: narrowPhone, dynamicType: .accessibility5, scrollsToBottom: true)
-        XCTAssertEqual(snapshots.count, 23)
+        // 保存失敗の通知文は長い。最大の文字サイズでも折り返して読めることを画で押さえる。
+        try Data("not-json".utf8).write(
+            to: fixture.temporaryDirectory.appendingPathComponent("subscriptions.json")
+        )
+        fixture.subscriptions.restore()
+        XCTAssertNotNil(fixture.subscriptions.lastPersistenceFailure)
+        try await record(
+            "library-notice-series-375-xxxLarge",
+            view: AnyView(LibraryView(libraryStore: fixture.library, playbackController: fixture.player)),
+            fixture: fixture, size: phone, dynamicType: .xxxLarge
+        )
+        XCTAssertEqual(snapshots.count, 24)
 
         let data = try JSONEncoder().encode(snapshots)
         try data.write(to: fixture.outputDirectory.appendingPathComponent("ui-rendering-manifest.json"), options: .atomic)

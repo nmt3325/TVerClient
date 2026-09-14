@@ -301,3 +301,9 @@ TEST_RUNNER_RECORD_UI_SNAPSHOTS=1 xcodebuild \
 - アプリ全体の「できません / 失敗しました」文言を横断で見た。`DownloadCenter` のお知らせはすべて `recovery` を伴っており、「失敗した事実だけを告げて終わる」文言はなかった（空き容量の測定失敗、オフライン再開、中断した転送などを個別に確認）。この回直したシリーズ購読の 2 文だけが例外だった。
 - `ProgramLibraryStore` の失敗文言は `LibraryUsabilityRegressionTests` / `OfflineCacheTests` が文字列を固定しているため、意図的に変更対象外とした。
 - `LibraryView.noticeRow` の「閉じる」はスワイプとコンテキストメニューの両方に同じラベルで用意されており、VoiceOver でもアクションとして露出する。常設の×ボタンを足す必要はないと判断し、変更していない。
+
+## 2026-09-14 追加: シリーズ購読の保存失敗のお知らせを最大文字サイズで撮る
+
+- 直前の修正で通知文が長くなったため、`UIRenderingRegressionTests` に `library-notice-series-375-xxxLarge` を追加した。壊れた `subscriptions.json` を置いて `restore()` を呼び、本番の `LibraryView` を 375x812 / `.xxxLarge` で撮る。
+- スナップショット総数の検証を 23 から 24 に更新した。
+- 検証: `-only-testing:TVerClientTests/UIRenderingRegressionTests` は EXIT=0、`UI_REVIEW_SNAPSHOT file=` が 24 行、`** TEST SUCCEEDED **`。
