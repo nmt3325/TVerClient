@@ -56,10 +56,10 @@ struct LibraryView: View {
 
         var emptyTitle: String {
             switch self {
-            case .saved: return "ダウンロード済みの番組はありません"
-            case .transfers: return "進行中・停止中のダウンロードはありません"
-            case .favorites: return "マイリストは空です"
-            case .recents: return "視聴履歴はありません"
+            case .saved: return "\(Vocabulary.Library.downloads)の番組はありません"
+            case .transfers: return "進行中・停止・失敗の\(Vocabulary.Download.action)はありません"
+            case .favorites: return "\(Vocabulary.Library.favorites)は空です"
+            case .recents: return "\(Vocabulary.Library.history)番組はありません"
             case .subscriptions: return "自動ダウンロードは登録されていません"
             }
         }
@@ -255,13 +255,13 @@ struct LibraryView: View {
                 ),
                 presenting: pendingUnsubscribe
             ) { subscription in
-                Button("購読解除", role: .destructive) {
+                Button("自動ダウンロードを解除", role: .destructive) {
                     seriesSubscriptions.unsubscribe(seriesID: subscription.seriesID)
                     pendingUnsubscribe = nil
                 }
                 Button("やめる", role: .cancel) { pendingUnsubscribe = nil }
             } message: { subscription in
-                Text("「\(subscription.seriesTitle)」の今後の新着を停止します。保存済み・ダウンロード中の番組は残ります。")
+                Text("「\(subscription.seriesTitle)」のこれから追加される新着はダウンロードされなくなります。\(Vocabulary.Library.downloads)の番組とダウンロード中の番組は残ります。")
             }
         }
         .environment(\.editMode, $editMode)
@@ -382,7 +382,7 @@ struct LibraryView: View {
             Section {
                 ContentStatusView(.empty(
                     title: category == .favorites && !libraryStore.favoriteProgramIDs.isEmpty
-                        ? "マイリストの番組情報がありません" : category.emptyTitle,
+                        ? "\(Vocabulary.Library.favorites)の番組情報がありません" : category.emptyTitle,
                     message: category == .favorites && !libraryStore.favoriteProgramIDs.isEmpty
                         ? "\(libraryStore.favoriteProgramIDs.count)件の登録は残っていますが、保存された番組情報が不足しているため一覧を表示できません。番組は「見逃し」や検索から確認できます。"
                         : category.emptyMessage,
@@ -691,14 +691,14 @@ struct LibraryView: View {
         Button(role: .destructive) {
             pendingUnsubscribe = subscription
         } label: {
-            Label("購読解除", systemImage: "bell.slash")
+            Label("自動ダウンロードを解除", systemImage: "bell.slash")
         }
     }
 
     private func seriesSubscriptionRow(_ subscription: SeriesSubscription) -> some View {
         let detail = seriesSubscriptionDetail(subscription)
         let waiting: Text? = subscription.deferredCount > 0
-            ? Text("待ち \(subscription.deferredCount)")
+            ? Text("待ち \(subscription.deferredCount)件")
             : nil
         return VStack(alignment: .leading, spacing: DS.Spacing.xxs) {
             Text(subscription.seriesTitle)
@@ -1121,7 +1121,7 @@ struct LibraryView: View {
             guard downloadCenter.isInterrupted(program.id) else {
                 return "\(Vocabulary.Download.paused) \(percent(progress))・再開できます"
             }
-            return "中断 \(percent(progress))・最初からやり直してください"
+            return "\(Vocabulary.Download.paused) \(percent(progress))・続きから再開できません。最初からやり直してください"
         case let .failed(message):
             return "失敗: \(message)・再試行は最初からになります"
         case let .downloaded(bytes):

@@ -417,6 +417,12 @@ final class LibraryUsabilityRegressionTests: XCTestCase {
     }
 
     @MainActor
+    func testEmptyTitlesReuseSharedVocabularyAndNameFailedTransfers() {
+        XCTAssertTrue(LibraryView.Category.recents.emptyTitle.contains(Vocabulary.Library.history))
+        XCTAssertTrue(LibraryView.Category.transfers.emptyTitle.contains("失敗"))
+    }
+
+    @MainActor
     func testSameProgramInSavedFavoritesAndHistoryHasIndependentSelection() {
         typealias Row = LibraryView.LibraryRowID
         let rows: Set<Row> = [.saved("episode"), .favorite("episode"), .recent("episode")]
