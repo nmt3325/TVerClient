@@ -133,6 +133,17 @@ final class AccessibilityCoverageTests: XCTestCase {
         }
         XCTAssertEqual(PlaybackContinuityNotice(reason: .interrupted).title, "再生を一時停止しました")
     }
+
+    /// ライブラリの鮮度帯も、出ているときだけ見出しを読み上げる。帯が無ければ無音のまま。
+    @MainActor
+    func testLibraryFreshnessBannerAnnouncesOnlyWhileItIsVisible() {
+        let now = AccessibilityTestSupport.date(hour: 12)
+        XCTAssertNil(LibraryView.freshnessAnnouncementHeadline(for: .fresh(at: now)))
+        XCTAssertEqual(
+            LibraryView.freshnessAnnouncementHeadline(for: .cached(at: now, reason: .offline)),
+            "オフライン表示中"
+        )
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {
