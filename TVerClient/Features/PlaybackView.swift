@@ -269,7 +269,7 @@ struct PlaybackView: View {
                     Button("自動ダウンロードを解除", role: .destructive) {
                         seriesSubscriptions.unsubscribe(seriesID: seriesID)
                     }
-                    Button("キャンセル", role: .cancel) {}
+                    Button("やめる", role: .cancel) {}
                 } message: {
                     Text("このシリーズで今後公開される新着は、ダウンロードされなくなります。ダウンロード済みの番組は残ります。")
                 }

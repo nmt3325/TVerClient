@@ -114,8 +114,8 @@ struct ProgramNotificationListView: View {
                     } label: {
                         Image(systemName: "bell.slash")
                             .frame(
-                                width: ProgramGuideMetrics.minimumTapTarget,
-                                height: ProgramGuideMetrics.minimumTapTarget
+                                minWidth: ProgramGuideMetrics.minimumTapTarget,
+                                minHeight: ProgramGuideMetrics.minimumTapTarget
                             )
                     }
                     .disabled(model.reservations.isEmpty)
@@ -225,8 +225,8 @@ struct ProgramNotificationListView: View {
             } label: {
                 Image(systemName: "bell.slash")
                     .frame(
-                        width: ProgramGuideMetrics.minimumTapTarget,
-                        height: ProgramGuideMetrics.minimumTapTarget
+                        minWidth: ProgramGuideMetrics.minimumTapTarget,
+                        minHeight: ProgramGuideMetrics.minimumTapTarget
                     )
             }
             .buttonStyle(.borderless)

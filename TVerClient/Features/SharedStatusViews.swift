@@ -26,5 +26,5 @@ struct StatusFailure: Equatable, Sendable {
 }
 
 #Preview("読み込み中") {
-    ContentStatusView(.loading("最新の配信情報を取得しています。"))
+    ContentStatusView(.loading("最新の配信情報を取得中"))
 }

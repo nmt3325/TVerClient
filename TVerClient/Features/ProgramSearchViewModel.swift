@@ -286,7 +286,7 @@ struct ProgramSearchStatusView: View {
     var body: some View {
         switch viewModel.status {
         case .searching:
-            ContentStatusView(.loading("番組を検索しています"))
+            ContentStatusView(.loading("番組を検索中"))
         case .empty:
             ContentStatusView(
                 .empty(

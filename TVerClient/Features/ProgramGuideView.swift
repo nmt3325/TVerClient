@@ -935,6 +935,22 @@ struct ProgramGuideDetailSheet: View {
         }
     }
 
+    /// 想定外の `Error` をそのまま出すと、英語の技術的な文面だけが残って次の
+    /// 一手が分からない。他の画面と同じ語彙で、復旧手順まで書いた固定文にする。
+    static let unexpectedNotificationFailureMessage =
+        "通知を設定できませんでした。少し時間をおいて、もう一度お試しください。"
+
+    /// 通知の失敗表示。自前の説明を持つ `LocalizedError` はそのまま使い、
+    /// それ以外は固定文に置き換えたうえで、予約が残っているかどうかを書き足す。
+    static func notificationFailureMessage(for error: Error, stillScheduled: Bool) -> String {
+        let reason = (error as? LocalizedError)?.errorDescription
+            ?? unexpectedNotificationFailureMessage
+        let followUp = stillScheduled
+            ? "これまでの予約はそのまま残っています。"
+            : "予約は解除されました。"
+        return reason + followUp
+    }
+
     private func scheduleNotification() {
         isUpdatingNotification = true
         notificationStatus = nil
@@ -964,11 +980,10 @@ struct ProgramGuideDetailSheet: View {
                 )
                 isNotificationScheduled = stillScheduled
                 notificationStatusIsError = true
-                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                let followUp = stillScheduled
-                    ? "これまでの予約はそのまま残っています。"
-                    : "予約は解除されました。"
-                notificationStatus = reason + followUp
+                notificationStatus = Self.notificationFailureMessage(
+                    for: error,
+                    stillScheduled: stillScheduled
+                )
             }
             isUpdatingNotification = false
             UIAccessibility.post(notification: .announcement, argument: notificationStatus)

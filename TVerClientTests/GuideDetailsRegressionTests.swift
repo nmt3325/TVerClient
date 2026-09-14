@@ -619,6 +619,25 @@ final class GuideDetailsRegressionTests: XCTestCase {
         let fulfilled = await condition()
         XCTAssertTrue(fulfilled, message)
     }
+
+    /// 想定外の失敗でも、生の localizedDescription ではなく次の一手まで書いた文を出す。
+    func testUnexpectedNotificationFailureExplainsRecoveryInsteadOfRawError() {
+        struct OpaqueNotificationFailure: Error {}
+        XCTAssertEqual(
+            ProgramGuideDetailSheet.notificationFailureMessage(
+                for: OpaqueNotificationFailure(),
+                stillScheduled: false
+            ),
+            "通知を設定できませんでした。少し時間をおいて、もう一度お試しください。予約は解除されました。"
+        )
+        XCTAssertEqual(
+            ProgramGuideDetailSheet.notificationFailureMessage(
+                for: ProgramNotificationSchedulerError.authorizationDenied,
+                stillScheduled: true
+            ),
+            "通知が許可されていません。設定アプリから通知を有効にしてください。これまでの予約はそのまま残っています。"
+        )
+    }
 }
 
 private enum GuideRecoveryEntrance: CaseIterable {

@@ -334,7 +334,7 @@ struct DiagnosticsView: View {
         }
         .confirmationDialog("診断ログを消去しますか？", isPresented: $showsClearConfirmation) {
             Button("消去", role: .destructive) { logStore.clear() }
-            Button("キャンセル", role: .cancel) {}
+            Button("やめる", role: .cancel) {}
         } message: {
             Text("記録済みのログとエンドポイントの集計をすべて削除します。元には戻せません。必要なら先に「ログを共有」か「ログを書き出す」で保存してください。")
         }
