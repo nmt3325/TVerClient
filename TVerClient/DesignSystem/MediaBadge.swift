@@ -66,6 +66,14 @@ struct MediaBadge: View, Equatable, Hashable {
 
     var label: String { text ?? kind.defaultText }
 
+    /// 語彙は固定なので、幅が足りないときも状態名を削らず折り返して見せる。
+    static func labelLineLimit(for size: DynamicTypeSize) -> Int? {
+        size.isAccessibilitySize ? nil : 2
+    }
+
+    /// 折り返しても収まらないときの逃げ道。読めなくなるほどは縮めない。
+    static let labelMinimumScaleFactor: CGFloat = 0.8
+
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
@@ -76,7 +84,12 @@ struct MediaBadge: View, Equatable, Hashable {
             Text(label)
                 // Status tint identifies the badge; small text needs opaque semantic contrast.
                 .foregroundStyle(Color(uiColor: .label))
-                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                // 右側の固定幅（操作ボタンとシェブロン）に押されても状態名を途中で切らない。
+                // 1行で足りなければ折り返し、それでも足りなければ少しだけ縮める。
+                .lineLimit(Self.labelLineLimit(for: dynamicTypeSize))
+                .minimumScaleFactor(Self.labelMinimumScaleFactor)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .font(DS.Typography.badge)
         .padding(.horizontal, DS.Spacing.s)
