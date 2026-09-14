@@ -2,6 +2,7 @@ import AVKit
 import Foundation
 import Combine
 import SwiftUI
+import UIKit
 
 @MainActor
 final class ScheduleViewModel: ObservableObject {
@@ -356,6 +357,11 @@ struct ScheduleView: View {
         .onChange(of: libraryStore.favoriteProgramIDs) { _ in
             refreshSearchIndex()
         }
+        .onChange(of: freshnessAnnouncement) { headline in
+            // 帯が出ただけでは VoiceOver は黙ったまま。見出しをその場で読み上げる。
+            guard let headline else { return }
+            UIAccessibility.post(notification: .announcement, argument: headline)
+        }
         .onChange(of: path) { newPath in
             // 行のタップは NavigationLink が受けるので、記録はここで取る。
             guard !newPath.isEmpty else { return }
@@ -428,7 +434,7 @@ struct ScheduleView: View {
     @ViewBuilder
     private var content: some View {
         if viewModel.showsInitialLoading {
-            ContentStatusView(.loading("最新の配信情報を取得しています。"))
+            ContentStatusView(.loading("最新の配信情報を読み込み中"))
         } else if let failure = viewModel.failure, !viewModel.hasPrograms {
             ContentStatusView(
                 .recoverableFailure(
@@ -504,6 +510,18 @@ struct ScheduleView: View {
         }
     }
 
+    /// 帯として出ている見出し。帯が出ていないときは nil で、読み上げも走らない。
+    static func freshnessAnnouncementHeadline(for freshness: LoadFreshness) -> String? {
+        guard freshness.isDegraded else { return nil }
+        return freshness.headline
+    }
+
+    /// いま実際に出ている鮮度帯の見出し。`FreshnessBanner` の表示条件と同じ式にして、
+    /// 帯より先に読み上げだけが走らないようにする。
+    private var freshnessAnnouncement: String? {
+        Self.freshnessAnnouncementHeadline(for: viewModel.freshness)
+    }
+
     /// 先頭へ戻すときの目印は、いちばん上に出ているセクションに付ける。
     private func dayAnchorID(for day: ProgramDay) -> String {
         let isTop = day.date == populatedDays.first?.date
@@ -551,6 +569,8 @@ struct ScheduleView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(searchViewModel.accessibilitySummary)
         .accessibilityValue(searchViewModel.isFiltering ? "検索中" : searchViewModel.appliedSortOrder.scheduleLabel)
+        // 見出しローターで飛べるようにする。描画は変わらない。
+        .accessibilityAddTraits(.isHeader)
     }
 
     private func programRow(_ program: TVerProgram) -> some View {
@@ -776,6 +796,9 @@ struct ScheduleView: View {
                 Text(subtitle)
             }
         }
+        // 日付と本数を 1 つの見出し要素にまとめて、見出しローターで飛べるようにする。
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
     private var favoritesOnly: Binding<Bool> {
@@ -927,7 +950,9 @@ enum ScheduleDownloadFeedback {
             let percent = Int((DownloadCenter.clamp(progress) * 100).rounded())
             return "\(Vocabulary.Download.running) \(percent)%"
         case .paused: return Vocabulary.Download.paused
-        case let .failed(message): return "\(Vocabulary.Download.failed)。\(message)"
+        // message は DownloadFailureText が「ダウンロードに失敗しました。」から始める。
+        // 表示側でもう一度接頭辞を付けると、同じ一文が二重になる。
+        case let .failed(message): return message
         case .downloaded: return Vocabulary.Download.completed
         }
     }
