@@ -167,6 +167,27 @@ final class AccessibilityCoverageTests: XCTestCase {
             "更新できませんでした"
         )
     }
+
+    /// 破壊的操作は行が消えて終わるので、完了そのものを読み上げる。
+    @MainActor
+    func testDestructiveLibraryActionsAnnounceTheirCompletion() {
+        XCTAssertEqual(
+            LibraryView.destructiveCompletionAnnouncement(
+                for: DownloadConfirmation(target: .recent, subject: "ドキュメント72")
+            ),
+            "「ドキュメント72」を\(Vocabulary.Library.history)から消しました。"
+        )
+        XCTAssertEqual(
+            LibraryView.destructiveCompletionAnnouncement(
+                for: DownloadConfirmation(target: .selection, subject: "3件", selectionKind: .subscriptions)
+            ),
+            "選んだ3件の自動ダウンロードを解除しました。"
+        )
+        XCTAssertEqual(
+            LibraryView.unsubscribeCompletionAnnouncement(for: "朝のニュース"),
+            "「朝のニュース」の自動ダウンロードを解除しました。"
+        )
+    }
 }
 
 private actor SequencedGuideService: TVerProgramGuideServicing {

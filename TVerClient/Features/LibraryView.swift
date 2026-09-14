@@ -241,6 +241,11 @@ struct LibraryView: View {
                 ) {
                     action.perform()
                     pendingAction = nil
+                    // 行が消えるだけでは VoiceOver は黙ったまま。完了をその場で読み上げる。
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: Self.destructiveCompletionAnnouncement(for: action.confirmation)
+                    )
                 }
                 Button("やめる", role: .cancel) { pendingAction = nil }
             } message: { action in
@@ -259,6 +264,10 @@ struct LibraryView: View {
                 Button("自動ダウンロードを解除", role: .destructive) {
                     seriesSubscriptions.unsubscribe(seriesID: subscription.seriesID)
                     pendingUnsubscribe = nil
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: Self.unsubscribeCompletionAnnouncement(for: subscription.seriesTitle)
+                    )
                 }
                 Button("やめる", role: .cancel) { pendingUnsubscribe = nil }
             } message: { subscription in
@@ -374,6 +383,41 @@ struct LibraryView: View {
     static func freshnessAnnouncementHeadline(for freshness: LoadFreshness) -> String? {
         guard freshness.isDegraded else { return nil }
         return freshness.headline
+    }
+
+    /// 破壊的操作の完了を伝える一文。確認を押すと行はすぐ消えるので、これを
+    /// 読み上げないと VoiceOver では何が起きたのか分からないまま画面が変わる。
+    static func destructiveCompletionAnnouncement(for confirmation: DownloadConfirmation) -> String {
+        switch confirmation.target {
+        case .savedDownload:
+            return "「\(confirmation.subject)」を削除しました。"
+        case .runningDownload:
+            return "「\(confirmation.subject)」の\(Vocabulary.Download.action)を中止しました。"
+        case .restartDownload:
+            return "「\(confirmation.subject)」を最初からやり直します。"
+        case .favorite:
+            return "「\(confirmation.subject)」を\(Vocabulary.Library.favorites)から外しました。"
+        case .allFavorites:
+            return "\(Vocabulary.Library.favorites)をすべて外しました。"
+        case .recent:
+            return "「\(confirmation.subject)」を\(Vocabulary.Library.history)から消しました。"
+        case .allRecents:
+            return "\(Vocabulary.Library.history)をすべて消しました。"
+        case .selection:
+            switch confirmation.selectionKind {
+            case .savedDownloads: return "選んだ\(confirmation.subject)の動画を削除しました。"
+            case .transfers: return "選んだ\(confirmation.subject)の\(Vocabulary.Download.action)を中止しました。"
+            case .favorites: return "選んだ\(confirmation.subject)を\(Vocabulary.Library.favorites)から外しました。"
+            case .recents: return "選んだ\(confirmation.subject)を\(Vocabulary.Library.history)から消しました。"
+            case .subscriptions: return "選んだ\(confirmation.subject)の自動ダウンロードを解除しました。"
+            case nil: return "選んだ\(confirmation.subject)を削除しました。"
+            }
+        }
+    }
+
+    /// 自動ダウンロードの解除も同じ。押した直後に行が消えるので、完了を言葉にする。
+    static func unsubscribeCompletionAnnouncement(for seriesTitle: String) -> String {
+        "「\(seriesTitle)」の自動ダウンロードを解除しました。"
     }
 
     /// いま実際に出ている鮮度帯の見出し。`freshnessBanner` の表示条件と同じ式にして、
@@ -705,7 +749,7 @@ struct LibraryView: View {
         parts.append(
             "公開時刻を確認できる、購読開始後の新着だけを自動保存します。"
                 + "公開時刻が不明な話は保存しません。"
-                + "購読解除しても、保存済み・ダウンロード中の番組は残ります。"
+                + "購読を解除しても、保存済み・ダウンロード中の番組は残ります。"
         )
         return parts.joined(separator: "\n")
     }

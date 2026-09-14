@@ -460,7 +460,10 @@ private final class UIRenderingHost {
 
 @MainActor
 private final class UIRenderingFixture {
-    let now = Date()
+    /// 撮影を時刻でゆらがせない。前回の PNG と md5 で比べられるよう、文言と
+    /// 配置に効く「いま」を固定する。
+    static let fixedNow = Date(timeIntervalSince1970: 1_789_387_200) // 2026-09-14T12:00:00Z
+    let now = UIRenderingFixture.fixedNow
     let suiteName: String
     let defaults: UserDefaults
     let temporaryDirectory: URL
@@ -491,7 +494,7 @@ private final class UIRenderingFixture {
         // Only the fake download driver receives this file. It is not a playable
         // media fixture and must never be handed to an AVURLAsset.
         try Data(repeating: 0x41, count: 8_192).write(to: asset)
-        let catalog = UIRenderingService(now: Date())
+        let catalog = UIRenderingService(now: UIRenderingFixture.fixedNow)
         let fakeDriver = UIRenderingDownloadDriver()
         let oldProvider = OfflineAssetRegistry.provider
         let center = DownloadCenter(

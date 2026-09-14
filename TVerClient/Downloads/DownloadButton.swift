@@ -17,6 +17,9 @@ struct DownloadButton: View {
     let program: TVerProgram
 
     @EnvironmentObject private var downloadCenter: DownloadCenter
+    /// 進捗リングだけ 28pt 固定だと、中の記号と線だけが拡大して枠からはみ出す。
+    /// 既定サイズでは 28pt のまま、文字設定に合わせて枠ごと大きくする。
+    @ScaledMetric(relativeTo: .body) private var progressRingDiameter: CGFloat = DS.Size.compactIcon
     @State private var pendingConfirmation: DownloadConfirmation?
     @State private var queuedFailure: RequestFailure?
     @State private var presentedFailure: RequestFailure?
@@ -412,7 +415,7 @@ struct DownloadButton: View {
                     .font(.caption2)
                     .foregroundStyle(DS.Palette.catchUp)
             }
-            .frame(width: DS.Size.compactIcon, height: DS.Size.compactIcon)
+            .frame(width: progressRingDiameter, height: progressRingDiameter)
         case .paused:
             Image(systemName: isInterrupted ? "arrow.clockwise.circle" : "play.circle")
                 .font(.title2)

@@ -434,7 +434,7 @@ struct ScheduleView: View {
     @ViewBuilder
     private var content: some View {
         if viewModel.showsInitialLoading {
-            ContentStatusView(.loading("最新の配信情報を読み込み中"))
+            ContentStatusView(.loading("最新の配信情報を取得中"))
         } else if let failure = viewModel.failure, !viewModel.hasPrograms {
             ContentStatusView(
                 .recoverableFailure(
