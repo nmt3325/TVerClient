@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 import XCTest
 @testable import TVerClient
 
@@ -220,6 +221,16 @@ final class GuideUsabilityRegressionTests: XCTestCase {
         let dotRightEdge = GuideCanvasVisualLayout.nowDotOffsetX + GuideCanvasVisualLayout.nowDotDiameter
         XCTAssertLessThanOrEqual(dotRightEdge, first.minX)
         XCTAssertEqual(GuideCanvasVisualLayout.nowDotDiameter, 7)
+    }
+
+    func testLargeTextReservesABadgeRowInsteadOfCoveringTheDescription() {
+        XCTAssertFalse(ProgramGuideBlock.reservesBadgeRow(for: .large))
+        XCTAssertEqual(ProgramGuideBlock.detailLineLimit(height: 120, size: .xxxLarge), 1)
+    }
+
+    func testAccessibilityTextSizesReplaceTheTruncatingNavigationTitle() {
+        XCTAssertFalse(ProgramGuideView.usesCompactNavigationTitle(for: .large))
+        XCTAssertTrue(ProgramGuideView.usesCompactNavigationTitle(for: .accessibility5))
     }
 
     private func station(_ id: String, name: String) -> TVerLiveChannel {
